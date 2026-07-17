@@ -1,0 +1,11 @@
+# Keel — minimal dependency set (handoff §3).
+# Phase 0 (scaffold + synth) is stdlib-only; these are needed Phase 1+.
+openai>=1.40.0
+scikit-learn>=1.5.0
+numpy>=1.26.0
+python-dotenv>=1.0.0
+pytest>=8.0.0
+
+# Optional — only if you build the live-Python dashboard variant instead of
+# the static dashboard/index.html fed by dashboard/export.py.
+# streamlit>=1.37.0

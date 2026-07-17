@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Keel — Unit Economics Calculator</title>
+<style>
+  :root{
+    color-scheme: light;
+    --page:#f9f9f7; --surface-1:#fcfcfb; --surface-2:#f2f1ec;
+    --text-primary:#0b0b0b; --text-secondary:#52514e; --muted:#898781;
+    --grid:#e1e0d9; --border:rgba(11,11,11,0.10);
+    --series-1:#2a78d6; --series-2:#008300; --series-4:#eda100; --series-6:#eb6834;
+    --track:#e4eefb; --good:#006300; --critical:#d03b3b;
+  }
+  :root[data-theme="dark"]{
+    color-scheme: dark;
+    --page:#0d0d0d; --surface-1:#1a1a19; --surface-2:#222220;
+    --text-primary:#ffffff; --text-secondary:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --border:rgba(255,255,255,0.10);
+    --series-1:#3987e5; --series-2:#008300; --series-4:#c98500; --series-6:#d95926;
+    --track:#16283f; --good:#0ca30c; --critical:#d03b3b;
+  }
+  @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+    color-scheme: dark;
+    --page:#0d0d0d; --surface-1:#1a1a19; --surface-2:#222220;
+    --text-primary:#ffffff; --text-secondary:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --border:rgba(255,255,255,0.10);
+    --series-1:#3987e5; --series-2:#008300; --series-4:#c98500; --series-6:#d95926;
+    --track:#16283f; --good:#0ca30c; --critical:#d03b3b;
+  }}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--page);color:var(--text-primary);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.45}
+  .wrap{max-width:1120px;margin:0 auto;padding:24px 20px 64px}
+  header.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:6px}
+  h1{font-size:20px;margin:0 0 2px} .sub{color:var(--text-secondary);font-size:13px;margin:0 0 20px}
+  .toggle{border:1px solid var(--border);background:var(--surface-1);color:var(--text-secondary);border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer}
+  .cols{display:grid;grid-template-columns:340px 1fr;gap:20px}
+  @media(max-width:840px){.cols{grid-template-columns:1fr}}
+  .card{background:var(--surface-1);border:1px solid var(--border);border-radius:14px;padding:16px 16px 14px}
+  .card h2{font-size:13px;margin:0 0 14px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-secondary)}
+  .lever{margin-bottom:15px}
+  .lever .lab{display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px}
+  .lever .lab .v{font-weight:600;font-variant-numeric:tabular-nums}
+  input[type=range]{width:100%;accent-color:var(--series-1);height:20px}
+  details{margin-top:8px;border-top:1px solid var(--border);padding-top:10px}
+  summary{font-size:12.5px;color:var(--text-secondary);cursor:pointer;margin-bottom:8px}
+  .agrid{display:grid;grid-template-columns:1fr 1fr;gap:8px 10px}
+  .agrid label{font-size:11.5px;color:var(--text-secondary);display:flex;flex-direction:column;gap:3px}
+  .agrid input{background:var(--surface-2);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);
+    padding:5px 7px;font-size:12.5px;font-variant-numeric:tabular-nums;width:100%}
+  .kpis{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
+  .tile{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;padding:14px}
+  .tile .lbl{color:var(--text-secondary);font-size:12px;margin-bottom:6px}
+  .tile .val{font-weight:600;font-size:27px;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+  .tile .note{font-size:11.5px;color:var(--muted);margin-top:4px}
+  .barwrap{margin:6px 0 4px}
+  .bar{display:flex;height:34px;border-radius:8px;overflow:hidden;gap:2px;background:var(--track)}
+  .seg{height:100%;min-width:2px}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:12px;color:var(--text-secondary)}
+  .legend .k{display:flex;align-items:center;gap:6px}
+  .legend .dot{width:10px;height:10px;border-radius:3px}
+  .legend .k .n{color:var(--text-primary);font-weight:600;font-variant-numeric:tabular-nums}
+  .callout{background:var(--surface-2);border-radius:10px;padding:12px 14px;font-size:13px;margin-top:14px;color:var(--text-secondary)}
+  .callout b{color:var(--text-primary)}
+  table.pnl{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:4px}
+  table.pnl td{padding:8px 4px;border-bottom:1px solid var(--border)}
+  table.pnl td.r{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+  table.pnl tr.tot td{border-bottom:none;font-size:15px;padding-top:12px}
+  table.pnl tr.tot td.r{color:var(--good)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
+  @media(max-width:560px){.two,.kpis{grid-template-columns:1fr}}
+  .foot{color:var(--muted);font-size:11.5px;margin-top:22px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Keel — Unit Economics</h1>
+      <p class="sub">Tune the levers; the cost to serve, margin, and ROI update live. Prices seeded from OpenAI's July 2026 rates — all editable.</p>
+    </div>
+    <button class="toggle" id="themeBtn">◐ Theme</button>
+  </header>
+
+  <div class="cols">
+    <!-- INPUTS -->
+    <div class="card">
+      <h2>Levers</h2>
+      <div class="lever"><div class="lab"><span>Conversations / month</span><span class="v" id="vVol">100,000</span></div>
+        <input type="range" id="vol" min="10000" max="1000000" step="10000" value="100000"></div>
+      <div class="lever"><div class="lab"><span>Save rate</span><span class="v" id="vSave">40%</span></div>
+        <input type="range" id="save" min="5" max="80" step="1" value="40"></div>
+      <div class="lever"><div class="lab"><span>Escalation rate (to human)</span><span class="v" id="vEsc">25%</span></div>
+        <input type="range" id="esc" min="0" max="80" step="1" value="25"></div>
+      <div class="lever"><div class="lab"><span>Cost per human escalation</span><span class="v" id="vEscC">$5.00</span></div>
+        <input type="range" id="escC" min="0" max="15" step="0.5" value="5"></div>
+      <div class="lever"><div class="lab"><span>Outcome fee per save (revenue)</span><span class="v" id="vFee">$15</span></div>
+        <input type="range" id="fee" min="1" max="50" step="1" value="15"></div>
+      <div class="lever"><div class="lab"><span>Offer cost per save (margin given)</span><span class="v" id="vOffer">$40</span></div>
+        <input type="range" id="offer" min="0" max="150" step="5" value="40"></div>
+      <div class="lever"><div class="lab"><span>Gross value of a save (customer LTV)</span><span class="v" id="vLtv">$300</span></div>
+        <input type="range" id="ltv" min="50" max="1000" step="10" value="300"></div>
+
+      <details>
+        <summary>Token &amp; price assumptions (editable)</summary>
+        <div class="agrid">
+          <label>Agent input tok/conv<input type="number" id="aIn" value="12000"></label>
+          <label>Agent output tok/conv<input type="number" id="aOut" value="1500"></label>
+          <label>Flagship $/1M in<input type="number" id="fpIn" value="1.25" step="0.05"></label>
+          <label>Flagship $/1M out<input type="number" id="fpOut" value="10" step="0.5"></label>
+          <label>Eval sampling %<input type="number" id="eSamp" value="100"></label>
+          <label>Guardrail+infra $/conv<input type="number" id="gInfra" value="0.002" step="0.001"></label>
+          <label>Eval input tok<input type="number" id="eIn" value="3000"></label>
+          <label>Eval output tok<input type="number" id="eOut" value="400"></label>
+          <label>Mini $/1M in<input type="number" id="mpIn" value="0.25" step="0.05"></label>
+          <label>Mini $/1M out<input type="number" id="mpOut" value="2" step="0.1"></label>
+        </div>
+      </details>
+    </div>
+
+    <!-- OUTPUTS -->
+    <div>
+      <div class="kpis">
+        <div class="tile"><div class="lbl">Cost per conversation</div><div class="val" id="oCPC">$1.28</div><div class="note" id="oCPCn">blended, incl. human handling</div></div>
+        <div class="tile"><div class="lbl">Cost per save</div><div class="val" id="oCPS">$3.21</div><div class="note">cost/conv ÷ save rate</div></div>
+        <div class="tile"><div class="lbl">Gross margin per save</div><div class="val" id="oGM">79%</div><div class="note" id="oGMn">at fee − cost to serve</div></div>
+        <div class="tile"><div class="lbl">Break-even save rate</div><div class="val" id="oBE">8.6%</div><div class="note">where fee × save = cost/conv</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Where the cost goes (per conversation)</h2>
+        <div class="barwrap"><div class="bar" id="bar"></div></div>
+        <div class="legend" id="legend"></div>
+        <div class="callout" id="callout"></div>
+      </div>
+
+      <div class="two">
+        <div class="card">
+          <h2>Vendor P&amp;L — monthly</h2>
+          <table class="pnl">
+            <tr><td>Saves</td><td class="r" id="pSaves">40,000</td></tr>
+            <tr><td>Revenue (fee × saves)</td><td class="r" id="pRev">$600K</td></tr>
+            <tr><td>Cost to serve</td><td class="r" id="pCost">$128K</td></tr>
+            <tr class="tot"><td>Gross profit</td><td class="r" id="pGP">$472K</td></tr>
+          </table>
+        </div>
+        <div class="card">
+          <h2>Customer ROI — monthly</h2>
+          <table class="pnl">
+            <tr><td>Net value per save</td><td class="r" id="cNet">$260</td></tr>
+            <tr><td>Value retained</td><td class="r" id="cVal">$10.4M</td></tr>
+            <tr><td>Fees paid to Keel</td><td class="r" id="cFee">$600K</td></tr>
+            <tr class="tot"><td>Return multiple</td><td class="r" id="cROI">17×</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="foot">Illustrative model. The two swing variables are human-escalation cost and saved LTV — not token prices. Colors validated against the shared palette.</p>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const num=id=>parseFloat($(id).value)||0;
+const fmt$=x=>x>=1e6?'$'+(x/1e6).toFixed(x/1e6>=10?0:1)+'M':x>=1e3?'$'+(x/1e3).toFixed(x/1e3>=100?0:0)+'K':'$'+x.toFixed(2);
+const fmtN=x=>x>=1e6?(x/1e6).toFixed(1)+'M':x>=1e3?Math.round(x/1e3)+'K':Math.round(x).toLocaleString();
+const cents=x=>'$'+x.toFixed(x<1?3:2);
+
+function compute(){
+  const vol=num('vol'), save=num('save')/100, esc=num('esc')/100, escC=num('escC'),
+        fee=num('fee'), offer=num('offer'), ltv=num('ltv'),
+        aIn=num('aIn'), aOut=num('aOut'), fpIn=num('fpIn'), fpOut=num('fpOut'),
+        eSamp=num('eSamp')/100, eIn=num('eIn'), eOut=num('eOut'), mpIn=num('mpIn'), mpOut=num('mpOut'),
+        gInfra=num('gInfra');
+
+  // per-conversation costs
+  const agent = (aIn*fpIn + aOut*fpOut)/1e6;
+  const evalc = eSamp*(eIn*mpIn + eOut*mpOut)/1e6;
+  const other = gInfra;                 // guardrail + embedding + infra
+  const human = esc*escC;
+  const cpc = agent + evalc + other + human;
+  const cps = save>0 ? cpc/save : 0;
+
+  // vendor
+  const saves = vol*save;
+  const rev = saves*fee;
+  const cost = vol*cpc;
+  const gp = rev-cost;
+  const gm = fee>0 ? (fee-cps)/fee : 0;
+  const be = fee>0 ? cpc/fee : 0;        // break-even save rate
+
+  // customer
+  const net = ltv-offer;
+  const cval = saves*net;
+  const roi = rev>0 ? cval/rev : 0;
+
+  // reflect levers
+  $('vVol').textContent=Math.round(vol).toLocaleString();
+  $('vSave').textContent=Math.round(save*100)+'%';
+  $('vEsc').textContent=Math.round(esc*100)+'%';
+  $('vEscC').textContent='$'+escC.toFixed(2);
+  $('vFee').textContent='$'+fee;
+  $('vOffer').textContent='$'+offer;
+  $('vLtv').textContent='$'+ltv;
+
+  // KPI tiles
+  $('oCPC').textContent=cents(cpc);
+  $('oCPS').textContent=cents(cps);
+  $('oGM').textContent=Math.round(gm*100)+'%';
+  $('oGMn').textContent='at $'+fee+' fee − '+cents(cps)+' cost';
+  $('oGM').style.color = gm<0 ? 'var(--critical)' : '';
+  $('oBE').textContent=(be*100).toFixed(be*100<10?1:0)+'%';
+
+  // cost breakdown bar
+  const segs=[
+    {n:'Human escalation', v:human, c:'var(--series-6)'},
+    {n:'Agent LLM', v:agent, c:'var(--series-1)'},
+    {n:'Eval', v:evalc, c:'var(--series-2)'},
+    {n:'Guardrail + infra', v:other, c:'var(--series-4)'},
+  ];
+  const bar=$('bar'); bar.innerHTML='';
+  segs.forEach(s=>{const d=document.createElement('div');d.className='seg';
+    d.style.width=(cpc>0? s.v/cpc*100:0)+'%';d.style.background=s.c;bar.appendChild(d);});
+  const leg=$('legend'); leg.innerHTML='';
+  segs.forEach(s=>{const pct=cpc>0? s.v/cpc*100:0;
+    leg.innerHTML+=`<span class="k"><span class="dot" style="background:${s.c}"></span>${s.n} <span class="n">${cents(s.v)} · ${pct<0.1?'<0.1':pct.toFixed(pct<10?1:0)}%</span></span>`;});
+
+  const autoPct = cpc>0 ? (agent+evalc+other)/cpc*100 : 0;
+  $('callout').innerHTML = human>agent+evalc+other
+    ? `<b>${(100-autoPct).toFixed(autoPct>99?1:0)}% of cost is human escalation.</b> The entire AI stack — agent, grading every conversation, guardrails — is ${cents(agent+evalc+other)}. The lever is <b>containment</b> (drive escalation down safely), not model choice; grade 100% because it's nearly free.`
+    : `Automated cost now dominates (${autoPct.toFixed(0)}%). At this escalation level, model tiering and token efficiency start to matter — consider a cheaper triage model for easy conversations.`;
+
+  // P&L
+  $('pSaves').textContent=fmtN(saves);
+  $('pRev').textContent=fmt$(rev);
+  $('pCost').textContent=fmt$(cost);
+  $('pGP').textContent=fmt$(gp);
+  $('pGP').style.color = gp<0?'var(--critical)':'var(--good)';
+  // customer
+  $('cNet').textContent='$'+Math.round(net);
+  $('cVal').textContent=fmt$(cval);
+  $('cFee').textContent=fmt$(rev);
+  $('cROI').textContent=(roi>=10?Math.round(roi):roi.toFixed(1))+'×';
+  $('cROI').style.color = net<0?'var(--critical)':'var(--good)';
+}
+
+document.querySelectorAll('input').forEach(i=>i.addEventListener('input',compute));
+$('themeBtn').addEventListener('click',()=>{
+  const cur=document.documentElement.getAttribute('data-theme');
+  const next=cur==='dark'?'light':(cur==='light'?'dark':(matchMedia('(prefers-color-scheme: dark)').matches?'light':'dark'));
+  document.documentElement.setAttribute('data-theme',next);
+});
+compute();
+</script>
+</body>
+</html>
