@@ -96,16 +96,16 @@
   <div class="archrow">
     <div class="svc"><div class="h">Conversation runtime</div><div class="f">agent/</div><div class="p">Responses-API loop + tools + the mandatory AI-disclosure turn. Emits a structured disposition.</div></div>
     <div class="svc"><div class="h">Policy / guardrails</div><div class="f">agent/policy · guardrails</div><div class="p">A deterministic wrapper the model can’t talk past. Authorization, eligibility, human-in-the-loop.</div></div>
-    <div class="svc"><div class="h">Eval service</div><div class="f">evals/</div><div class="p">LLM-as-judge scoring every conversation + a golden-set regression suite. <span class="tag">planned</span></div></div>
+    <div class="svc"><div class="h">Eval service</div><div class="f">evals/</div><div class="p">LLM-as-judge scoring every conversation + a golden-set regression suite.</div></div>
   </div>
   <div class="archrow">
-    <div class="svc"><div class="h">Analytics</div><div class="f">analytics/</div><div class="p">Embed de-identified summaries → cluster → theme cards → ranked signals. <span class="tag">planned</span></div></div>
+    <div class="svc"><div class="h">Analytics</div><div class="f">analytics/</div><div class="p">Embed de-identified summaries → cluster → theme cards → ranked signals.</div></div>
     <div class="svc"><div class="h">Dashboard + synth</div><div class="f">dashboard/ · synth.py</div><div class="p">Seeded customer generator (also the red-team set) + the insight surface.</div></div>
     <div class="svc"><div class="h">Datastore</div><div class="f">keel.db</div><div class="p">One SQLite file. Every conversation, eval, guardrail trip, and audit row.</div></div>
   </div>
 
   <h2>The agent loop</h2>
-  <p>One retention conversation runs through this pipeline. Steps 1–5 are built and verified; the loop resolves to <span class="mono">saved / lost / escalated</span>.</p>
+  <p>One retention conversation runs through this pipeline, resolving to <span class="mono">saved / lost / escalated</span>.</p>
   <ol class="pipe">
     <li><div class="t">AI disclosure</div><div class="d">The first turn tells the customer they’re talking to an AI. Enforced as an input-side guardrail so it can never be skipped (EU AI Act Art. 50).</div></li>
     <li><div class="t">Input guardrails</div><div class="d">Every customer message is screened: PII redacted <em>before</em> it’s stored, jailbreak patterns caught, off-topic requests bounded.</div></li>
@@ -151,7 +151,7 @@
     <tr><td>AI Act Art. 50 — AI disclosure</td><td class="mono">agent/disclosure.py (enforced input guardrail)</td></tr>
     <tr><td>GDPR Art. 22 — human review of significant decisions</td><td class="mono">agent/policy.py (consequential → human)</td></tr>
     <tr><td>Data minimization / purpose limitation</td><td class="mono">guardrails.redact_pii before log + embed</td></tr>
-    <tr><td>Bias monitoring (all systems, per Digital Omnibus)</td><td class="mono">fairness slice in evals/judge.py <span class="tag">planned</span></td></tr>
+    <tr><td>Bias monitoring (all systems, per Digital Omnibus)</td><td class="mono">fairness slice in evals/judge.py + run_evals.py</td></tr>
     <tr><td>Traceability / record-keeping</td><td class="mono">audit_log + guardrail_events</td></tr>
   </table>
 
@@ -161,16 +161,16 @@
 subscriptions      plan, price, status, save-offer recency (drives eligibility)
 scenarios          the churn case that drives a conversation + the adversarial red-team probes
 conversations      transcript + structured disposition + outcome
-evals              per-conversation scores, verdict, rationale, fairness flag   (Phase 3)
+evals              per-conversation scores, verdict, rationale, fairness flag
 guardrail_events   every guardrail trip — type, action, detail
 audit_log          every decision — disclosure shown, each policy verdict
-themes / signals   clustered churn themes and ranked roadmap signals            (Phase 4)</pre>
+themes / signals   clustered churn themes and ranked roadmap signals</pre>
 
   <h2>The economics that shape the design</h2>
   <p>The unit-economics model surfaces one finding that reframes everything: <b>~97% of blended cost-to-serve is human escalation; the entire AI stack — agent, grading every conversation, guardrails — is about 3¢ per conversation.</b></p>
   <div class="callout">Two consequences are baked into the design: the optimization lever is <b>containment</b> (safely reducing escalation), not model choice or token-shaving; and you <b>grade 100% of conversations</b> because evaluation is nearly free. Sampling to “save money” saves nothing and costs you signal. <a href="economics-calculator.html">Explore the model →</a></div>
 
-  <p class="foot">Built and verified: Phases 0–2 (scaffold, agent, guardrails). Planned: Phases 3–5 (evals, analytics, the closed loop). See <a href="testing.html">How to test</a> to run any of it. Regulatory references are architecture, not legal advice.</p>
+  <p class="foot">All six phases built and verified end-to-end — agent, guardrails, evals, analytics, and the closed loop (a real +22pp save-rate lift from acting on one analytics signal). See <a href="testing.html">How to test</a> to run any of it. Regulatory references are architecture, not legal advice.</p>
 </div>
 <script>
   document.getElementById('themeBtn').addEventListener('click',()=>{

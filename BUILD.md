@@ -13,7 +13,7 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 | **2 — Guardrails & compliance** | ✅ **done** | `agent/guardrails.py` (input: PII redact / jailbreak / scope; output: tone / promise / grounding), policy human-in-the-loop (+`deny_refund` tool), `guardrail_events` populated, PII redacted before store | `python -m scripts.phase2_accept`: **100% catch rate (11/11)** — jailbreak 4/4 blocked, off-scope 4/4 bounded, PII 3/3 redacted, over-limit 40%→capped 20%, refund→human ✓; 23 unit tests pass |
 | **3 — Eval harness** | ✅ **done** | `evals/judge.py` (5-dim rubric + fairness flag), `evals/run_evals.py` (grade_all + run_golden), 5 golden fixtures, `batch.py` concurrent runner | `python -m scripts.phase3_accept`: 12/12 graded, golden agreement **100%** (5/5), broken agent → **fail** (resolution 2); fairness slice by group reported |
 | **4 — VoC analytics** | ✅ **done** | `analytics/embed.py` (batched), `analytics/cluster.py` (KMeans), `analytics/themes.py` (theme cards + offer effectiveness + ranked signals), `economics.margin_cost` | `python -m scripts.phase4_accept`: 30-conv batch → 5 themes, top-3 drivers, ranked signals, offer comparison from clusters ✓ |
-| **5 — Close the loop** | ⬜ | `dashboard/export.py` → `data.json` wired to `dashboard/index.html`; `run_demo.py` acts on one signal, shows the lift | `python run_demo.py` runs the full flywheel end-to-end; dashboard reflects the lift — **the money demo** |
+| **5 — Close the loop** | ✅ **done** | `dashboard/export.py` → `data.js` wired to a data-driven `dashboard/index.html`; `run_demo.py` runs baseline → learn → act → re-measure | `python run_demo.py`: save rate **28% → 50% (+22pp)**, margin-adjusted **26% → 44% (+18.5pp)** on identical customers by enabling the discount policy the analytics recommended — **the flywheel turning** |
 | **6 — Stretch** | ⬜ | adversarial red-team suite (synth already seeds 11 probes), A/B offer testing, "propose a policy change" agent | — |
 
 ## Phase 0 — verified
@@ -45,8 +45,16 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 - Offer effectiveness aggregation (save rate vs. margin cost per offer type) with `economics.margin_cost` — a 20% discount concedes the % of price monthly; a pause is a small goodwill fraction (≈3× cheaper).
 - Fidelity fix during verification: the customer simulator was over-tuned toward rejection, producing an unbelievable ~7% overall save rate. Recalibrated to a *reasonable* customer (persuadable by a genuinely good, relevant offer) → realistic ~47% save rate with sensible per-theme variation (price-sensitive 75%, competitor-switch 22%). Not rigged — the sim just stopped being a brick wall. Prior gates (Phase 1/2) still hold: eligible saves more readily, ineligible still churns (no offer authorized under cooldown regardless of the sim).
 
+## Phase 5 — verified (the money demo)
+
+- `dashboard/export.py`: computes every dashboard view from the DB (KPIs incl. margin-adjusted save rate, before/after trend, clustered drivers, offer effectiveness, safety) → writes `dashboard/data.js` (`window.KEEL_DATA`). The dashboard loads it via `<script src>` (works on file://) and falls back to a mock if absent.
+- `dashboard/index.html`: rewritten data-driven — same design language, now rendering real demo output.
+- `run_demo.py`: the full flywheel on one identical cohort — BASELINE (discounts disabled) → grade + cluster → the analytics signal (price-sensitive under-saved) → ACT (enable discounts + lead-with-discount playbook) → RE-MEASURE. Result: save rate 28%→50% (+22pp), margin-adjusted 26%→44% (+18.5pp). The lift comes only from acting on the analytics recommendation.
+- Definition of done met: `python run_demo.py` runs generate → converse → grade → analyze → act → re-measure → export, and the dashboard shows the lift.
+
 ## Notes
 
 - Phase 1 onward needs a working `OPENAI_API_KEY` in `.env` (validated 2026-07-17).
+- `dashboard/data.js` is committed as the latest demo snapshot so the dashboard renders real numbers on open; re-run `python run_demo.py` to refresh it.
 - `scenarios` table is a deliberate deviation from handoff §7 — see README.
 - Keep the POC limited-risk (no credit/insurance/health eligibility).

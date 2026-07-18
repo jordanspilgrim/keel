@@ -1,18 +1,110 @@
-"""DB -> dashboard JSON export (plan §6, Phase 5).
+"""DB → dashboard JSON/JS export (plan §6, Phase 5).
 
-Reads keel.db and emits dashboard/data.json in the contract the static
-dashboard/index.html expects (the mockup's hard-coded `data` block becomes this
-export). Views: KPI row (margin-adjusted save rate hero, save rate, eval pass
-rate, guardrail catch rate, compliance coverage), save-rate-vs-margin trend,
-top churn drivers, offer-effectiveness scatter, safety/compliance panel.
+Computes every dashboard view from keel.db and writes ``dashboard/data.js``
+(``window.KEEL_DATA = {…}``) plus ``dashboard/data.json``. The dashboard loads
+data.js via a <script> tag (works on file://, unlike fetch) and falls back to a
+built-in mock if it's absent.
 
-Run: python -m dashboard.export  ->  writes dashboard/data.json
-Then open dashboard/index.html (it fetches data.json).
+The north-star KPI is the *margin-adjusted* save rate: each save counts as
+(1 − margin_given/price), so a save bought with a deep discount counts less than
+a clean one. That's the number the org can't game.
 """
 
 from __future__ import annotations
 
+import json
+import os
 
-def export(out_path: str = "dashboard/data.json") -> dict:
-    """Compute all dashboard views from the DB and write JSON. Return the dict."""
-    raise NotImplementedError("dashboard.export.export — Phase 5")
+import db
+import economics
+from analytics import themes as themes_mod
+
+OUT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def conversation_metrics(conn) -> dict:
+    """Save rate and margin-adjusted save rate over the current conversations."""
+    rows = conn.execute(
+        "SELECT c.outcome, c.offer_made, s.price FROM conversations c "
+        "JOIN subscriptions s ON s.customer_id = c.customer_id"
+    ).fetchall()
+    n = len(rows) or 1
+    saved = sum(1 for r in rows if r["outcome"] == "saved")
+    # margin-adjusted: a save counts as (1 - fraction of price given away)
+    madj = 0.0
+    for r in rows:
+        if r["outcome"] == "saved":
+            cost = economics.margin_cost(r["offer_made"], r["price"])
+            madj += 1 - (cost / r["price"] if r["price"] else 0)
+    return {"n": len(rows), "save_rate": round(saved / n, 4),
+            "madj_save_rate": round(madj / n, 4)}
+
+
+def _eval_pass_rate(conn) -> float:
+    row = conn.execute("SELECT count(*) t, sum(verdict='pass') p FROM evals").fetchone()
+    return round((row["p"] or 0) / row["t"], 4) if row["t"] else 0.0
+
+
+def _compliance_coverage(conn) -> float:
+    total = conn.execute("SELECT count(*) FROM conversations").fetchone()[0] or 1
+    with_disc = conn.execute(
+        "SELECT count(DISTINCT conversation_id) FROM audit_log WHERE decision='ai_disclosure_shown'"
+    ).fetchone()[0]
+    return round(with_disc / total, 4)
+
+
+def build_data(conn, *, before: dict, after: dict, guardrail_counts: dict, catch_rate: float) -> dict:
+    """Assemble the full dashboard data object from the DB + run_demo inputs."""
+    views = themes_mod.build_conversation_views(conn)
+    total = len(views) or 1
+
+    theme_rows = conn.execute(
+        "SELECT label, size, save_rate FROM themes ORDER BY size DESC"
+    ).fetchall()
+    drivers = [{"label": t["label"], "share": round(t["size"] / total * 100),
+                "save_rate": round(t["save_rate"], 3)} for t in theme_rows]
+
+    offers = themes_mod.offer_effectiveness(views)
+    pause_cost = next((o["avg_margin_cost"] for o in offers if o["offer"] == "pause"), 0) or 1
+    offer_points = [{"label": o["offer"], "save_rate": o["save_rate"],
+                     "margin_cost": o["avg_margin_cost"],
+                     "rel_cost": round(o["avg_margin_cost"] / pause_cost, 2)}
+                    for o in offers if o["offer"] != "none"]
+
+    return {
+        "kpis": {
+            "madj_save_rate": after["madj_save_rate"],
+            "madj_delta_pp": round((after["madj_save_rate"] - before["madj_save_rate"]) * 100, 1),
+            "save_rate": after["save_rate"],
+            "save_delta_pp": round((after["save_rate"] - before["save_rate"]) * 100, 1),
+            "eval_pass_rate": _eval_pass_rate(conn),
+            "guardrail_catch_rate": round(catch_rate, 4),
+            "compliance_coverage": _compliance_coverage(conn),
+        },
+        "trend": {"labels": ["Before", "After"],
+                  "save": [before["save_rate"], after["save_rate"]],
+                  "madj": [before["madj_save_rate"], after["madj_save_rate"]]},
+        "drivers": drivers,
+        "offers": offer_points,
+        "safety": {"catch_rate": round(catch_rate, 4),
+                   "compliance": _compliance_coverage(conn), **guardrail_counts},
+        "meta": {"conversations": len(views)},
+    }
+
+
+def write_data(data: dict, *, js_path: str | None = None, json_path: str | None = None) -> tuple[str, str]:
+    js_path = js_path or os.path.join(OUT_DIR, "data.js")
+    json_path = json_path or os.path.join(OUT_DIR, "data.json")
+    blob = json.dumps(data, indent=2)
+    with open(js_path, "w") as f:
+        f.write(f"window.KEEL_DATA = {blob};\n")
+    with open(json_path, "w") as f:
+        f.write(blob + "\n")
+    return js_path, json_path
+
+
+def export(conn, *, before: dict, after: dict, guardrail_counts: dict, catch_rate: float) -> dict:
+    data = build_data(conn, before=before, after=after,
+                      guardrail_counts=guardrail_counts, catch_rate=catch_rate)
+    write_data(data)
+    return data

@@ -136,6 +136,35 @@ over-limit 40% discount → capped 20%       deny_refund → needs_human
 <span class="g">PHASE 2 ACCEPTANCE: PASS</span></pre>
   <p class="proves">Proves: jailbreak <b>blocked</b>, off-scope <b>bounded</b>, PII <b>redacted before storage</b>, over-limit discount <b>capped</b> to the ceiling, refund-denial <b>routed to a human</b>.</p>
 
+  <div class="step"><div class="num">6</div><h2>Phase 3 — eval harness <span class="badge api">~cents</span></h2></div>
+  <p>Grades a batch, runs the golden set (judge vs. human), and proves the eval catches a deliberately broken agent.</p>
+  <pre>python -m scripts.phase3_accept</pre>
+  <pre><span class="c"># abridged</span>
+graded 12/12 · eval pass rate 100% · fairness gap 0.0
+golden judge-vs-human agreement: <span class="g">100%</span>
+broken-agent conversation → judge verdict=<span class="g">fail</span>  (resolution 2)</pre>
+  <p class="proves">Proves: every conversation is auto-scored; the judge is <b>calibrated</b> against human labels; and breaking the agent <b>gets caught</b> by the eval.</p>
+
+  <div class="step"><div class="num">7</div><h2>Phase 4 — VoC analytics <span class="badge api">~cents</span></h2></div>
+  <p>Clusters a 30-conversation batch into churn themes and computes offer effectiveness.</p>
+  <pre>python -m scripts.phase4_accept</pre>
+  <pre><span class="c"># abridged</span>
+Top churn drivers: No longer using (50%) · Switching to competitor (22%) · Price-sensitive (75%)
+Offer effectiveness: pause 56% @ $16.6 · discount 100% @ $19.8
+→ Discount saves +44pp vs pause, at ~1–3× the margin cost</pre>
+  <p class="proves">Proves: the top churn drivers and the offer trade-off are computed <b>from clustered data</b>, not hard-coded.</p>
+
+  <div class="step"><div class="num">8</div><h2>The money demo — the flywheel turning <span class="badge api">~cents</span></h2></div>
+  <p>The whole loop end to end: baseline → learn → act on the signal → re-measure → export the dashboard.</p>
+  <pre>python run_demo.py
+open dashboard/index.html   <span class="c"># shows the measured lift</span></pre>
+  <pre><span class="c"># abridged</span>
+FLYWHEEL RESULT
+  save rate:         28%  →  <span class="g">50%</span>   (+22 pp)
+  margin-adjusted:   26%  →  <span class="g">44%</span>   (+18.5 pp)
+  eval pass 94% · guardrail catch 100% · compliance 100%</pre>
+  <p class="proves">Proves the definition of done: on <b>identical customers</b>, acting on the analytics signal (enable discounts for price-sensitive) produced a measured lift — the flywheel visibly turning. The dashboard renders this real run.</p>
+
   <h2>What each command proves, at a glance</h2>
   <table>
     <tr><th>Command</th><th>Phase</th><th>API</th><th>Proves</th></tr>
@@ -144,14 +173,17 @@ over-limit 40% discount → capped 20%       deny_refund → needs_human
     <tr><td class="s">pytest tests/</td><td>1–2</td><td>no</td><td>policy + guardrail logic (23 tests)</td></tr>
     <tr><td class="s">-m scripts.phase1_accept</td><td>1</td><td>yes</td><td>save / let-churn behavior end-to-end</td></tr>
     <tr><td class="s">-m scripts.phase2_accept</td><td>2</td><td>yes</td><td>100% guardrail catch rate + compliance paths</td></tr>
+    <tr><td class="s">-m scripts.phase3_accept</td><td>3</td><td>yes</td><td>grade 100% + judge calibration + broken agent caught</td></tr>
+    <tr><td class="s">-m scripts.phase4_accept</td><td>4</td><td>yes</td><td>clustered churn drivers + offer effectiveness</td></tr>
+    <tr><td class="s">run_demo.py</td><td>5</td><td>yes</td><td>the full flywheel + the measured lift</td></tr>
   </table>
 
   <h2>Notes &amp; troubleshooting</h2>
   <div class="callout"><b>Cost.</b> The acceptance scripts spend a few cents of OpenAI tokens each (the economics model shows why: the AI stack is ~3¢ per conversation). The offline steps cost nothing.</div>
   <div class="callout"><b>Model IDs</b> live in <code>config.py</code> (<code>gpt-5</code>, <code>gpt-5-mini</code>, <code>text-embedding-3-small</code>), verified available on build day and env-overridable. If a call errors on an unknown model, swap them there.</div>
-  <div class="callout"><b>Phases 3–5</b> (evals, analytics, the closed loop) are stubbed with signatures + acceptance criteria — see <code>BUILD.md</code>. Their acceptance scripts don’t exist yet.</div>
+  <div class="callout"><b>Reproducibility.</b> Synthetic data is seeded, so <code>synth.py</code> and the economics are identical every run. Conversations are LLM-driven, so exact save rates vary run to run — the <em>shape</em> (a positive lift from acting on the signal) is what holds.</div>
 
-  <p class="foot">Definition of done for the full POC: <code>python run_demo.py</code> runs the whole flywheel end-to-end — generate → converse → grade → analyze → act on a signal → re-measure — and the dashboard shows the lift. Phases 0–2 are the foundation of that run.</p>
+  <p class="foot">Definition of done, met: <code>python run_demo.py</code> runs the whole flywheel end-to-end — generate → converse → grade → analyze → act on a signal → re-measure — and the dashboard shows the lift. All six phases are built and verified.</p>
 </div>
 <script>
   document.getElementById('themeBtn').addEventListener('click',()=>{
