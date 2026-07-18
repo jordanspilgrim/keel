@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Keel — How it works</title>
+<style>
+  :root{
+    color-scheme: light;
+    --page:#f9f9f7; --surface-1:#fcfcfb; --surface-2:#f2f1ec;
+    --text-primary:#0b0b0b; --text-secondary:#52514e; --muted:#898781;
+    --border:rgba(11,11,11,0.10); --hairline:#e1e0d9;
+    --accent:#2a78d6; --green:#008300; --good:#0ca30c; --warning:#c98500; --critical:#d03b3b;
+    --code-bg:#f2f1ec;
+  }
+  :root[data-theme="dark"]{
+    color-scheme: dark;
+    --page:#0d0d0d; --surface-1:#1a1a19; --surface-2:#222220;
+    --text-primary:#ffffff; --text-secondary:#c3c2b7; --muted:#898781;
+    --border:rgba(255,255,255,0.10); --hairline:#2c2c2a;
+    --accent:#3987e5; --green:#0ca30c; --good:#0ca30c; --warning:#eda100; --critical:#e0645c;
+    --code-bg:#141413;
+  }
+  @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+    color-scheme: dark;
+    --page:#0d0d0d; --surface-1:#1a1a19; --surface-2:#222220;
+    --text-primary:#ffffff; --text-secondary:#c3c2b7; --muted:#898781;
+    --border:rgba(255,255,255,0.10); --hairline:#2c2c2a;
+    --accent:#3987e5; --green:#0ca30c; --good:#0ca30c; --warning:#eda100; --critical:#e0645c;
+    --code-bg:#141413;
+  }}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--page);color:var(--text-primary);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:940px;margin:0 auto;padding:22px 20px 72px}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  nav.top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:30px;flex-wrap:wrap}
+  .navlinks{display:flex;gap:6px;flex-wrap:wrap}
+  .navlinks a{font-size:13.5px;color:var(--text-secondary);padding:6px 11px;border-radius:8px;border:1px solid transparent}
+  .navlinks a:hover{background:var(--surface-2);text-decoration:none;color:var(--text-primary)}
+  .navlinks a.here{background:var(--surface-1);border-color:var(--border);color:var(--text-primary)}
+  .toggle{border:1px solid var(--border);background:var(--surface-1);color:var(--text-secondary);
+    border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer}
+  .toggle:hover{color:var(--text-primary)}
+  .eyebrow{color:var(--accent);font-weight:600;font-size:13px;letter-spacing:.04em;text-transform:uppercase;margin-bottom:6px}
+  h1{font-size:30px;line-height:1.15;letter-spacing:-.02em;margin:0 0 10px}
+  h2{font-size:20px;letter-spacing:-.01em;margin:44px 0 12px}
+  h3{font-size:15px;margin:22px 0 6px}
+  p.lead{font-size:16.5px;color:var(--text-secondary);margin:0 0 8px;max-width:72ch}
+  p{max-width:74ch}
+  .card{background:var(--surface-1);border:1px solid var(--border);border-radius:14px;padding:18px 20px;margin:14px 0}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:14px 0}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{font-size:12px;text-transform:uppercase;letter-spacing:.03em;color:var(--text-secondary);font-weight:600}
+  td.s{white-space:nowrap} .mono{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:13px}
+  code{background:var(--code-bg);border:1px solid var(--border);border-radius:5px;padding:1px 5px;font-size:13px;
+    font-family:ui-monospace,"SF Mono",Menlo,monospace}
+  pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;overflow-x:auto;
+    font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12.5px;line-height:1.55}
+  .callout{background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin:16px 0;font-size:14.5px;color:var(--text-secondary)}
+  .callout b{color:var(--text-primary)}
+  .pipe{list-style:none;padding:0;margin:16px 0;counter-reset:step}
+  .pipe li{position:relative;padding:12px 16px 12px 52px;background:var(--surface-1);border:1px solid var(--border);
+    border-radius:12px;margin-bottom:8px}
+  .pipe li::before{counter-increment:step;content:counter(step);position:absolute;left:14px;top:12px;width:24px;height:24px;
+    border-radius:50%;background:var(--accent);color:#fff;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .pipe .t{font-weight:600;font-size:14.5px} .pipe .d{color:var(--text-secondary);font-size:13.5px;margin-top:2px}
+  .gr{border-left:3px solid var(--accent);padding-left:14px;margin:8px 0}
+  .gr.action{border-color:var(--warning)} .gr.output{border-color:var(--green)}
+  .tag{display:inline-block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:2px 7px;border-radius:6px;background:var(--surface-2);color:var(--text-secondary)}
+  .foot{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid var(--hairline);padding-top:16px}
+  .archrow{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}
+  .svc{flex:1;min-width:150px;background:var(--surface-1);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
+  .svc .h{font-weight:700;font-size:13.5px} .svc .f{font-size:12px;color:var(--muted);margin-top:2px;font-family:ui-monospace,Menlo,monospace}
+  .svc .p{font-size:12.5px;color:var(--text-secondary);margin-top:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top">
+    <div class="navlinks">
+      <a href="index.html">Overview</a>
+      <a class="here" href="how-it-works.html">How it works</a>
+      <a href="testing.html">How to test</a>
+      <a href="keel-dashboard.html">Dashboard</a>
+      <a href="economics-calculator.html">Economics</a>
+    </div>
+    <button class="toggle" id="themeBtn">◐ Theme</button>
+  </nav>
+
+  <div class="eyebrow">⎈ Keel · How it works</div>
+  <h1>The system, layer by layer</h1>
+  <p class="lead">Five small services and one SQLite file, deliberately sized to run on a laptop with only an <code>OPENAI_API_KEY</code>. The agent proposes; deterministic layers dispose. Everything a conversation touches is logged.</p>
+
+  <h2>Architecture</h2>
+  <div class="archrow">
+    <div class="svc"><div class="h">Conversation runtime</div><div class="f">agent/</div><div class="p">Responses-API loop + tools + the mandatory AI-disclosure turn. Emits a structured disposition.</div></div>
+    <div class="svc"><div class="h">Policy / guardrails</div><div class="f">agent/policy · guardrails</div><div class="p">A deterministic wrapper the model can’t talk past. Authorization, eligibility, human-in-the-loop.</div></div>
+    <div class="svc"><div class="h">Eval service</div><div class="f">evals/</div><div class="p">LLM-as-judge scoring every conversation + a golden-set regression suite. <span class="tag">planned</span></div></div>
+  </div>
+  <div class="archrow">
+    <div class="svc"><div class="h">Analytics</div><div class="f">analytics/</div><div class="p">Embed de-identified summaries → cluster → theme cards → ranked signals. <span class="tag">planned</span></div></div>
+    <div class="svc"><div class="h">Dashboard + synth</div><div class="f">dashboard/ · synth.py</div><div class="p">Seeded customer generator (also the red-team set) + the insight surface.</div></div>
+    <div class="svc"><div class="h">Datastore</div><div class="f">keel.db</div><div class="p">One SQLite file. Every conversation, eval, guardrail trip, and audit row.</div></div>
+  </div>
+
+  <h2>The agent loop</h2>
+  <p>One retention conversation runs through this pipeline. Steps 1–5 are built and verified; the loop resolves to <span class="mono">saved / lost / escalated</span>.</p>
+  <ol class="pipe">
+    <li><div class="t">AI disclosure</div><div class="d">The first turn tells the customer they’re talking to an AI. Enforced as an input-side guardrail so it can never be skipped (EU AI Act Art. 50).</div></li>
+    <li><div class="t">Input guardrails</div><div class="d">Every customer message is screened: PII redacted <em>before</em> it’s stored, jailbreak patterns caught, off-topic requests bounded.</div></li>
+    <li><div class="t">Reason + call tools</div><div class="d">The model (flagship) grounds itself with <code>get_customer</code> / <code>get_subscription</code> / <code>get_usage</code>, then proposes a retention offer. It can only ever see the authenticated customer’s own records.</div></li>
+    <li><div class="t">Policy disposes</div><div class="d">Deterministic authorization caps or rejects the proposal — discount depth, margin floor, save-offer cooldown — and routes consequential actions to a human.</div></li>
+    <li><div class="t">Output guardrails</div><div class="d">Before the reply is sent: a moderation tone pass, a promise check (no commitments policy didn’t authorize), and a grounding check.</div></li>
+    <li><div class="t">Structured disposition</div><div class="d">A JSON-schema disposition (<span class="mono">intent, churn_reason, offer_made, offer_accepted, outcome, confidence</span>) is produced and reconciled with the loop’s ground-truth outcome.</div></li>
+  </ol>
+  <div class="callout">A conversation is only counted <b>saved</b> when the customer accepts a <b>real retention offer</b>. Someone agreeing to cancel is a churn, not a save — a distinction that keeps the downstream analytics honest.</div>
+
+  <h2>Guardrails — defense in depth</h2>
+  <p>Guardrails aren’t a prompt instruction (“please don’t…”). They’re enforced layers, each fail-closed, and every trip is written to <code>guardrail_events</code>. On the seeded red-team the catch rate is <b>100% (11/11)</b>.</p>
+
+  <div class="card">
+    <div class="gr"><span class="tag">Input</span> &nbsp;<b>before the model acts</b>
+      <table>
+        <tr><td class="s">Jailbreak / injection</td><td>Deterministic pattern layer catches override attempts (“ignore your instructions”, “developer mode”, “System: …”). Fast, free, auditable.</td></tr>
+        <tr><td class="s">Off-scope</td><td>A semantic classifier confirms the message is about the customer’s account; out-of-scope requests get a bounded response, not a free-form answer.</td></tr>
+        <tr><td class="s">PII / sensitive</td><td>Card numbers, SSNs, emails, phones, and health/credential terms are redacted <em>before</em> anything is logged or embedded.</td></tr>
+      </table>
+    </div>
+    <div class="gr action"><span class="tag">Action</span> &nbsp;<b>the deterministic policy layer — the most important</b>
+      <table>
+        <tr><td class="s">Authorization</td><td>Discount capped at <b>20%</b>, pause at <b>3 months</b>, a margin floor, and no second save-offer within <b>90 days</b>. The model may <em>propose</em> 40% off; the layer caps it to 20%.</td></tr>
+        <tr><td class="s">Human-in-the-loop</td><td>Consequential/irreversible actions (deny refund, change terms, downgrade, cancel) require human approval (GDPR Art. 22).</td></tr>
+        <tr><td class="s">Tool sandboxing</td><td>Tools operate only on the authenticated customer’s own records — the model can’t name another account.</td></tr>
+      </table>
+    </div>
+    <div class="gr output"><span class="tag">Output</span> &nbsp;<b>before the reply is sent</b>
+      <table>
+        <tr><td class="s">Grounding</td><td>Monetary claims must trace to real tool data — invented figures are flagged.</td></tr>
+        <tr><td class="s">Promise</td><td>No commitment the action layer didn’t authorize (no “lifetime”, no over-ceiling discount).</td></tr>
+        <tr><td class="s">Tone</td><td>A moderation pass for harmful or off-brand content; a hard tone failure escalates to a human.</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="callout"><b>The elegant part:</b> the guardrail layer, the eval layer, and the analytics layer are the same observability spine viewed three ways — enforce, score, aggregate.</div>
+
+  <h2>Compliance, built in</h2>
+  <p>The retention agent is a <b>limited-risk</b> system under the EU AI Act (transparency only). It would become high-risk only if pointed at credit / insurance / health eligibility — the POC deliberately stays on the limited-risk side.</p>
+  <table>
+    <tr><th>Obligation</th><th>Where it lives in Keel</th></tr>
+    <tr><td>AI Act Art. 50 — AI disclosure</td><td class="mono">agent/disclosure.py (enforced input guardrail)</td></tr>
+    <tr><td>GDPR Art. 22 — human review of significant decisions</td><td class="mono">agent/policy.py (consequential → human)</td></tr>
+    <tr><td>Data minimization / purpose limitation</td><td class="mono">guardrails.redact_pii before log + embed</td></tr>
+    <tr><td>Bias monitoring (all systems, per Digital Omnibus)</td><td class="mono">fairness slice in evals/judge.py <span class="tag">planned</span></td></tr>
+    <tr><td>Traceability / record-keeping</td><td class="mono">audit_log + guardrail_events</td></tr>
+  </table>
+
+  <h2>Data model</h2>
+  <p>One SQLite file. The tables the flywheel writes to:</p>
+  <pre>customers          who they are (segment, tenure, ARPU, a synthetic fairness slice)
+subscriptions      plan, price, status, save-offer recency (drives eligibility)
+scenarios          the churn case that drives a conversation + the adversarial red-team probes
+conversations      transcript + structured disposition + outcome
+evals              per-conversation scores, verdict, rationale, fairness flag   (Phase 3)
+guardrail_events   every guardrail trip — type, action, detail
+audit_log          every decision — disclosure shown, each policy verdict
+themes / signals   clustered churn themes and ranked roadmap signals            (Phase 4)</pre>
+
+  <h2>The economics that shape the design</h2>
+  <p>The unit-economics model surfaces one finding that reframes everything: <b>~97% of blended cost-to-serve is human escalation; the entire AI stack — agent, grading every conversation, guardrails — is about 3¢ per conversation.</b></p>
+  <div class="callout">Two consequences are baked into the design: the optimization lever is <b>containment</b> (safely reducing escalation), not model choice or token-shaving; and you <b>grade 100% of conversations</b> because evaluation is nearly free. Sampling to “save money” saves nothing and costs you signal. <a href="economics-calculator.html">Explore the model →</a></div>
+
+  <p class="foot">Built and verified: Phases 0–2 (scaffold, agent, guardrails). Planned: Phases 3–5 (evals, analytics, the closed loop). See <a href="testing.html">How to test</a> to run any of it. Regulatory references are architecture, not legal advice.</p>
+</div>
+<script>
+  document.getElementById('themeBtn').addEventListener('click',()=>{
+    const cur=document.documentElement.getAttribute('data-theme');
+    const next=cur==='dark'?'light':(cur==='light'?'dark':(matchMedia('(prefers-color-scheme: dark)').matches?'light':'dark'));
+    document.documentElement.setAttribute('data-theme',next);
+  });
+</script>
+</body>
+</html>

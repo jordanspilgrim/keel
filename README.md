@@ -12,6 +12,8 @@ Wrapped around all three: safety guardrails, EU-AI-Act + GDPR compliance by desi
 
 Full intent lives in [`docs/retention-flywheel-plan.md`](docs/retention-flywheel-plan.md) and [`docs/keel-build-handoff.md`](docs/keel-build-handoff.md).
 
+**Browsable docs** (open in a browser): [`docs/index.html`](docs/index.html) — plain-English overview + the flywheel · [`docs/how-it-works.html`](docs/how-it-works.html) — architecture, agent loop, guardrails, compliance · [`docs/testing.html`](docs/testing.html) — run and test each phase · plus the [dashboard](docs/keel-dashboard.html) and [economics calculator](docs/economics-calculator.html) mockups.
+
 ## Quick start
 
 ```bash
