@@ -10,9 +10,25 @@ Defaults are seeded from config.py (prices) and the plan's worked example.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+import re
+from dataclasses import dataclass
 
 import config
+
+
+def margin_cost(offer_made: str | None, price: float) -> float:
+    """Dollar margin conceded by an offer (used by the analytics layer, §4).
+
+    Discount → the % of price given away each month. Pause → a small goodwill
+    fraction of price (mostly deferred, not lost). No offer → 0."""
+    if not offer_made:
+        return 0.0
+    if "discount" in offer_made:
+        pct = float(re.findall(r"(\d+)", offer_made)[0])
+        return round(price * pct / 100, 2)
+    if "pause" in offer_made:
+        return round(price * config.PAUSE_MARGIN_FRACTION, 2)
+    return 0.0
 
 
 @dataclass

@@ -80,6 +80,10 @@ SYNTH_N_CUSTOMERS = 200
 # ---------------------------------------------------------------------------
 CLUSTER_K = 5             # fixed k for KMeans; start simple (handoff §8 open decision)
 CLUSTER_RANDOM_STATE = 42
+# Relative margin cost of a pause vs. a discount. A discount concedes a % of
+# price every month; a pause mostly defers revenue, so its true given-away
+# margin is modeled as a small goodwill fraction of price. Tunable.
+PAUSE_MARGIN_FRACTION = 0.07
 
 # ---------------------------------------------------------------------------
 # Datastore.

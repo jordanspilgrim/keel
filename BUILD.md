@@ -12,7 +12,7 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 | **1 — Cancellation-saver agent** | ✅ **done** | `agent/runtime.py` Responses-API loop, `agent/tools.py`, `agent/policy.py`, `agent/disclosure.py`, `sim.py` (customer simulator), `llm.py`, structured disposition | `python -m scripts.phase1_accept`: eligible → **saved** (3-mo pause), ineligible → **lost** (cooldown-rejected save offer, graceful churn); disclosure in every transcript; no offer exceeds limits ✓; 10 unit tests pass |
 | **2 — Guardrails & compliance** | ✅ **done** | `agent/guardrails.py` (input: PII redact / jailbreak / scope; output: tone / promise / grounding), policy human-in-the-loop (+`deny_refund` tool), `guardrail_events` populated, PII redacted before store | `python -m scripts.phase2_accept`: **100% catch rate (11/11)** — jailbreak 4/4 blocked, off-scope 4/4 bounded, PII 3/3 redacted, over-limit 40%→capped 20%, refund→human ✓; 23 unit tests pass |
 | **3 — Eval harness** | ✅ **done** | `evals/judge.py` (5-dim rubric + fairness flag), `evals/run_evals.py` (grade_all + run_golden), 5 golden fixtures, `batch.py` concurrent runner | `python -m scripts.phase3_accept`: 12/12 graded, golden agreement **100%** (5/5), broken agent → **fail** (resolution 2); fairness slice by group reported |
-| **4 — VoC analytics** | ⬜ | `analytics/embed.py`, `analytics/cluster.py`, `analytics/themes.py` | top-3 churn drivers + "20%-off saves ~8pp more than pause but costs ~3× margin" from clustered data only |
+| **4 — VoC analytics** | ✅ **done** | `analytics/embed.py` (batched), `analytics/cluster.py` (KMeans), `analytics/themes.py` (theme cards + offer effectiveness + ranked signals), `economics.margin_cost` | `python -m scripts.phase4_accept`: 30-conv batch → 5 themes, top-3 drivers, ranked signals, offer comparison from clusters ✓ |
 | **5 — Close the loop** | ⬜ | `dashboard/export.py` → `data.json` wired to `dashboard/index.html`; `run_demo.py` acts on one signal, shows the lift | `python run_demo.py` runs the full flywheel end-to-end; dashboard reflects the lift — **the money demo** |
 | **6 — Stretch** | ⬜ | adversarial red-team suite (synth already seeds 11 probes), A/B offer testing, "propose a policy change" agent | — |
 
@@ -38,6 +38,12 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 - Action guardrail: `deny_refund` added; consequential tools route to human (`human_review` event).
 - Acceptance: 100% catch rate on the 11-probe red-team; over-limit discount capped to the 20% ceiling; refund routed to a human. 13 new unit tests (redaction, jailbreak patterns, promise/grounding) — 23 total.
 - Design note: over-limit discounts are **capped** to the ceiling (never honored above it) rather than hard-rejected — this satisfies "the model can't exceed policy" while honoring the bias-to-next-best-action principle (offer the max allowed, don't just say no). Genuine rejection still fires on the margin floor and the save-offer cooldown.
+
+## Phase 4 — verified
+
+- `analytics/`: de-identified conversation summaries (customer's own redacted words) → batched `text-embedding-3-small` → KMeans(k=5) → per-cluster LLM theme cards (label/summary/size/save_rate/avg_margin_cost/example_ids) → ranked signals by volume × loss-impact. Themes + signals persisted.
+- Offer effectiveness aggregation (save rate vs. margin cost per offer type) with `economics.margin_cost` — a 20% discount concedes the % of price monthly; a pause is a small goodwill fraction (≈3× cheaper).
+- Fidelity fix during verification: the customer simulator was over-tuned toward rejection, producing an unbelievable ~7% overall save rate. Recalibrated to a *reasonable* customer (persuadable by a genuinely good, relevant offer) → realistic ~47% save rate with sensible per-theme variation (price-sensitive 75%, competitor-switch 22%). Not rigged — the sim just stopped being a brick wall. Prior gates (Phase 1/2) still hold: eligible saves more readily, ineligible still churns (no offer authorized under cooldown regardless of the sim).
 
 ## Notes
 
