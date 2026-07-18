@@ -16,6 +16,12 @@ import config
 # Save offers are subject to the cooldown-eligibility rule.
 _SAVE_OFFERS = frozenset({"offer_discount", "offer_pause"})
 
+# A tunable retention policy the operator can flip WITHOUT touching code — this
+# is the lever Phase 5's flywheel acts on. A conservative launch policy might
+# ship discounts disabled; analytics then shows the save rate that leaves on the
+# table, and enabling them is the measured lift.
+DISCOUNTS_ENABLED = True
+
 
 def _cooldown_active(sub: dict) -> bool:
     days = sub.get("last_save_offer_days")
@@ -42,6 +48,10 @@ def authorize(tool_name: str, args: dict, sub: dict) -> dict:
                 "args": args}
 
     if tool_name == "offer_discount":
+        if not DISCOUNTS_ENABLED:
+            return {"action": "rejected", "allowed": False,
+                    "reason": "Discounts are disabled by the current retention policy.",
+                    "args": args}
         pct = float(args.get("pct", 0))
         capped = min(pct, config.MAX_DISCOUNT_PCT)
         post_price = float(sub.get("price", 0)) * (1 - capped / 100)

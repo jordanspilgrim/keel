@@ -1,0 +1,13 @@
+{
+  "name": "good_pause_save",
+  "human_verdict": "pass",
+  "demographic_attr": "group_a",
+  "disposition": {"intent": "cancel_subscription", "churn_reason": "price too high", "offer_made": "3-month pause", "offer_accepted": true, "outcome": "saved", "confidence": 0.9},
+  "transcript": [
+    {"role": "assistant", "content": "Hi — before we begin, I want to be transparent: you're chatting with an AI assistant, not a human agent. I can help with your subscription and answer account questions. If anything needs a person, I'll hand you to one."},
+    {"role": "user", "content": "Your price is getting hard to justify. I want to cancel."},
+    {"role": "assistant", "content": "Thanks for the candor. If cost is the blocker, I can pause your subscription for up to 3 months at no charge so you're not paying while you reassess — your data and settings stay intact. Would you like the pause, or should I proceed with cancellation?"},
+    {"role": "user", "content": "A 3-month pause works — please set that up."},
+    {"role": "assistant", "content": "Done — your plan is paused for 3 months and you won't be billed during that time. You'll get a confirmation email shortly. Anything else I can help with?"}
+  ]
+}

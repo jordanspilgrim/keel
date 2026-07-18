@@ -128,12 +128,12 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict) -
     return {"status": "rejected", "reason": verdict["reason"]}
 
 
-def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict) -> str:
+def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: str = SYSTEM) -> str:
     """Produce one agent reply, resolving any tool calls first."""
     for _ in range(MAX_HOPS):
         resp = llm.client().responses.create(
             model=config.FLAGSHIP_MODEL,
-            instructions=SYSTEM,
+            instructions=system,
             input=input_list,
             tools=tools.TOOL_SCHEMAS,
             tool_choice="auto",
@@ -195,8 +195,14 @@ def _disposition(transcript: list, scenario: dict, rec: dict, outcome: str, offe
     }
 
 
-def run_conversation(scenario: dict, conn, *, model: str = config.FLAGSHIP_MODEL) -> dict:
-    """Run one conversation to completion; persist it; return the stored record."""
+def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict:
+    """Run one conversation to completion WITHOUT writing to the DB (reads only).
+
+    Returns a record ready for persist_conversation. Because it never writes, it
+    is safe to run many of these concurrently, each with its own read connection;
+    persistence is centralized on the main thread (see batch.py). `system` lets a
+    caller inject a modified agent prompt (used to demo the eval catching a
+    broken agent, and to run before/after policy batches)."""
     cid = scenario["customer_id"]
     sub = tools.get_subscription(conn, cid)
     rec = {"offer_made": None, "escalated": False, "policy_decisions": [],
@@ -211,7 +217,7 @@ def run_conversation(scenario: dict, conn, *, model: str = config.FLAGSHIP_MODEL
 
     outcome, offer_accepted = None, False
     for _ in range(MAX_TURNS):
-        reply = _agent_turn(input_list, cid, sub, conn, rec)
+        reply = _agent_turn(input_list, cid, sub, conn, rec, system=system)
         transcript.append({"role": "assistant", "content": reply})
         if rec["escalated"]:
             outcome = "escalated"
@@ -235,23 +241,38 @@ def run_conversation(scenario: dict, conn, *, model: str = config.FLAGSHIP_MODEL
         outcome = "lost"
 
     disp = _disposition(transcript, scenario, rec, outcome, offer_accepted)
+    return {"customer_id": cid, "scenario_id": scenario["id"], "transcript": transcript,
+            "disposition": disp, "outcome": outcome, "offer_made": rec["offer_made"],
+            "policy_decisions": rec["policy_decisions"], "guardrail_events": rec["guardrail"],
+            "audit": rec["audit"]}
 
+
+def persist_conversation(conn, record: dict) -> int:
+    """Write a simulated conversation + its audit/guardrail rows. Returns the
+    new conversation id and stamps it onto the record. Call on the main thread."""
     cur = conn.execute(
         "INSERT INTO conversations "
         "(customer_id, scenario_id, transcript_json, disposition_json, offer_made, outcome, created_at) "
         "VALUES (?,?,?,?,?,?,?)",
-        (cid, scenario["id"], db.dumps(transcript), db.dumps(disp), rec["offer_made"], outcome, _now()),
+        (record["customer_id"], record["scenario_id"], db.dumps(record["transcript"]),
+         db.dumps(record["disposition"]), record["offer_made"], record["outcome"], _now()),
     )
     conv_id = cur.lastrowid
     conn.executemany(
         "INSERT INTO audit_log (conversation_id, actor, decision, reason, created_at) VALUES (?,?,?,?,?)",
-        [(conv_id, actor, decision, reason, _now()) for (actor, decision, reason) in rec["audit"]],
+        [(conv_id, a, d, r, _now()) for (a, d, r) in record["audit"]],
     )
     conn.executemany(
         "INSERT INTO guardrail_events (conversation_id, type, action, detail, created_at) VALUES (?,?,?,?,?)",
-        [(conv_id, gtype, action, detail, _now()) for (gtype, action, detail) in rec["guardrail"]],
+        [(conv_id, t, a, d, _now()) for (t, a, d) in record["guardrail_events"]],
     )
     conn.commit()
-    return {"conversation_id": conv_id, "transcript": transcript, "disposition": disp,
-            "outcome": outcome, "offer_made": rec["offer_made"],
-            "policy_decisions": rec["policy_decisions"], "guardrail_events": rec["guardrail"]}
+    record["conversation_id"] = conv_id
+    return conv_id
+
+
+def run_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict:
+    """Simulate one conversation and persist it (single-conversation convenience)."""
+    record = simulate_conversation(scenario, conn, system=system)
+    persist_conversation(conn, record)
+    return record
