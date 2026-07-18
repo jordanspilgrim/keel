@@ -38,6 +38,11 @@ def test_consequential_tool_needs_human():
     assert not v["allowed"] and v["action"] == "needs_human"
 
 
+def test_refund_denial_routes_to_human():
+    v = policy.authorize("deny_refund", {"reason": "outside window"}, ELIGIBLE)
+    assert not v["allowed"] and v["action"] == "needs_human"
+
+
 def test_margin_floor_rejects_deep_discount_on_cheap_plan():
     cheap = {"plan": "Basic", "price": 6.0, "status": "active", "last_save_offer_days": None}
     v = policy.authorize("offer_discount", {"pct": 20}, cheap)

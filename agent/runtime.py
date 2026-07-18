@@ -25,7 +25,7 @@ import config
 import db
 import llm
 import sim
-from agent import disclosure, policy, tools
+from agent import disclosure, guardrails, policy, tools
 
 MAX_TURNS = 4          # agent<->customer exchanges before we call it lost
 MAX_HOPS = 5           # tool-resolution hops within a single agent turn
@@ -78,11 +78,26 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _screen_and_record(text: str, rec: dict, *, classify_scope: bool) -> str:
+    """Run input guardrails on a user turn, record any trips, return the
+    redacted text that is safe to store and send to the model."""
+    s = guardrails.screen_input(text, classify_scope=classify_scope)
+    if s["pii_types"]:
+        rec["guardrail"].append(("pii", "redacted", ",".join(s["pii_types"])))
+    if s["jailbreak"]["flagged"]:
+        rec["guardrail"].append(("jailbreak", "blocked", s["jailbreak"]["reason"]))
+    if s["off_scope"]:
+        rec["guardrail"].append(("off_scope", "bounded", s["scope_reason"]))
+    return s["redacted_text"]
+
+
 def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict) -> dict:
     """Execute a read tool or dispose an action tool via policy. Records the
     authorized offer / escalation and writes audit_log rows."""
     if name in tools.READ_TOOLS:
-        return tools.read(conn, name, cid)
+        result = tools.read(conn, name, cid)
+        rec["tool_results"].append(json.dumps(result))
+        return result
 
     verdict = policy.authorize(name, args, sub)
     rec["audit"].append(("policy", f"{name}:{verdict['action']}", verdict["reason"]))
@@ -99,10 +114,18 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict) -
             rec["offer_made"] = f"{aargs['months']}-month pause"
         elif name == "offer_discount":
             rec["offer_made"] = f"{aargs['pct']:.0f}% discount"
+        if verdict["action"] == "capped":  # action guardrail trip: proposed past a limit
+            rec["guardrail"].append(("over_limit", "capped", verdict["reason"]))
         return {"status": "approved", "offer": rec["offer_made"], "note": verdict["reason"]}
 
-    # rejected / needs_human
-    return {"status": verdict["action"], "reason": verdict["reason"]}
+    if verdict["action"] == "needs_human":  # consequential → human-in-the-loop (GDPR Art. 22)
+        rec["guardrail"].append(("human_review", "routed", f"{name}: {verdict['reason']}"))
+        return {"status": "needs_human", "reason": verdict["reason"]}
+
+    # rejected — classify the block for observability
+    gtype = "cooldown" if ("cooldown" in verdict["reason"].lower() or "save offer" in verdict["reason"].lower()) else "over_limit"
+    rec["guardrail"].append((gtype, "rejected", verdict["reason"]))
+    return {"status": "rejected", "reason": verdict["reason"]}
 
 
 def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict) -> str:
@@ -120,6 +143,14 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict) -> str:
         calls = [it for it in resp.output if getattr(it, "type", None) == "function_call"]
         if not calls:
             text = resp.output_text or "Thanks — is there anything else I can help with?"
+            out = guardrails.screen_output(text, rec["tool_results"])
+            for kind in ("promise", "grounding"):
+                if out[kind]["flagged"]:
+                    rec["guardrail"].append((f"{kind}", "flagged", out[kind]["reason"]))
+            if out["tone"]["flagged"]:
+                rec["guardrail"].append(("tone", "blocked", out["tone"]["reason"]))
+                rec["escalated"] = True
+                text = "I want to make sure this is handled well — let me bring in a teammate."
             input_list.append({"role": "assistant", "content": text})
             return text
         for call in calls:
@@ -168,12 +199,15 @@ def run_conversation(scenario: dict, conn, *, model: str = config.FLAGSHIP_MODEL
     """Run one conversation to completion; persist it; return the stored record."""
     cid = scenario["customer_id"]
     sub = tools.get_subscription(conn, cid)
-
-    transcript = [disclosure.disclosure_message(),
-                  {"role": "user", "content": scenario["opening_message"]}]
-    input_list = list(transcript)
     rec = {"offer_made": None, "escalated": False, "policy_decisions": [],
+           "tool_results": [], "guardrail": [],
            "audit": [("system", "ai_disclosure_shown", "EU AI Act Art. 50")]}
+
+    # Input guardrails on the opening turn: redact PII BEFORE it is stored,
+    # screen for jailbreak/off-scope (scope classified at entry only).
+    opening = _screen_and_record(scenario["opening_message"], rec, classify_scope=True)
+    transcript = [disclosure.disclosure_message(), {"role": "user", "content": opening}]
+    input_list = list(transcript)
 
     outcome, offer_accepted = None, False
     for _ in range(MAX_TURNS):
@@ -183,8 +217,9 @@ def run_conversation(scenario: dict, conn, *, model: str = config.FLAGSHIP_MODEL
             outcome = "escalated"
             break
         cust = sim.respond(scenario, reply, transcript)
-        transcript.append({"role": "user", "content": cust["reply"]})
-        input_list.append({"role": "user", "content": cust["reply"]})
+        cust_text = _screen_and_record(cust["reply"], rec, classify_scope=False)
+        transcript.append({"role": "user", "content": cust_text})
+        input_list.append({"role": "user", "content": cust_text})
         if cust["decision"] == "accept":
             # A save requires an accepted *retention offer*. "Yes, cancel me" with
             # no offer on the table is the customer accepting cancellation = churn.
@@ -212,6 +247,11 @@ def run_conversation(scenario: dict, conn, *, model: str = config.FLAGSHIP_MODEL
         "INSERT INTO audit_log (conversation_id, actor, decision, reason, created_at) VALUES (?,?,?,?,?)",
         [(conv_id, actor, decision, reason, _now()) for (actor, decision, reason) in rec["audit"]],
     )
+    conn.executemany(
+        "INSERT INTO guardrail_events (conversation_id, type, action, detail, created_at) VALUES (?,?,?,?,?)",
+        [(conv_id, gtype, action, detail, _now()) for (gtype, action, detail) in rec["guardrail"]],
+    )
     conn.commit()
     return {"conversation_id": conv_id, "transcript": transcript, "disposition": disp,
-            "outcome": outcome, "offer_made": rec["offer_made"], "policy_decisions": rec["policy_decisions"]}
+            "outcome": outcome, "offer_made": rec["offer_made"],
+            "policy_decisions": rec["policy_decisions"], "guardrail_events": rec["guardrail"]}
