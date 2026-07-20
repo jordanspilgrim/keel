@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "console",
+      "runtimeExecutable": ".venv/bin/uvicorn",
+      "runtimeArgs": ["server:app", "--port", "8500"],
+      "port": 8500
+    }
+  ]
+}

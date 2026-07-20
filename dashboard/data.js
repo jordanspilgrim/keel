@@ -1,9 +1,9 @@
 window.KEEL_DATA = {
   "kpis": {
-    "madj_save_rate": 0.4433,
-    "madj_delta_pp": 18.5,
-    "save_rate": 0.5,
-    "save_delta_pp": 22.2,
+    "madj_save_rate": 0.5983,
+    "madj_delta_pp": 13.3,
+    "save_rate": 0.6667,
+    "save_delta_pp": 16.7,
     "eval_pass_rate": 0.9444,
     "guardrail_catch_rate": 1.0,
     "compliance_coverage": 1.0
@@ -14,53 +14,53 @@ window.KEEL_DATA = {
       "After"
     ],
     "save": [
-      0.2778,
-      0.5
+      0.5,
+      0.6667
     ],
     "madj": [
-      0.2583,
-      0.4433
+      0.465,
+      0.5983
     ]
   },
   "drivers": [
     {
-      "label": "Price sensitivity",
-      "share": 39,
-      "save_rate": 0.571
-    },
-    {
-      "label": "Low usage",
+      "label": "Switching to competitor",
       "share": 28,
-      "save_rate": 0.8
+      "save_rate": 0.2
     },
     {
-      "label": "Switching to competitor",
+      "label": "Price/Value Concerns",
+      "share": 22,
+      "save_rate": 1.0
+    },
+    {
+      "label": "Pricing/Cost Concerns",
+      "share": 22,
+      "save_rate": 0.75
+    },
+    {
+      "label": "No longer using",
       "share": 17,
-      "save_rate": 0.333
+      "save_rate": 1.0
     },
     {
-      "label": "Switching to competitor",
+      "label": "Low Usage",
       "share": 11,
-      "save_rate": 0.0
-    },
-    {
-      "label": "Price sensitivity",
-      "share": 6,
-      "save_rate": 0.0
+      "save_rate": 0.5
     }
   ],
   "offers": [
     {
-      "label": "pause",
-      "save_rate": 0.857,
-      "margin_cost": 16.83,
-      "rel_cost": 1.0
+      "label": "discount",
+      "save_rate": 1.0,
+      "margin_cost": 15.13,
+      "rel_cost": 1.05
     },
     {
-      "label": "discount",
-      "save_rate": 0.5,
-      "margin_cost": 26.13,
-      "rel_cost": 1.55
+      "label": "pause",
+      "save_rate": 0.818,
+      "margin_cost": 14.44,
+      "rel_cost": 1.0
     }
   ],
   "safety": {

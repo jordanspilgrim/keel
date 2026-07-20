@@ -52,6 +52,36 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 - `run_demo.py`: the full flywheel on one identical cohort — BASELINE (discounts disabled) → grade + cluster → the analytics signal (price-sensitive under-saved) → ACT (enable discounts + lead-with-discount playbook) → RE-MEASURE. Result: save rate 28%→50% (+22pp), margin-adjusted 26%→44% (+18.5pp). The lift comes only from acting on the analytics recommendation.
 - Definition of done met: `python run_demo.py` runs generate → converse → grade → analyze → act → re-measure → export, and the dashboard shows the lift.
 
+## Keel Console — interactive web app (post-Phase-5)
+
+A FastAPI app (`server.py` + `console/`) that turns Keel into something you can
+operate, not just run — and draws the two integration seams explicitly.
+
+- **Live chat (Wizard-of-Oz testing + demo):** you play the customer; the agent
+  grounds against a real synthetic account and every turn streams a **step trace**
+  (input screening → reasoning → tool calls → policy verdict → output check → reply)
+  so the model latency is filled with *legibility* — you watch a jailbreak get
+  blocked, a discount get capped, PII get redacted, in real time.
+- **Explorer:** KPI cards with plain-English explanations + formulas (popovers),
+  each click-through to the conversations behind the number — the
+  `audit_log`/`evals`/`guardrail_events` made browsable (the "legible" principle).
+- **Seams:** the web app is the first **Channel** adapter (a new channel maps its
+  payloads onto `new_session`/`live_turn`); `agent/tools.py` is the **Backend**
+  seam (synthetic reference impl → a real CRM/billing impl later). The agent core
+  is untouched by either.
+- **One code path:** `live_turn` reuses the exact batch screening/agent/policy/
+  output logic via an optional `on_step` callback — no divergence to drift.
+
+Run: `.venv/bin/uvicorn server:app --port 8500` (or via `.claude/launch.json` → `console`).
+
+**Verified bug-free:** 34 unit/integration tests (11 new — live-session state
+machine + FastAPI endpoints, mocked agent, no API); a live smoke
+(`python -m scripts.console_smoke`) exercising the real agent end to end (happy
+offer + step trace, jailbreak blocked, off-scope bounded, persistence); and a
+real uvicorn boot serving over HTTP. Robustness: no shared SQLite connection
+(per-request/thread), background-thread + polling turns (no leaked connections),
+worker exceptions surfaced not hung, per-session busy-guard.
+
 ## Notes
 
 - Phase 1 onward needs a working `OPENAI_API_KEY` in `.env` (validated 2026-07-17).

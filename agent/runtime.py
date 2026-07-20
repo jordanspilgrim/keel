@@ -91,17 +91,32 @@ def _screen_and_record(text: str, rec: dict, *, classify_scope: bool) -> str:
     return s["redacted_text"]
 
 
-def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict) -> dict:
+def _emit(on_step, kind: str, text: str, **extra) -> None:
+    """Fire a step event for the live-turn legibility trace (no-op in batch)."""
+    if on_step is not None:
+        on_step({"kind": kind, "text": text, **extra})
+
+
+def _compact(result) -> str:
+    """One-line summary of a tool result for the trace."""
+    if isinstance(result, dict):
+        return " · ".join(str(v) for v in list(result.values())[:3])
+    return str(result)[:60]
+
+
+def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, on_step=None) -> dict:
     """Execute a read tool or dispose an action tool via policy. Records the
     authorized offer / escalation and writes audit_log rows."""
     if name in tools.READ_TOOLS:
         result = tools.read(conn, name, cid)
         rec["tool_results"].append(json.dumps(result))
+        _emit(on_step, "tool", f"{name} → {_compact(result)}")
         return result
 
     verdict = policy.authorize(name, args, sub)
     rec["audit"].append(("policy", f"{name}:{verdict['action']}", verdict["reason"]))
     rec["policy_decisions"].append({"tool": name, **verdict})
+    _emit(on_step, "policy", f"{name} → {verdict['action']}: {verdict['reason']}")
 
     if name == "escalate_to_human" and verdict["allowed"]:
         rec["escalated"] = True
@@ -128,9 +143,10 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict) -
     return {"status": "rejected", "reason": verdict["reason"]}
 
 
-def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: str = SYSTEM) -> str:
+def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: str = SYSTEM, on_step=None) -> str:
     """Produce one agent reply, resolving any tool calls first."""
-    for _ in range(MAX_HOPS):
+    for hop in range(MAX_HOPS):
+        _emit(on_step, "think", "Reasoning about the best next action…" if hop == 0 else "Working…")
         resp = llm.client().responses.create(
             model=config.FLAGSHIP_MODEL,
             instructions=system,
@@ -144,6 +160,7 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
         if not calls:
             text = resp.output_text or "Thanks — is there anything else I can help with?"
             out = guardrails.screen_output(text, rec["tool_results"])
+            flags = [k for k in ("promise", "grounding", "tone") if out[k]["flagged"]]
             for kind in ("promise", "grounding"):
                 if out[kind]["flagged"]:
                     rec["guardrail"].append((f"{kind}", "flagged", out[kind]["reason"]))
@@ -151,17 +168,19 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
                 rec["guardrail"].append(("tone", "blocked", out["tone"]["reason"]))
                 rec["escalated"] = True
                 text = "I want to make sure this is handled well — let me bring in a teammate."
+            _emit(on_step, "output", "Output guardrails passed" if not flags else f"Output guardrail flags: {', '.join(flags)}")
             input_list.append({"role": "assistant", "content": text})
             return text
         for call in calls:
             input_list.append({"type": "function_call", "call_id": call.call_id,
                                "name": call.name, "arguments": call.arguments})
             args = json.loads(call.arguments or "{}")
-            result = _resolve_call(call.name, args, cid, sub, conn, rec)
+            result = _resolve_call(call.name, args, cid, sub, conn, rec, on_step=on_step)
             input_list.append({"type": "function_call_output", "call_id": call.call_id,
                                "output": json.dumps(result)})
         # An escalation resolves the turn — don't keep spinning tool hops.
         if rec["escalated"]:
+            _emit(on_step, "output", "Escalating to a human teammate")
             msg = "Understood — I'm connecting you with a teammate who can take it from here."
             input_list.append({"role": "assistant", "content": msg})
             return msg
@@ -275,4 +294,101 @@ def run_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict:
     """Simulate one conversation and persist it (single-conversation convenience)."""
     record = simulate_conversation(scenario, conn, system=system)
     persist_conversation(conn, record)
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Live conversation API — the HUMAN is the customer (the console / web widget).
+# Reuses the exact screening / agent / policy / output logic above; the only
+# difference from the batch path is that turns are driven by real user input
+# instead of the simulated customer, and each turn emits a step trace so the
+# latency is filled with legibility (what the agent is doing right now).
+# ---------------------------------------------------------------------------
+def new_session(customer_id: int, conn) -> dict:
+    """Start a live conversation with the AI-disclosure turn already shown."""
+    sub = tools.get_subscription(conn, customer_id)
+    customer = tools.get_customer(conn, customer_id)
+    rec = {"offer_made": None, "escalated": False, "policy_decisions": [],
+           "tool_results": [], "guardrail": [],
+           "audit": [("system", "ai_disclosure_shown", "EU AI Act Art. 50")]}
+    disc = disclosure.disclosure_message()
+    return {"customer_id": customer_id, "sub": sub, "customer": customer, "rec": rec,
+            "transcript": [disc], "input_list": [disc], "outcome": None,
+            "disclosure": disc["content"]}
+
+
+def _turn_result(session: dict, reply: str, new_events: list) -> dict:
+    rec = session["rec"]
+    return {"reply": reply, "escalated": rec["escalated"], "offer_made": rec["offer_made"],
+            "outcome": session["outcome"], "new_guardrail_events": new_events,
+            "guardrail_events": list(rec["guardrail"])}
+
+
+def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
+    """Advance one live turn. Input guardrails run first; a jailbreak is blocked
+    before it reaches the model, off-scope is bounded, otherwise the agent runs."""
+    rec = session["rec"]
+    cid = session["customer_id"]
+    sub = session["sub"]
+    _emit(on_step, "input", "Screening your message (PII · injection · scope)…")
+
+    s = guardrails.screen_input(user_text, classify_scope=True)
+    new_events: list = []
+    if s["pii_types"]:
+        ev = ("pii", "redacted", ",".join(s["pii_types"]))
+        rec["guardrail"].append(ev); new_events.append(ev)
+        _emit(on_step, "guardrail", f"PII redacted before storage: {', '.join(s['pii_types'])}", gtype="pii")
+    shown = s["redacted_text"]
+
+    # Live red-team: block a jailbreak before the model ever sees it.
+    if s["jailbreak"]["flagged"]:
+        ev = ("jailbreak", "blocked", s["jailbreak"]["reason"])
+        rec["guardrail"].append(ev); new_events.append(ev)
+        _emit(on_step, "guardrail", "Jailbreak / prompt-injection blocked — not forwarded to the model", gtype="jailbreak")
+        reply = ("I can't do that. I'm the retention assistant, so I can only help with your "
+                 "subscription, billing, or cancellation — anything there I can help with?")
+        session["transcript"].append({"role": "user", "content": shown})   # display only; NOT added to model input
+        session["transcript"].append({"role": "assistant", "content": reply})
+        _emit(on_step, "reply", reply)
+        return _turn_result(session, reply, new_events)
+
+    if s["off_scope"]:
+        ev = ("off_scope", "bounded", s["scope_reason"])
+        rec["guardrail"].append(ev); new_events.append(ev)
+        _emit(on_step, "guardrail", "Off-topic request — bounded, not free-formed", gtype="off_scope")
+        reply = ("That's outside what I can help with — I'm just the retention assistant. "
+                 "I can help with your subscription, billing, or cancellation, though.")
+        for lst in (session["transcript"], session["input_list"]):
+            lst.append({"role": "user", "content": shown})
+            lst.append({"role": "assistant", "content": reply})
+        _emit(on_step, "reply", reply)
+        return _turn_result(session, reply, new_events)
+
+    # Normal path — same agent loop as the batch runner.
+    session["transcript"].append({"role": "user", "content": shown})
+    session["input_list"].append({"role": "user", "content": shown})
+    before = len(rec["guardrail"])
+    reply = _agent_turn(session["input_list"], cid, sub, conn, rec, on_step=on_step)
+    session["transcript"].append({"role": "assistant", "content": reply})
+    new_events += rec["guardrail"][before:]
+    if rec["escalated"]:
+        session["outcome"] = "escalated"
+    _emit(on_step, "reply", reply)
+    return _turn_result(session, reply, new_events)
+
+
+def resolve_session(session: dict, outcome: str, conn) -> dict:
+    """End a live conversation: compute the disposition and persist it so it
+    appears in the explorer and moves the metrics. `outcome` in saved/lost/escalated."""
+    rec = session["rec"]
+    if session["outcome"] == "escalated":
+        outcome = "escalated"
+    offer_accepted = outcome == "saved" and bool(rec["offer_made"])
+    scenario = {"id": None, "customer_id": session["customer_id"], "churn_reason": "live session"}
+    disp = _disposition(session["transcript"], scenario, rec, outcome, offer_accepted)
+    record = {"customer_id": session["customer_id"], "scenario_id": None,
+              "transcript": session["transcript"], "disposition": disp, "outcome": outcome,
+              "offer_made": rec["offer_made"], "guardrail_events": rec["guardrail"], "audit": rec["audit"]}
+    persist_conversation(conn, record)
+    session["resolved"] = True
     return record
