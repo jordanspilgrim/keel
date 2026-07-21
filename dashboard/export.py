@@ -17,6 +17,7 @@ import os
 
 import db
 import economics
+from agent import disclosure
 from analytics import themes as themes_mod
 
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,17 +41,24 @@ def conversation_metrics(conn) -> dict:
             "madj_save_rate": round(madj / n, 4)}
 
 
-def _eval_pass_rate(conn) -> float:
-    row = conn.execute("SELECT count(*) t, sum(verdict='pass') p FROM evals").fetchone()
-    return round((row["p"] or 0) / row["t"], 4) if row["t"] else 0.0
-
-
-def _compliance_coverage(conn) -> float:
+# --- CANONICAL metric definitions (server + dashboard MUST share these) -----
+# One source of truth so /api/metrics and the exported dashboard never diverge.
+def eval_metrics(conn) -> dict:
+    """Eval pass rate over ALL conversations (an ungraded conversation cannot
+    'pass') and coverage = share with a real (non-error) grade."""
     total = conn.execute("SELECT count(*) FROM conversations").fetchone()[0] or 1
-    with_disc = conn.execute(
-        "SELECT count(DISTINCT conversation_id) FROM audit_log WHERE decision='ai_disclosure_shown'"
-    ).fetchone()[0]
-    return round(with_disc / total, 4)
+    passes = conn.execute("SELECT count(*) FROM evals WHERE verdict='pass'").fetchone()[0]
+    graded = conn.execute("SELECT count(*) FROM evals WHERE verdict IN ('pass','fail')").fetchone()[0]
+    return {"eval_pass_rate": round(passes / total, 4), "eval_coverage": round(graded / total, 4)}
+
+
+def compliance_coverage(conn) -> float:
+    """Share of conversations whose TRANSCRIPT actually contains the AI disclosure
+    — verified against the transcript, not merely the audit-log marker."""
+    rows = conn.execute("SELECT transcript_json FROM conversations").fetchall()
+    total = len(rows) or 1
+    ok = sum(1 for r in rows if disclosure.has_disclosure(json.loads(r["transcript_json"])))
+    return round(ok / total, 4)
 
 
 def build_data(conn, *, before: dict, after: dict, guardrail_counts: dict, catch_rate: float,
@@ -72,15 +80,18 @@ def build_data(conn, *, before: dict, after: dict, guardrail_counts: dict, catch
                      "rel_cost": round(o["avg_margin_cost"] / pause_cost, 2)}
                     for o in offers if o["offer"] != "none"]
 
+    evalm = eval_metrics(conn)
+    compliance = compliance_coverage(conn)
     return {
         "kpis": {
             "madj_save_rate": after["madj_save_rate"],
             "madj_delta_pp": round((after["madj_save_rate"] - before["madj_save_rate"]) * 100, 1),
             "save_rate": after["save_rate"],
             "save_delta_pp": round((after["save_rate"] - before["save_rate"]) * 100, 1),
-            "eval_pass_rate": _eval_pass_rate(conn),
+            "eval_pass_rate": evalm["eval_pass_rate"],
+            "eval_coverage": evalm["eval_coverage"],
             "guardrail_catch_rate": round(catch_rate, 4),
-            "compliance_coverage": _compliance_coverage(conn),
+            "compliance_coverage": compliance,
         },
         "trend": {"labels": ["Before", "After"],
                   "save": [before["save_rate"], after["save_rate"]],
@@ -88,7 +99,7 @@ def build_data(conn, *, before: dict, after: dict, guardrail_counts: dict, catch
         "drivers": drivers,
         "offers": offer_points,
         "safety": {"catch_rate": round(catch_rate, 4),
-                   "compliance": _compliance_coverage(conn), **guardrail_counts},
+                   "compliance": compliance, **guardrail_counts},
         "meta": {"conversations": len(views), "provenance": provenance or {}},
     }
 

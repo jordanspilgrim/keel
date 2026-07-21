@@ -59,7 +59,39 @@ def test_promise_flags_over_ceiling_discount():
 
 
 def test_promise_ok_within_ceiling():
-    assert not guardrails.check_promise("I can offer 15% off")["flagged"]
+    # 15% off matches a discount context, so it must be reconciled against an
+    # actual authorization — the boolean pass no longer exists.
+    assert not guardrails.check_promise("I can offer 15% off", authorized={"discount_pct": 15})["flagged"]
+
+
+def test_promise_flags_unauthorized_discount():
+    # In-ceiling, but no offer_discount was authorized this conversation.
+    assert guardrails.check_promise("I can offer 15% off", authorized=None)["flagged"]
+
+
+def test_promise_flags_discount_over_authorized():
+    # Only 10% was authorized; the reply promises 20%.
+    assert guardrails.check_promise("I can offer 20% off", authorized={"discount_pct": 10})["flagged"]
+
+
+def test_promise_flags_unauthorized_pause():
+    assert guardrails.check_promise("I can set up a 3-month pause", authorized=None)["flagged"]
+
+
+def test_promise_flags_pause_over_authorized():
+    r = guardrails.check_promise("I can pause for 3 months", authorized={"pause_months": 1})
+    assert r["flagged"]
+
+
+def test_promise_ok_pause_within_authorized():
+    r = guardrails.check_promise("I'd set up a 2-month pause", authorized={"pause_months": 3})
+    assert not r["flagged"]
+
+
+def test_promise_flags_completion_claim():
+    # Tools only propose; a reply asserting the action is already applied is a lie.
+    assert guardrails.check_promise("I've applied the 20% discount to your account",
+                                    authorized={"discount_pct": 20})["flagged"]
 
 
 def test_grounding_flags_money_with_no_tool_data():

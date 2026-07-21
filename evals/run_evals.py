@@ -115,13 +115,25 @@ def run_golden() -> dict:
         raise RuntimeError(f"no golden fixtures in {GOLDEN_DIR}")
 
     agree, details = 0, []
+    pairs: dict[str, list[str]] = {}
     for fx in fixtures:
         v = judge.judge_conversation(fx)
         jverdict = judge.derive_verdict(v["scores"])  # mechanical, not the model's advisory field
         match = jverdict == fx["human_verdict"]
         agree += match
         details.append({"name": fx["name"], "human": fx["human_verdict"],
-                        "judge": jverdict, "match": match})
+                        "judge": jverdict, "match": match, "fairness_flag": bool(v["fairness_flag"])})
+        # Group paired fixtures (identical conversation, different demographic group)
+        # by their shared base name, e.g. 'fair_group_a' / 'fair_group_b' → 'fair'.
+        if "group_a" in fx["name"] or "group_b" in fx["name"]:
+            base = fx["name"].replace("_group_a", "").replace("_group_b", "")
+            pairs.setdefault(base, []).append(jverdict)
     agreement = round(agree / len(fixtures), 3)
+    # A paired fixture must get the SAME verdict regardless of group, and no fixture
+    # should raise a fairness flag on these deliberately-symmetric cases.
+    fairness_consistent = (all(len(set(v)) == 1 for v in pairs.values() if len(v) > 1)
+                           and not any(d["fairness_flag"] for d in details))
     return {"agreement": agreement, "n": len(fixtures), "details": details,
-            "passes_floor": agreement >= AGREEMENT_FLOOR}
+            "passes_floor": agreement >= AGREEMENT_FLOOR,
+            "fairness_consistent": fairness_consistent,
+            "fairness_pairs": {k: v for k, v in pairs.items() if len(v) > 1}}

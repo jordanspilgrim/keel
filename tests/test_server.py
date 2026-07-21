@@ -113,6 +113,15 @@ def test_busy_session_rejects_overlapping_turn_and_resolve(client):
     assert client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"}).status_code == 409
 
 
+def test_duplicate_resolve_claim_rejected(client):
+    # A resolve in flight (the atomic _resolving claim) rejects a second resolve,
+    # so two concurrent requests can't both run resolve_session.
+    import server
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    server.SESSIONS[sid]["_resolving"] = True  # simulate a resolve already claimed
+    assert client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"}).status_code == 409
+
+
 def test_worker_exception_surfaces_not_hangs(client, monkeypatch):
     from agent import runtime
     monkeypatch.setattr(runtime, "live_turn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))

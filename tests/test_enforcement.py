@@ -32,8 +32,7 @@ def _no_scope_api(monkeypatch):
 
 
 def _rec():
-    return {"offer_made": None, "escalated": False, "policy_decisions": [],
-            "tool_results": [], "guardrail": [], "audit": []}
+    return runtime._new_rec()
 
 
 # --- shared input enforcement (batch == live) ------------------------------
@@ -109,5 +108,5 @@ def test_verdict_derived_from_scores():
 def test_promise_detector_catches_bypasses():
     assert guardrails.check_promise("I'll give you half off")["flagged"]
     assert guardrails.check_promise("How about forty percent off?")["flagged"]
-    assert guardrails.check_promise("I can give you 15% off", authorized_discount=False)["flagged"]
-    assert not guardrails.check_promise("I can give you 15% off", authorized_discount=True)["flagged"]
+    assert guardrails.check_promise("I can give you 15% off", authorized=None)["flagged"]
+    assert not guardrails.check_promise("I can give you 15% off", authorized={"discount_pct": 15})["flagged"]

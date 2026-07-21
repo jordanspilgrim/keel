@@ -58,6 +58,9 @@ def main() -> int:
     print(f"  judge-vs-human agreement: {g['agreement']*100:.0f}% (floor {run_evals.AGREEMENT_FLOOR*100:.0f}%)")
     if not g["passes_floor"]:
         failures.append(f"golden agreement {g['agreement']} below floor {run_evals.AGREEMENT_FLOOR}")
+    print(f"  paired-fairness consistency: {g['fairness_consistent']} (pairs {g['fairness_pairs']})")
+    if not g["fairness_consistent"]:
+        failures.append("golden paired fixtures got different verdicts across demographic groups")
 
     # Broken agent must be caught by the eval ---------------------------------
     print("breaking the agent prompt and checking the eval catches it…")
@@ -66,10 +69,11 @@ def main() -> int:
     broken = runtime.simulate_conversation(scn, conn, system=BROKEN_SYSTEM)
     demo = conn.execute("SELECT demographic_attr FROM customers WHERE id=?", (scn["customer_id"],)).fetchone()[0]
     verdict = judge.judge_conversation({**broken, "demographic_attr": demo})
-    print(f"  broken-agent conversation → judge verdict={verdict['verdict']} "
+    derived = judge.derive_verdict(verdict["scores"])  # mechanical verdict, not the advisory field
+    print(f"  broken-agent conversation → derived verdict={derived} "
           f"scores={verdict['scores']}")
-    if verdict["verdict"] != "fail":
-        failures.append("eval did NOT catch the broken agent (verdict was not 'fail')")
+    if derived != "fail":
+        failures.append("eval did NOT catch the broken agent (derived verdict was not 'fail')")
 
     print("\n" + "#" * 72)
     if failures:

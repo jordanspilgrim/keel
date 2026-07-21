@@ -9,6 +9,7 @@ autonomously. Surfaced in /api/metrics so the dashboard shows the active state.
 from __future__ import annotations
 
 import config
+import db
 
 _MIN_SAMPLE = 10          # don't judge health until there's a sample
 _COVERAGE_FLOOR = 0.90    # evals must cover ≥ this share of conversations
@@ -29,6 +30,15 @@ def program_state(conn) -> dict:
             reasons.append(f"eval pass rate {pass_rate:.0%} below floor {config.EVAL_PASS_RATE_FLOOR:.0%}")
         if coverage < _COVERAGE_FLOOR:
             reasons.append(f"eval coverage {coverage:.0%} below {_COVERAGE_FLOOR:.0%}")
+    # Red-team guardrail catch rate is an OFFLINE metric (an LLM scope call per
+    # probe), so we read the value the last red-team sweep persisted rather than
+    # recompute it on every poll. Absent = never run → not gated (surfaced as such).
+    catch_rate = db.latest_health(conn, "guardrail_catch_rate")
+    if catch_rate is not None:
+        metrics["guardrail_catch_rate"] = round(catch_rate, 3)
+        if catch_rate < config.GUARDRAIL_CATCH_RATE_FLOOR:
+            reasons.append(
+                f"guardrail catch rate {catch_rate:.0%} below floor {config.GUARDRAIL_CATCH_RATE_FLOOR:.0%}")
     healthy = not reasons
     return {"mode": "normal" if healthy else "safe", "healthy": healthy,
             "reasons": reasons, "metrics": metrics}

@@ -107,6 +107,28 @@ def offer_effectiveness(views: list[dict]) -> list[dict]:
     return sorted(out, key=lambda o: o["save_rate"], reverse=True)
 
 
+def rank_segments(conn) -> list[dict]:
+    """Rank churn-reason segments by LOSS IMPACT (volume × miss rate) from the
+    conversations recorded so far. This is the data-driven 'which segment is
+    bleeding' signal — it tells the flywheel WHERE to intervene, instead of the
+    target being assumed. Uses the scenario's ground-truth churn_reason (stable),
+    not the LLM-derived disposition label."""
+    rows = conn.execute(
+        "SELECT sc.churn_reason AS reason, c.outcome FROM conversations c "
+        "JOIN scenarios sc ON sc.id = c.scenario_id "
+        "WHERE sc.kind='churn' AND sc.churn_reason IS NOT NULL"
+    ).fetchall()
+    agg: dict[str, list[int]] = {}
+    for r in rows:
+        a = agg.setdefault(r["reason"], [0, 0])  # [n, saved]
+        a[0] += 1
+        a[1] += 1 if r["outcome"] == "saved" else 0
+    segs = [{"reason": reason, "n": n, "save_rate": round(saved / n, 3),
+             "loss": round(n * (1 - saved / n), 2)}
+            for reason, (n, saved) in agg.items()]
+    return sorted(segs, key=lambda s: (s["loss"], s["n"]), reverse=True)
+
+
 def rank_signals(cards: list[dict]) -> list[dict]:
     """Rank themes by volume × loss impact (unsaved conversations)."""
     signals = []

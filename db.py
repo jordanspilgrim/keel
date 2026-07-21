@@ -110,13 +110,42 @@ CREATE TABLE IF NOT EXISTS signals (
     priority_score    REAL NOT NULL,
     created_at        TEXT NOT NULL
 );
+
+-- Offline health metrics that can't be derived cheaply on every read (e.g. the
+-- red-team guardrail catch rate, which needs an LLM scope call per probe). The
+-- red-team sweep writes the latest value here; the kill switch reads it.
+CREATE TABLE IF NOT EXISTS program_health (
+    id                INTEGER PRIMARY KEY,
+    metric            TEXT NOT NULL,            -- e.g. 'guardrail_catch_rate'
+    value             REAL NOT NULL,
+    detail            TEXT,
+    created_at        TEXT NOT NULL
+);
 """
 
 # Tables cleared by reset_db(), in FK-safe order (children first).
 _TABLES = [
-    "signals", "themes", "audit_log", "guardrail_events", "evals",
+    "program_health", "signals", "themes", "audit_log", "guardrail_events", "evals",
     "conversations", "scenarios", "subscriptions", "customers",
 ]
+
+
+def record_health(conn: sqlite3.Connection, metric: str, value: float, detail: str = "") -> None:
+    """Append a program-health datapoint (latest wins on read)."""
+    from datetime import datetime, timezone
+    conn.execute(
+        "INSERT INTO program_health (metric, value, detail, created_at) VALUES (?,?,?,?)",
+        (metric, float(value), detail, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+
+def latest_health(conn: sqlite3.Connection, metric: str) -> float | None:
+    """Most-recent value for a program-health metric, or None if never recorded."""
+    row = conn.execute(
+        "SELECT value FROM program_health WHERE metric=? ORDER BY id DESC LIMIT 1", (metric,)
+    ).fetchone()
+    return None if row is None else float(row["value"])
 
 
 def connect(db_path: str | None = None) -> sqlite3.Connection:

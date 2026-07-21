@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-21T07:02:21.008442+00:00",
+  "generated_at": "2026-07-21T08:13:24.740251+00:00",
   "cohort_size": 18,
   "cohort_scenario_ids": [
     1,
@@ -23,6 +23,27 @@
   ],
   "paired_cohort": true,
   "treated_segment": "Price too high",
+  "segment_selection": "data-driven (highest loss impact in baseline)",
+  "baseline_segments": [
+    {
+      "reason": "Price too high",
+      "n": 8,
+      "save_rate": 0.375,
+      "loss": 5.0
+    },
+    {
+      "reason": "Switched to competitor",
+      "n": 5,
+      "save_rate": 0.2,
+      "loss": 4.0
+    },
+    {
+      "reason": "No longer needed",
+      "n": 5,
+      "save_rate": 0.8,
+      "loss": 1.0
+    }
+  ],
   "variables_changed": [
     "discount_policy",
     "agent_playbook"
@@ -34,24 +55,24 @@
   },
   "baseline": {
     "policy": "discounts_disabled",
-    "playbook_sha": "da14d8f26a35",
+    "playbook_sha": "8814fd1fd6ec",
     "conversations": 18,
-    "segment_save_rate": 0.625,
-    "overall_save_rate": 0.5556
+    "segment_save_rate": 0.375,
+    "overall_save_rate": 0.4444
   },
   "after": {
     "policy": "discounts_enabled",
-    "playbook_sha": "2f9467cdb2b2",
+    "playbook_sha": "4d3125774545",
     "conversations": 18,
     "segment_save_rate": 0.75,
-    "overall_save_rate": 0.6111,
-    "eval_pass_rate": 0.667,
+    "overall_save_rate": 0.6667,
+    "eval_pass_rate": 0.944,
     "eval_coverage": 1.0
   },
   "lift": {
-    "segment_save_pp": 12.5,
-    "segment_madj_pp": 7.8,
-    "overall_save_pp": 5.5
+    "segment_save_pp": 37.5,
+    "segment_madj_pp": 30.2,
+    "overall_save_pp": 22.2
   },
   "guardrail_catch_rate": 1.0,
   "note": "Paired before/after on identical seeded customers. TWO variables changed together (discount policy + agent playbook), so this is a synthetic PAIRED demonstration of the flywheel on the treated (price-sensitive) segment \u2014 not an isolated causal estimate. Numbers vary run to run."

@@ -42,7 +42,10 @@ def _sha(s: str) -> str:
 COHORT_PRICE = 8      # price-sensitive scenarios (the segment the act targets)
 COHORT_OTHER = 10     # other churn reasons, for a representative population
 WORKERS = 10
-TARGET_REASON = "Price too high"   # the segment the discount act actually treats
+# The treated segment is SELECTED from the baseline analytics signal (see main),
+# not assumed. This is the reason the discount lever is designed to address; if
+# the data ever pointed elsewhere, the demo says so and bails rather than pretend.
+DISCOUNT_LEVER_REASON = "Price too high"
 
 
 def _segment_metrics(conn, reason: str) -> dict:
@@ -63,10 +66,13 @@ def _segment_metrics(conn, reason: str) -> dict:
             madj += 1 - (cost / r["price"] if r["price"] else 0)
     return {"n": len(rows), "save_rate": round(saved / n, 4), "madj_save_rate": round(madj / n, 4)}
 
-IMPROVED_SYSTEM = runtime.SYSTEM + (
-    "\n\nUPDATED PLAYBOOK (from analytics): for price-sensitive customers whose reason is "
-    "'price too high', LEAD with a concrete discount offer before suggesting a pause — the data "
-    "shows discounts retain this segment materially better than pauses.")
+def _improved_system(reason: str) -> str:
+    """The updated playbook the ACT step applies — parameterized by the segment the
+    analytics signal selected, so the intervention tracks the data, not a constant."""
+    return runtime.SYSTEM + (
+        f"\n\nUPDATED PLAYBOOK (from analytics): for customers whose reason is "
+        f"'{reason.lower()}', LEAD with a concrete discount offer before suggesting a pause — the "
+        f"data shows discounts retain this segment materially better than pauses.")
 
 
 def _cohort(conn):
@@ -91,7 +97,11 @@ def _redteam(conn) -> tuple[dict, float]:
             counts["off_scope"] += 1; caught += 1
         elif p["attack_type"] == "pii_leak" and s["pii_types"]:
             counts["pii"] += 1; caught += 1
-    return counts, (caught / total if total else 0.0)
+    rate = caught / total if total else 0.0
+    # Persist so the kill switch (safety.program_state) can gate on the latest
+    # red-team result without recomputing it (an LLM call per probe) on every poll.
+    db.record_health(conn, "guardrail_catch_rate", rate, f"{caught}/{total} probes caught")
+    return counts, rate
 
 
 def main() -> int:
@@ -106,25 +116,38 @@ def main() -> int:
     print("② BASELINE — discounts DISABLED (conservative launch policy)")
     policy.DISCOUNTS_ENABLED = False
     recs_a = batch.run_batch(conn, cohort, system=runtime.SYSTEM, max_workers=WORKERS)
-    before, before_seg = export.conversation_metrics(conn), _segment_metrics(conn, TARGET_REASON)
-    print(f"   overall save {before['save_rate']*100:.0f}%  ·  price-sensitive save {before_seg['save_rate']*100:.0f}%")
+    before = export.conversation_metrics(conn)
+
+    # ---- LEARN: SELECT the treated segment from the analytics signal ---------
     themes.run_analytics(conn)
-    print("③ LEARN — analytics signal:")
-    print(f"   price-sensitive theme saves only {before_seg['save_rate']*100:.0f}% under the no-discount policy → "
-          f"recommend enabling discounts for THIS segment.\n")
+    segments = themes.rank_segments(conn)
+    print("③ LEARN — highest-loss churn segments (data-driven, not assumed):")
+    for s in segments[:3]:
+        print(f"     {s['reason']:<22} save {s['save_rate']*100:>3.0f}%  ·  n={s['n']}  ·  loss={s['loss']}")
+    target = segments[0]["reason"] if segments else DISCOUNT_LEVER_REASON
+    before_seg = _segment_metrics(conn, target)
+    # The discount lever is designed for price-sensitivity. If the signal selects a
+    # segment the lever doesn't address, don't pretend a discount would fix it.
+    if target != DISCOUNT_LEVER_REASON:
+        print(f"\n   ⚠ top-loss segment is '{target}', which the discount lever does not address — "
+              f"the honest move is a different intervention. Demo bails rather than misattribute.")
+        conn.close()
+        return 1
+    print(f"   → selected treated segment: '{target}' (worst loss impact) → enable the discount lever.\n")
 
     # ---- ACT: enable discounts + improved playbook (TWO variables) ----------
     # Re-seed to an IDENTICAL fresh cohort (same seed) so cooldown state written
     # during batch A doesn't carry into batch B — each batch measures fresh state.
-    print("④ ACT — enable discounts AND update the playbook to lead with a discount for price-sensitive customers")
+    improved_system = _improved_system(target)
+    print(f"④ ACT — enable discounts AND update the playbook to lead with a discount for the '{target}' segment")
     policy.DISCOUNTS_ENABLED = True
     synth.generate(conn)
     cohort2 = _cohort(conn)
     cohort2_ids = sorted(s["id"] for s in cohort2)
 
     print("⑤ RE-MEASURE — the same customers under the new policy + playbook")
-    recs_b = batch.run_batch(conn, cohort2, system=IMPROVED_SYSTEM, max_workers=WORKERS)
-    after, after_seg = export.conversation_metrics(conn), _segment_metrics(conn, TARGET_REASON)
+    recs_b = batch.run_batch(conn, cohort2, system=improved_system, max_workers=WORKERS)
+    after, after_seg = export.conversation_metrics(conn), _segment_metrics(conn, target)
     print(f"   overall save {after['save_rate']*100:.0f}%  ·  price-sensitive save {after_seg['save_rate']*100:.0f}%")
 
     print("   grading every conversation + re-clustering…")
@@ -144,12 +167,14 @@ def main() -> int:
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "cohort_size": len(cohort), "cohort_scenario_ids": cohort_ids, "paired_cohort": paired,
-        "treated_segment": TARGET_REASON,
+        "treated_segment": target,
+        "segment_selection": "data-driven (highest loss impact in baseline)",
+        "baseline_segments": segments[:3],
         "variables_changed": ["discount_policy", "agent_playbook"],
         "models": {"flagship": config.FLAGSHIP_MODEL, "mini": config.MINI_MODEL, "embedding": config.EMBEDDING_MODEL},
         "baseline": {"policy": "discounts_disabled", "playbook_sha": _sha(runtime.SYSTEM), "conversations": len(recs_a),
                      "segment_save_rate": before_seg["save_rate"], "overall_save_rate": before["save_rate"]},
-        "after": {"policy": "discounts_enabled", "playbook_sha": _sha(IMPROVED_SYSTEM), "conversations": len(recs_b),
+        "after": {"policy": "discounts_enabled", "playbook_sha": _sha(improved_system), "conversations": len(recs_b),
                   "segment_save_rate": after_seg["save_rate"], "overall_save_rate": after["save_rate"],
                   "eval_pass_rate": m["eval_pass_rate"], "eval_coverage": m["coverage"]},
         "lift": {"segment_save_pp": round(seg_lift, 1), "segment_madj_pp": round(seg_madj, 1),

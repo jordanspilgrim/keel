@@ -17,13 +17,27 @@ from agent import runtime
 MAX_WORKERS = 8
 
 
+def _conn_path(conn) -> str | None:
+    """The file backing the caller's connection, so workers read the SAME DB
+    (not the global config.DB_PATH). Returns None for an in-memory / unnamed DB."""
+    for _seq, name, file in conn.execute("PRAGMA database_list").fetchall():
+        if name == "main":
+            return file or None
+    return None
+
+
 def run_batch(conn, scenarios, *, system: str = runtime.SYSTEM, max_workers: int = MAX_WORKERS,
-              progress: bool = True) -> list[dict]:
-    """Simulate all scenarios concurrently, persist sequentially, return records."""
+              progress: bool = True, db_path: str | None = None) -> list[dict]:
+    """Simulate all scenarios concurrently, persist sequentially, return records.
+
+    Workers open their own read connection to the SAME database as `conn` (derived
+    from it, or overridden via `db_path`) — not the global default — so a batch
+    run against a non-default DB reads the right data."""
     scenarios = [dict(s) for s in scenarios]
+    worker_path = db_path or _conn_path(conn)
 
     def work(scn):
-        c = db.connect()  # per-thread read connection
+        c = db.connect(worker_path)  # per-thread read connection, same DB as caller
         try:
             return runtime.simulate_conversation(scn, c, system=system)
         except Exception as e:  # one bad conversation shouldn't sink the batch

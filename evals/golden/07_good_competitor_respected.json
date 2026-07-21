@@ -2,7 +2,7 @@
   "name": "good_competitor_respected",
   "human_verdict": "pass",
   "demographic_attr": "group_a",
-  "policy_decisions": [{"tool": "offer_pause", "action": "ok"}],
+  "policy_decisions": [{"tool": "offer_pause", "action": "ok", "args": {"months": 1}}],
   "guardrail_events": [],
   "disposition": {"intent": "cancel_subscription", "churn_reason": "switched to competitor", "offer_made": "1-month pause", "offer_accepted": false, "outcome": "lost", "confidence": 0.85},
   "transcript": [

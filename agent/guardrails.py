@@ -90,7 +90,10 @@ def check_scope(text: str) -> dict:
                            "scope_check", reasoning_effort="minimal", max_output_tokens=300)
         return {"in_scope": bool(r["in_scope"]), "reason": r["reason"]}
     except Exception:
-        return {"in_scope": True, "reason": "classifier unavailable; fail-open to human review"}
+        # Fail CLOSED: if the classifier is unavailable we treat the message as
+        # out-of-scope, so the agent gives a bounded reply rather than free-forming
+        # on unclassified input. A false "in_scope" here is the unsafe direction.
+        return {"in_scope": False, "reason": "classifier unavailable; failing closed to a bounded reply"}
 
 
 # --- input pipeline --------------------------------------------------------
@@ -122,6 +125,13 @@ _SPELLED_PCT = re.compile(
 _SPELLED_MAP = {"ten": 10, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
                 "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100, "one hundred": 100}
 _DISCOUNT_CTX = re.compile(r"\b\d{1,3}\s*%\s*(?:off|discount)|discount of\b", re.IGNORECASE)
+_PAUSE_RX = re.compile(r"(\d+)[\s-]*month[\s-]*pause|pause (?:for |of )?(\d+)[\s-]*month", re.IGNORECASE)
+# The action tools only PROPOSE an offer — they do not mutate a backend. So a
+# reply claiming an action is already *applied* is an unsupported completion claim.
+_COMPLETION_RX = re.compile(
+    r"\b(i(?:'ve| have) (?:applied|activated|set up|processed|cancell?ed|paused|stopped)|"
+    r"has been (?:applied|activated|cancell?ed|processed|paused)|"
+    r"cancellation (?:is|has been) (?:processed|complete|started|done))\b", re.IGNORECASE)
 _MONEY_RX = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?")
 
 
@@ -135,22 +145,45 @@ def check_tone(reply: str) -> dict:
         return {"flagged": False, "reason": "moderation unavailable"}
 
 
-def check_promise(reply: str, *, authorized_discount: bool = True) -> dict:
-    """Catch commitments the policy layer would never authorize. `authorized_discount`
-    is whether an offer_discount was actually approved this conversation — a reply
-    that promises a discount when none was authorized is flagged even if within the
-    ceiling (an unauthorized, if modest, commitment)."""
+def check_promise(reply: str, *, authorized: dict | None = None) -> dict:
+    """Reconcile the customer-visible commitment against the EXACT authorized
+    terms. `authorized` is {'discount_pct': X or None, 'pause_months': Y or None}
+    — the terms the policy layer actually approved this conversation. A reply that
+    promises a bigger discount, a longer/absent pause, or claims an action is
+    already applied (the tools only propose) is flagged."""
+    authorized = authorized or {}
     m = _BANNED_PROMISES.search(reply)
     if m:
         return {"flagged": True, "reason": f"banned commitment: {m.group(0)!r}"}
+
+    # --- discount terms vs. authorization ---
+    disc_auth = authorized.get("discount_pct")
     nums = [int(p) for p in _PCT_RX.findall(reply) if int(p) <= 100]
     nums += [_SPELLED_MAP[w.lower().replace("one ", "").strip("- ")] for w in _SPELLED_PCT.findall(reply)
              if w.lower().replace("one ", "").strip("- ") in _SPELLED_MAP]
     over = [n for n in nums if n > config.MAX_DISCOUNT_PCT]
     if over:
-        return {"flagged": True, "reason": f"promises discount above {config.MAX_DISCOUNT_PCT}% ceiling: {over}"}
-    if not authorized_discount and _DISCOUNT_CTX.search(reply):
-        return {"flagged": True, "reason": "promises a discount that was not authorized by a tool call"}
+        return {"flagged": True, "reason": f"promises discount above the {config.MAX_DISCOUNT_PCT}% ceiling: {over}"}
+    if _DISCOUNT_CTX.search(reply):
+        if disc_auth is None:
+            return {"flagged": True, "reason": "promises a discount that was not authorized by a tool call"}
+        if nums and max(nums) > disc_auth + 0.5:
+            return {"flagged": True, "reason": f"promises {max(nums)}% but only {disc_auth:.0f}% was authorized"}
+
+    # --- pause terms vs. authorization ---
+    pm = _PAUSE_RX.search(reply)
+    if pm:
+        months = int(next(g for g in pm.groups() if g))
+        pause_auth = authorized.get("pause_months")
+        if pause_auth is None:
+            return {"flagged": True, "reason": "promises a pause that was not authorized by a tool call"}
+        if months > pause_auth:
+            return {"flagged": True, "reason": f"promises a {months}-month pause but only {pause_auth} was authorized"}
+
+    # --- completion claims (tools propose; they don't apply) ---
+    cm = _COMPLETION_RX.search(reply)
+    if cm:
+        return {"flagged": True, "reason": f"claims an action is already applied ({cm.group(0)!r}); tools only propose"}
     return {"flagged": False, "reason": ""}
 
 
@@ -166,7 +199,7 @@ def check_grounding(reply: str, tool_results: list[str]) -> dict:
     return {"flagged": False, "reason": ""}
 
 
-def screen_output(reply: str, tool_results: list[str], *, authorized_discount: bool = True) -> dict:
+def screen_output(reply: str, tool_results: list[str], *, authorized: dict | None = None) -> dict:
     """Full output-guardrail pass over an agent reply."""
-    return {"tone": check_tone(reply), "promise": check_promise(reply, authorized_discount=authorized_discount),
+    return {"tone": check_tone(reply), "promise": check_promise(reply, authorized=authorized),
             "grounding": check_grounding(reply, tool_results)}

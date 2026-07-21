@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import db
-from agent import disclosure, runtime, safety
+from agent import runtime, safety
 from dashboard import export
 
 app = FastAPI(title="Keel Console")
@@ -171,6 +171,11 @@ def chat_resolve(req: ResolveReq):
             raise HTTPException(409, "a turn is still in progress")
         if session.get("resolved"):
             raise HTTPException(409, "this conversation has already been resolved")
+        if session.get("_resolving"):
+            raise HTTPException(409, "this conversation is already being resolved")
+        # Claim the resolve under the lock so a second concurrent request can't
+        # also pass the checks above before resolve_session flips 'resolved'.
+        session["_resolving"] = True
     conn = db.connect()
     try:
         record = runtime.resolve_session(session, req.outcome, conn)
@@ -178,6 +183,7 @@ def chat_resolve(req: ResolveReq):
         raise HTTPException(422, str(e))
     finally:
         conn.close()
+        session["_resolving"] = False  # release the claim (resolved stays set on success)
     return {"conversation_id": record["conversation_id"], "outcome": record["outcome"],
             "disposition": record["disposition"]}
 
@@ -190,24 +196,17 @@ def metrics():
     conn = db.connect()
     try:
         m = export.conversation_metrics(conn)
-        total = conn.execute("SELECT count(*) FROM conversations").fetchone()[0] or 1
-        # eval: pass rate over ALL conversations; coverage = real (non-error) grades
-        passes = conn.execute("SELECT count(*) FROM evals WHERE verdict='pass'").fetchone()[0]
-        graded = conn.execute("SELECT count(*) FROM evals WHERE verdict IN ('pass','fail')").fetchone()[0]
-        # compliance: VERIFIED against the transcript (disclosure actually present),
-        # not merely the audit marker
-        disclosed = 0
-        for (tj,) in conn.execute("SELECT transcript_json FROM conversations"):
-            if disclosure.has_disclosure(json.loads(tj)):
-                disclosed += 1
+        # Eval + compliance use the SAME canonical definitions the dashboard exports
+        # (export.eval_metrics / export.compliance_coverage) — one source of truth.
+        evalm = export.eval_metrics(conn)
         g = dict(conn.execute("SELECT type, count(*) FROM guardrail_events GROUP BY type").fetchall())
         return {
             "conversations": m["n"],
             "save_rate": m["save_rate"],
             "madj_save_rate": m["madj_save_rate"],
-            "eval_pass_rate": round(passes / total, 4),
-            "eval_coverage": round(graded / total, 4),
-            "compliance": round(disclosed / total, 4),
+            "eval_pass_rate": evalm["eval_pass_rate"],
+            "eval_coverage": evalm["eval_coverage"],
+            "compliance": export.compliance_coverage(conn),
             "guardrail_counts": g,
             "guardrail_total": sum(g.values()),
             "safety": safety.program_state(conn),

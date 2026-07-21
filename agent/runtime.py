@@ -62,6 +62,7 @@ Operating principles:
 - Bias to the next best action: understand why they're leaving, then make ONE concrete, policy-compliant retention offer that fits their reason.
 - Calibrated autonomy: you may offer a discount or a pause yourself. Consequential/irreversible actions (downgrades, contract changes) require human approval — the tools will tell you.
 - Fail safe and be honest: NEVER promise anything a tool did not authorize. If no offer is authorized (e.g. the customer is within a save-offer cooldown), do not invent one.
+- Offer, don't confirm: you PROPOSE terms — you do not operate the billing backend. Say "I can apply 20% off" or "I'd set up a 3-month pause", never "I've applied the discount" or "your pause is set up". Present the authorized offer as something you're extending, not something already done.
 - When you have no authorized save offer and the customer simply wants to cancel, acknowledge warmly and let them go — process the cancellation gracefully. Do NOT reflexively escalate; only call escalate_to_human if the customer explicitly asks for a person or requests something consequential (a refund, a contract change) that you cannot handle.
 - If the customer asks for something you have no tool for (e.g. upgrading to a higher plan) alongside the cancellation, DON'T hand off abruptly or abandon the chat. Acknowledge that specific request, tell them a teammate can set it up, and — if a retention offer is still on the table — keep helping with that in the same breath. Escalate only when the conversation genuinely cannot continue without a person.
 - If you do escalate, never be terse: name what the customer asked for, say briefly why a teammate is better placed to help, and reassure them their conversation carries over.
@@ -78,6 +79,16 @@ Discounts are capped at {config.MAX_DISCOUNT_PCT}%; pauses at {config.MAX_PAUSE_
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _new_rec() -> dict:
+    """Fresh per-conversation state. `authorized` holds the EXACT terms the policy
+    layer approved, so the output guardrail can reconcile the customer-visible
+    commitment against them (not just 'some discount was allowed')."""
+    return {"offer_made": None, "escalated": False, "policy_decisions": [],
+            "tool_results": [], "guardrail": [],
+            "authorized": {"discount_pct": None, "pause_months": None},
+            "audit": [("system", "ai_disclosure_shown", "EU AI Act Art. 50")]}
 
 
 _JAILBREAK_REPLY = ("I can't do that. I'm the retention assistant, so I can only help with your "
@@ -107,7 +118,11 @@ def _screen_input(text: str, rec: dict, *, classify_scope: bool = True, on_step=
     if s["off_scope"]:
         rec["guardrail"].append(("off_scope", "bounded", s["scope_reason"]))
         _emit(on_step, "guardrail", "Off-topic — bounded, not free-formed", gtype="off_scope")
-        return {"action": "bound", "shown": shown, "reply": _OFFSCOPE_REPLY}
+        # `shown` goes in the human-visible transcript for fidelity, but the model
+        # context gets only a neutral marker — off-scope (possibly adversarial)
+        # content must not steer any later in-scope turn.
+        return {"action": "bound", "shown": shown, "reply": _OFFSCOPE_REPLY,
+                "context": "[off-topic message from the customer; bounded and withheld from context]"}
     return {"action": "allow", "shown": shown}
 
 
@@ -147,8 +162,10 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, o
         aargs = verdict["args"]
         if name == "offer_pause":
             rec["offer_made"] = f"{aargs['months']}-month pause"
+            rec["authorized"]["pause_months"] = int(aargs["months"])
         elif name == "offer_discount":
             rec["offer_made"] = f"{aargs['pct']:.0f}% discount"
+            rec["authorized"]["discount_pct"] = float(aargs["pct"])
         if verdict["action"] == "capped":  # action guardrail trip: proposed past a limit
             rec["guardrail"].append(("over_limit", "capped", verdict["reason"]))
         return {"status": "approved", "offer": rec["offer_made"], "note": verdict["reason"]}
@@ -199,9 +216,8 @@ def _finalize_output(text: str, rec: dict, input_list: list, system: str, on_ste
     """Enforce the output guardrails. If a check fires, regenerate once against a
     corrective instruction; if it still fails, FAIL CLOSED — substitute a safe
     reply and escalate. Nothing that trips promise/grounding/tone is delivered."""
-    authorized_discount = any(d.get("tool") == "offer_discount" and d.get("allowed")
-                              for d in rec["policy_decisions"])
-    out = guardrails.screen_output(text, rec["tool_results"], authorized_discount=authorized_discount)
+    authorized = rec["authorized"]
+    out = guardrails.screen_output(text, rec["tool_results"], authorized=authorized)
     flags = [k for k in ("promise", "grounding", "tone") if out[k]["flagged"]]
     if not flags:
         _emit(on_step, "output", "Output guardrails passed")
@@ -217,7 +233,7 @@ def _finalize_output(text: str, rec: dict, input_list: list, system: str, on_ste
             input=input_list, reasoning={"effort": "low"}, max_output_tokens=600)
         cand = (resp.output_text or "").strip()
         if cand:
-            out2 = guardrails.screen_output(cand, rec["tool_results"], authorized_discount=authorized_discount)
+            out2 = guardrails.screen_output(cand, rec["tool_results"], authorized=authorized)
             if not any(out2[k]["flagged"] for k in ("promise", "grounding", "tone")):
                 fixed = cand
     except Exception:
@@ -266,7 +282,15 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
             msg = _handoff_message(input_list, system)
             input_list.append({"role": "assistant", "content": msg})
             return msg
-    return "Let me connect you with a teammate to make sure this is handled properly."
+    # MAX_HOPS exhausted without a final reply — treat it as a real escalation
+    # (log it, transition state, hand off warmly), not a silent truncation.
+    rec["escalated"] = True
+    rec["escalate_reason"] = "tool-resolution hop limit reached without a final reply"
+    rec["guardrail"].append(("max_hops", "routed", f"exceeded {MAX_HOPS} tool hops; handing off"))
+    _emit(on_step, "output", "Hop limit reached — handing off to a human teammate")
+    msg = _handoff_message(input_list, system)
+    input_list.append({"role": "assistant", "content": msg})
+    return msg
 
 
 def _advance(text: str, transcript: list, input_list: list, cid: int, sub: dict, conn, rec: dict,
@@ -281,7 +305,7 @@ def _advance(text: str, transcript: list, input_list: list, cid: int, sub: dict,
     if dec["action"] == "block":
         reply = dec["reply"]  # NOT added to input_list — the injection never reaches the model
     elif dec["action"] == "bound":
-        input_list.append({"role": "user", "content": dec["shown"]})
+        input_list.append({"role": "user", "content": dec["context"]})
         input_list.append({"role": "assistant", "content": dec["reply"]})
         reply = dec["reply"]
     else:
@@ -333,9 +357,7 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
     broken agent, and to run before/after policy batches)."""
     cid = scenario["customer_id"]
     sub = tools.get_subscription(conn, cid)
-    rec = {"offer_made": None, "escalated": False, "policy_decisions": [],
-           "tool_results": [], "guardrail": [],
-           "audit": [("system", "ai_disclosure_shown", "EU AI Act Art. 50")]}
+    rec = _new_rec()
 
     transcript = [disclosure.disclosure_message()]
     input_list = list(transcript)
@@ -348,13 +370,18 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
             outcome = "escalated"
             break
         cust = sim.respond(scenario, reply, transcript)
-        if cust["decision"] == "accept":
-            # A save requires an accepted *retention offer*. "Yes, cancel me" with
-            # no offer on the table is the customer accepting cancellation = churn.
-            outcome, offer_accepted = ("saved", True) if rec["offer_made"] else ("lost", False)
-            break
-        if cust["decision"] == "reject":
-            outcome = "lost"
+        if cust["decision"] in ("accept", "reject"):
+            # The customer's closing line is part of the conversation — record it so
+            # the persisted transcript ends where the exchange actually ended
+            # (the judge and disposition read the full turn, not a truncation).
+            if cust.get("reply"):
+                transcript.append({"role": "user", "content": cust["reply"]})
+            if cust["decision"] == "accept":
+                # A save requires an accepted *retention offer*. "Yes, cancel me"
+                # with no offer on the table is the customer accepting cancellation.
+                outcome, offer_accepted = ("saved", True) if rec["offer_made"] else ("lost", False)
+            else:
+                outcome = "lost"
             break
         pending = cust["reply"]  # screened by _advance on the next iteration
     if outcome is None:
@@ -422,9 +449,7 @@ def new_session(customer_id: int, conn) -> dict:
     """Start a live conversation with the AI-disclosure turn already shown."""
     sub = tools.get_subscription(conn, customer_id)
     customer = tools.get_customer(conn, customer_id)
-    rec = {"offer_made": None, "escalated": False, "policy_decisions": [],
-           "tool_results": [], "guardrail": [],
-           "audit": [("system", "ai_disclosure_shown", "EU AI Act Art. 50")]}
+    rec = _new_rec()
     disc = disclosure.disclosure_message()
     state = safety.program_state(conn)  # kill switch — start in safe mode if unhealthy
     return {"customer_id": customer_id, "sub": sub, "customer": customer, "rec": rec,

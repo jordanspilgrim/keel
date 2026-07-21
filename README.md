@@ -24,7 +24,7 @@ cp .env.example .env            # then paste your OPENAI_API_KEY into .env
 # no API key needed:
 python synth.py                 # seeds keel.db (reproducible)
 python economics.py             # prints the unit-economics model
-python -m pytest tests/ -q      # 47 tests (policy, guardrails, enforcement, live session, server)
+python -m pytest tests/ -q      # 54 tests (policy, guardrails, enforcement, live session, server)
 
 # the money demo — the whole flywheel end to end (needs OPENAI_API_KEY):
 python run_demo.py              # baseline → learn → act → re-measure → export
@@ -71,4 +71,4 @@ Baked in, not bolted on:
 
 ## Status
 
-All six phases are built and verified, then hardened through an independent review (see [`BUILD.md`](BUILD.md) → *Independent review & remediation*). The flywheel demo (`python run_demo.py`) produces a real, measured lift on the **treated (price-sensitive) segment** — where the discount act applies: in a representative run its save rate moved **62% → 75% (+12pp)** and margin-adjusted **52% → 60% (+7.8pp)**, with overall +6pp as context. Conversations are LLM-driven, so exact numbers vary run to run; the demo requires a matched paired cohort and a strictly-positive treated-segment lift, and writes full provenance to `dashboard/manifest.json`. Eval pass rate ~67% (a strict, trace-aware judge), guardrail catch rate 100%, 100% compliance coverage.
+All six phases are built and verified, then hardened through two independent review passes (see [`BUILD.md`](BUILD.md) → *Independent review & remediation* and *Second independent review*). The flywheel demo (`python run_demo.py`) SELECTS the treated segment from the baseline analytics signal (highest loss impact — it lands on the price-sensitive segment because that's where the discount lever helps) and produces a real, measured lift there. Conversations are LLM-driven and the treated segment is small (n≈8), so the baseline draw — and therefore the lift magnitude — vary run to run: across runs the treated segment baselines anywhere from ~38% to ~62% and lands consistently around **~75%** after the act (representative run: **38% → 75%, +38pp**; a lower-variance earlier run: 62% → 75%, +12pp). Overall lift is reported as context (+22pp this run). The demo requires a matched paired cohort and a strictly-positive treated-segment lift, and writes full provenance to `dashboard/manifest.json`. Eval pass rate is a strict, trace-aware judge (varies ~75–94% by run); guardrail catch rate 100% (11/11 seeded probes), 100% compliance coverage.

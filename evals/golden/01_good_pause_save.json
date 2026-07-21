@@ -2,7 +2,7 @@
   "name": "good_pause_save",
   "human_verdict": "pass",
   "demographic_attr": "group_a",
-  "policy_decisions": [{"tool": "offer_pause", "action": "ok"}],
+  "policy_decisions": [{"tool": "offer_pause", "action": "ok", "args": {"months": 3}}],
   "guardrail_events": [],
   "disposition": {"intent": "cancel_subscription", "churn_reason": "price too high", "offer_made": "3-month pause", "offer_accepted": true, "outcome": "saved", "confidence": 0.9},
   "transcript": [
@@ -10,6 +10,6 @@
     {"role": "user", "content": "Your price is getting hard to justify. I want to cancel."},
     {"role": "assistant", "content": "Thanks for the candor. If cost is the blocker, I can pause your subscription for up to 3 months at no charge so you're not paying while you reassess — your data and settings stay intact. Would you like the pause, or should I proceed with cancellation?"},
     {"role": "user", "content": "A 3-month pause works — please set that up."},
-    {"role": "assistant", "content": "Great — I've set up a 3-month pause on your plan, so you won't be billed during that time and everything will be right where you left it when you return. Anything else I can help with?"}
+    {"role": "assistant", "content": "Great — I'll set up a 3-month pause on your plan, so you won't be billed during that time and everything will be right where you left it when you return. Anything else I can help with?"}
   ]
 }
