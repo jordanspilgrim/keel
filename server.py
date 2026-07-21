@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import db
-from agent import runtime
+from agent import disclosure, runtime, safety
 from dashboard import export
 
 app = FastAPI(title="Keel Console")
@@ -102,35 +102,49 @@ def chat_start(req: StartReq):
     return {"session_id": sid, "disclosure": session["disclosure"], "customer": session["customer"]}
 
 
+def _evict() -> None:
+    """Bound memory: keep only the most recent completed turns / resolved
+    sessions. Called under _LOCK."""
+    done = [t for t, s in TURNS.items() if s["done"]]
+    for t in done[:-100]:
+        TURNS.pop(t, None)
+    resolved = [sid for sid, s in SESSIONS.items() if s.get("resolved")]
+    for sid in resolved[:-50]:
+        SESSIONS.pop(sid, None)
+
+
 @app.post("/api/chat/turn")
 def chat_turn(req: TurnReq):
-    with _LOCK:
-        session = SESSIONS.get(req.session_id)
-    if session is None:
-        raise HTTPException(404, "session not found")
-    if session.get("resolved"):
-        raise HTTPException(400, "this conversation has already ended")
-    if session.get("_busy"):
-        raise HTTPException(409, "a turn is already in progress")
     if not req.message.strip():
         raise HTTPException(422, "message is empty")
-
-    session["_busy"] = True
-    tid = uuid.uuid4().hex
-    turn_state = {"steps": [], "done": False, "result": None, "error": None}
+    # Atomic admission: check session state AND claim the busy flag under one lock,
+    # so two concurrent turns can't both see the session idle.
     with _LOCK:
+        session = SESSIONS.get(req.session_id)
+        if session is None:
+            raise HTTPException(404, "session not found")
+        if session.get("resolved"):
+            raise HTTPException(400, "this conversation has already ended")
+        if session.get("_busy"):
+            raise HTTPException(409, "a turn is already in progress")
+        session["_busy"] = True
+        tid = uuid.uuid4().hex
+        turn_state = {"steps": [], "done": False, "result": None, "error": None}
         TURNS[tid] = turn_state
+        _evict()
 
     def worker():
-        conn = db.connect()  # this thread's own connection
+        conn = None
         try:
+            conn = db.connect()  # inside try — a connect failure surfaces, never hangs
             result = runtime.live_turn(session, req.message, conn,
                                        on_step=lambda s: turn_state["steps"].append(s))
             turn_state["result"] = result
         except Exception as e:  # never hang — surface the error
             turn_state["error"] = f"{type(e).__name__}: {e}"
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
             session["_busy"] = False
             turn_state["done"] = True  # set last, so 'done' implies not busy
 
@@ -151,13 +165,17 @@ def turn_status(turn_id: str):
 def chat_resolve(req: ResolveReq):
     with _LOCK:
         session = SESSIONS.get(req.session_id)
-    if session is None:
-        raise HTTPException(404, "session not found")
-    if req.outcome not in ("saved", "lost", "escalated"):
-        raise HTTPException(422, "outcome must be saved / lost / escalated")
+        if session is None:
+            raise HTTPException(404, "session not found")
+        if session.get("_busy"):
+            raise HTTPException(409, "a turn is still in progress")
+        if session.get("resolved"):
+            raise HTTPException(409, "this conversation has already been resolved")
     conn = db.connect()
     try:
         record = runtime.resolve_session(session, req.outcome, conn)
+    except ValueError as e:  # invalid transition (e.g. 'saved' with no accepted offer)
+        raise HTTPException(422, str(e))
     finally:
         conn.close()
     return {"conversation_id": record["conversation_id"], "outcome": record["outcome"],
@@ -172,20 +190,27 @@ def metrics():
     conn = db.connect()
     try:
         m = export.conversation_metrics(conn)
-        ev = conn.execute("SELECT count(*) t, sum(verdict='pass') p FROM evals").fetchone()
         total = conn.execute("SELECT count(*) FROM conversations").fetchone()[0] or 1
-        disc = conn.execute(
-            "SELECT count(DISTINCT conversation_id) FROM audit_log WHERE decision='ai_disclosure_shown'"
-        ).fetchone()[0]
+        # eval: pass rate over ALL conversations; coverage = real (non-error) grades
+        passes = conn.execute("SELECT count(*) FROM evals WHERE verdict='pass'").fetchone()[0]
+        graded = conn.execute("SELECT count(*) FROM evals WHERE verdict IN ('pass','fail')").fetchone()[0]
+        # compliance: VERIFIED against the transcript (disclosure actually present),
+        # not merely the audit marker
+        disclosed = 0
+        for (tj,) in conn.execute("SELECT transcript_json FROM conversations"):
+            if disclosure.has_disclosure(json.loads(tj)):
+                disclosed += 1
         g = dict(conn.execute("SELECT type, count(*) FROM guardrail_events GROUP BY type").fetchall())
         return {
             "conversations": m["n"],
             "save_rate": m["save_rate"],
             "madj_save_rate": m["madj_save_rate"],
-            "eval_pass_rate": round((ev["p"] or 0) / ev["t"], 4) if ev["t"] else None,
-            "compliance": round(disc / total, 4),
+            "eval_pass_rate": round(passes / total, 4),
+            "eval_coverage": round(graded / total, 4),
+            "compliance": round(disclosed / total, 4),
             "guardrail_counts": g,
             "guardrail_total": sum(g.values()),
+            "safety": safety.program_state(conn),
         }
     finally:
         conn.close()

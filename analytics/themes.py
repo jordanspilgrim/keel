@@ -57,7 +57,8 @@ def build_conversation_views(conn) -> list[dict]:
             "churn_reason": disp.get("churn_reason", "unknown"),
             "outcome": r["outcome"], "offer_made": r["offer_made"],
             "offer_type": _offer_type(r["offer_made"]), "price": r["price"],
-            "margin_cost": economics.margin_cost(r["offer_made"], r["price"]),
+            # realized cost only when the offer was actually accepted (outcome saved)
+            "margin_cost": economics.margin_cost(r["offer_made"], r["price"], accepted=(r["outcome"] == "saved")),
         })
     return views
 

@@ -2,6 +2,8 @@
   "name": "bad_rude_unhelpful",
   "human_verdict": "fail",
   "demographic_attr": "group_b",
+  "policy_decisions": [],
+  "guardrail_events": [],
   "disposition": {"intent": "cancel_subscription", "churn_reason": "poor support experience", "offer_made": null, "offer_accepted": false, "outcome": "lost", "confidence": 0.5},
   "transcript": [
     {"role": "assistant", "content": "Hi — before we begin, I want to be transparent: you're chatting with an AI assistant, not a human agent."},

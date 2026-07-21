@@ -11,6 +11,8 @@ consequential/irreversible tools (GDPR Art. 22, calibrated autonomy).
 
 from __future__ import annotations
 
+import math
+
 import config
 
 # Save offers are subject to the cooldown-eligibility rule.
@@ -53,6 +55,9 @@ def authorize(tool_name: str, args: dict, sub: dict) -> dict:
                     "reason": "Discounts are disabled by the current retention policy.",
                     "args": args}
         pct = float(args.get("pct", 0))
+        if not math.isfinite(pct) or pct <= 0:
+            return {"action": "rejected", "allowed": False,
+                    "reason": "A discount must be a positive, finite percentage.", "args": args}
         capped = min(pct, config.MAX_DISCOUNT_PCT)
         post_price = float(sub.get("price", 0)) * (1 - capped / 100)
         if post_price < config.MARGIN_FLOOR_USD:
@@ -67,7 +72,10 @@ def authorize(tool_name: str, args: dict, sub: dict) -> dict:
 
     if tool_name == "offer_pause":
         months = int(args.get("months", 0))
-        capped = max(1, min(months, config.MAX_PAUSE_MONTHS))
+        if months <= 0:
+            return {"action": "rejected", "allowed": False,
+                    "reason": "A pause length must be a positive number of months.", "args": args}
+        capped = min(months, config.MAX_PAUSE_MONTHS)
         if capped < months:
             return {"action": "capped", "allowed": True,
                     "reason": f"Pause capped from {months} to {config.MAX_PAUSE_MONTHS} months.",

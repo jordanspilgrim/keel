@@ -53,7 +53,8 @@ def _compliance_coverage(conn) -> float:
     return round(with_disc / total, 4)
 
 
-def build_data(conn, *, before: dict, after: dict, guardrail_counts: dict, catch_rate: float) -> dict:
+def build_data(conn, *, before: dict, after: dict, guardrail_counts: dict, catch_rate: float,
+               provenance: dict | None = None) -> dict:
     """Assemble the full dashboard data object from the DB + run_demo inputs."""
     views = themes_mod.build_conversation_views(conn)
     total = len(views) or 1
@@ -88,7 +89,7 @@ def build_data(conn, *, before: dict, after: dict, guardrail_counts: dict, catch
         "offers": offer_points,
         "safety": {"catch_rate": round(catch_rate, 4),
                    "compliance": _compliance_coverage(conn), **guardrail_counts},
-        "meta": {"conversations": len(views)},
+        "meta": {"conversations": len(views), "provenance": provenance or {}},
     }
 
 
@@ -103,8 +104,9 @@ def write_data(data: dict, *, js_path: str | None = None, json_path: str | None 
     return js_path, json_path
 
 
-def export(conn, *, before: dict, after: dict, guardrail_counts: dict, catch_rate: float) -> dict:
-    data = build_data(conn, before=before, after=after,
-                      guardrail_counts=guardrail_counts, catch_rate=catch_rate)
+def export(conn, *, before: dict, after: dict, guardrail_counts: dict, catch_rate: float,
+           provenance: dict | None = None) -> dict:
+    data = build_data(conn, before=before, after=after, guardrail_counts=guardrail_counts,
+                      catch_rate=catch_rate, provenance=provenance)
     write_data(data)
     return data

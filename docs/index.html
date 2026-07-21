@@ -132,7 +132,7 @@
     <tr><td class="s">5</td><td>Close the loop — act on a signal, show the lift</td><td class="s done">✓ done</td></tr>
   </table>
 
-  <div class="callout"><b>The flywheel, turning (real run):</b> the analytics found the price-sensitive segment was under-saved under a conservative no-discount policy. Enabling discounts — the recommended act — moved the save rate <b>28% → 50% (+22pp)</b> and the margin-adjusted save rate <b>26% → 44% (+18.5pp)</b> on the <em>same</em> customers, with eval pass rate 94%, guardrail catch rate 100%, and 100% compliance coverage. Run it yourself with <code>python run_demo.py</code>.</div>
+  <div class="callout"><b>The flywheel, turning (representative run):</b> the analytics found the price-sensitive segment was under-saved under a conservative no-discount policy. Enabling discounts — the recommended act — moved that <b>treated segment’s</b> save rate <b>62% → 75% (+12pp)</b> and margin-adjusted <b>52% → 60% (+7.8pp)</b> (overall +6pp), with a strict trace-aware eval, guardrail catch rate 100%, and 100% compliance. Conversations are LLM-driven, so numbers vary; the run requires a paired cohort + strictly-positive treated-segment lift and records full provenance. Run it yourself with <code>python run_demo.py</code>.</div>
 
   <h2>Keep reading</h2>
   <p><a href="how-it-works.html">How it works →</a> the architecture, the agent loop, and the guardrail design in detail.<br>

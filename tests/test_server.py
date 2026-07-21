@@ -40,6 +40,7 @@ def client(tmp_path, monkeypatch):
                         lambda transcript, scenario, rec, outcome, accepted: {
                             "intent": "cancel", "churn_reason": "price", "offer_made": rec["offer_made"],
                             "offer_accepted": accepted, "outcome": outcome, "confidence": 0.8})
+    monkeypatch.setattr(runtime, "_grade_and_store", lambda *a: None)  # no judge API in tests
 
     import server
     return TestClient(server.app)
@@ -95,3 +96,29 @@ def test_error_paths(client):
     start = client.post("/api/chat/start", json={"customer_id": 1}).json()
     assert client.post("/api/chat/resolve", json={"session_id": start["session_id"], "outcome": "bogus"}).status_code == 422
     assert client.post("/api/chat/start", json={"customer_id": 99999}).status_code == 404
+
+
+def test_cannot_falsify_saved_without_offer(client):
+    # start a session and immediately resolve as 'saved' with no offer ever made
+    start = client.post("/api/chat/start", json={"customer_id": 1}).json()
+    r = client.post("/api/chat/resolve", json={"session_id": start["session_id"], "outcome": "saved"})
+    assert r.status_code == 422  # server rejects the falsified outcome
+
+
+def test_busy_session_rejects_overlapping_turn_and_resolve(client):
+    import server
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    server.SESSIONS[sid]["_busy"] = True  # simulate a turn in flight
+    assert client.post("/api/chat/turn", json={"session_id": sid, "message": "hi"}).status_code == 409
+    assert client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"}).status_code == 409
+
+
+def test_worker_exception_surfaces_not_hangs(client, monkeypatch):
+    from agent import runtime
+    monkeypatch.setattr(runtime, "live_turn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    tid = client.post("/api/chat/turn", json={"session_id": sid, "message": "hi"}).json()["turn_id"]
+    st = _drain_turn(client, tid)
+    assert st["error"] and "boom" in st["error"]  # surfaced, not hung
+    import server
+    assert server.SESSIONS[sid]["_busy"] is False  # busy flag cleared for the next turn

@@ -10,10 +10,10 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 |---|---|---|---|
 | **0 — Scaffold + synth** | ✅ **done** | `config.py`, `db.py`, `synth.py`, `economics.py`, `.env.example`, `requirements.txt`, dashboard mockup, stubs | `python synth.py` seeds keel.db reproducibly (200 cust / 200 sub / 211 scenarios; identical SHA on re-run) ✓; `python economics.py` reproduces the $1.28/97% headline ✓ |
 | **1 — Cancellation-saver agent** | ✅ **done** | `agent/runtime.py` Responses-API loop, `agent/tools.py`, `agent/policy.py`, `agent/disclosure.py`, `sim.py` (customer simulator), `llm.py`, structured disposition | `python -m scripts.phase1_accept`: eligible → **saved** (3-mo pause), ineligible → **lost** (cooldown-rejected save offer, graceful churn); disclosure in every transcript; no offer exceeds limits ✓; 10 unit tests pass |
-| **2 — Guardrails & compliance** | ✅ **done** | `agent/guardrails.py` (input: PII redact / jailbreak / scope; output: tone / promise / grounding), policy human-in-the-loop (+`deny_refund` tool), `guardrail_events` populated, PII redacted before store | `python -m scripts.phase2_accept`: **100% catch rate (11/11)** — jailbreak 4/4 blocked, off-scope 4/4 bounded, PII 3/3 redacted, over-limit 40%→capped 20%, refund→human ✓; 23 unit tests pass |
+| **2 — Guardrails & compliance** | ✅ **done** | `agent/guardrails.py` (input: PII redact / jailbreak / scope; output: tone / promise / grounding), policy human-in-the-loop (+`deny_refund` tool), `guardrail_events` populated, PII redacted before store | `python -m scripts.phase2_accept`: **100% catch rate (11/11)** — jailbreak 4/4 blocked, off-scope 4/4 bounded, PII 3/3 redacted, over-limit 40%→capped 20%, refund→human ✓; 47 tests pass |
 | **3 — Eval harness** | ✅ **done** | `evals/judge.py` (5-dim rubric + fairness flag), `evals/run_evals.py` (grade_all + run_golden), 5 golden fixtures, `batch.py` concurrent runner | `python -m scripts.phase3_accept`: 12/12 graded, golden agreement **100%** (5/5), broken agent → **fail** (resolution 2); fairness slice by group reported |
 | **4 — VoC analytics** | ✅ **done** | `analytics/embed.py` (batched), `analytics/cluster.py` (KMeans), `analytics/themes.py` (theme cards + offer effectiveness + ranked signals), `economics.margin_cost` | `python -m scripts.phase4_accept`: 30-conv batch → 5 themes, top-3 drivers, ranked signals, offer comparison from clusters ✓ |
-| **5 — Close the loop** | ✅ **done** | `dashboard/export.py` → `data.js` wired to a data-driven `dashboard/index.html`; `run_demo.py` runs baseline → learn → act → re-measure | `python run_demo.py`: save rate **28% → 50% (+22pp)**, margin-adjusted **26% → 44% (+18.5pp)** on identical customers by enabling the discount policy the analytics recommended — **the flywheel turning** |
+| **5 — Close the loop** | ✅ **done** | `dashboard/export.py` → `data.js` wired to a data-driven `dashboard/index.html`; `run_demo.py` runs baseline → learn → act → re-measure, requires a paired cohort + strictly-positive treated-segment lift, writes `manifest.json` | `python run_demo.py` (representative run): treated price-sensitive segment save rate **62% → 75% (+12pp)**, overall +6pp — **the flywheel turning** (numbers vary run to run) |
 | **6 — Stretch** | ⬜ | adversarial red-team suite (synth already seeds 11 probes), A/B offer testing, "propose a policy change" agent | — |
 
 ## Phase 0 — verified
@@ -25,7 +25,7 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 ## Phase 1 — verified
 
 - `agent/runtime.py`: Responses-API tool loop (gpt-5, reasoning effort low) + a seeded customer simulator (`sim.py`, gpt-5-mini) drives a real negotiation to a saved/lost/escalated outcome. Structured-output disposition reconciled with the mechanically-known outcome (the loop is source of truth).
-- `agent/tools.py`: 7 tools; read tools execute directly, action tools routed through `policy.authorize`. `customer_id` is bound by the runtime (tool sandboxing) — the model can't name another account.
+- `agent/tools.py`: 8 tools (incl. `deny_refund`); read tools execute directly, action tools routed through `policy.authorize`. `customer_id` is bound by the runtime (tool sandboxing) — the model can't name another account.
 - `agent/policy.py`: deterministic authorization — discount cap 20%, pause cap 3mo, margin floor, save-offer cooldown (eligibility), consequential → human. 7 unit tests.
 - Acceptance run: eligible → saved (pause), ineligible → lost. Conversations + dispositions + audit_log (disclosure + every policy decision) persisted.
 - Two fidelity bugs found and fixed during verification (not papered over): (1) a visibly-accepted save was mis-logged `lost` (sim decision vs. prose mismatch); (2) "customer says yes to cancelling" was mis-counted as `saved` — a save now requires an accepted *retention offer*.
@@ -49,7 +49,7 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 
 - `dashboard/export.py`: computes every dashboard view from the DB (KPIs incl. margin-adjusted save rate, before/after trend, clustered drivers, offer effectiveness, safety) → writes `dashboard/data.js` (`window.KEEL_DATA`). The dashboard loads it via `<script src>` (works on file://) and falls back to a mock if absent.
 - `dashboard/index.html`: rewritten data-driven — same design language, now rendering real demo output.
-- `run_demo.py`: the full flywheel on one identical cohort — BASELINE (discounts disabled) → grade + cluster → the analytics signal (price-sensitive under-saved) → ACT (enable discounts + lead-with-discount playbook) → RE-MEASURE. Result: save rate 28%→50% (+22pp), margin-adjusted 26%→44% (+18.5pp). The lift comes only from acting on the analytics recommendation.
+- `run_demo.py`: the full flywheel on one identical seeded cohort — BASELINE (discounts disabled) → grade + cluster → the analytics signal (price-sensitive under-saved) → ACT (enable discounts + lead-with-discount playbook) → RE-MEASURE. The lift is measured on the **treated (price-sensitive) segment** where the act applies. Representative run: 62%→75% (+12pp), overall +6pp; numbers vary run to run. Re-seeds between batches so cooldown state doesn't carry over; requires a matched paired cohort and a strictly-positive treated-segment lift; writes `dashboard/manifest.json` (cohort IDs, prompt/policy hashes, model IDs, eval coverage, lift).
 - Definition of done met: `python run_demo.py` runs generate → converse → grade → analyze → act → re-measure → export, and the dashboard shows the lift.
 
 ## Keel Console — interactive web app (post-Phase-5)
@@ -70,17 +70,57 @@ operate, not just run — and draws the two integration seams explicitly.
   seam (synthetic reference impl → a real CRM/billing impl later). The agent core
   is untouched by either.
 - **One code path:** `live_turn` reuses the exact batch screening/agent/policy/
-  output logic via an optional `on_step` callback — no divergence to drift.
+  output logic via an optional `on_step` callback — one shared inner loop, so the
+  two paths don't drift (they differ only in channel orchestration).
 
 Run: `.venv/bin/uvicorn server:app --port 8500` (or via `.claude/launch.json` → `console`).
 
-**Verified bug-free:** 34 unit/integration tests (11 new — live-session state
+**Verified via tests + live smoke** (not a bug-free guarantee): 47 tests (live-session state
 machine + FastAPI endpoints, mocked agent, no API); a live smoke
 (`python -m scripts.console_smoke`) exercising the real agent end to end (happy
 offer + step trace, jailbreak blocked, off-scope bounded, persistence); and a
 real uvicorn boot serving over HTTP. Robustness: no shared SQLite connection
 (per-request/thread), background-thread + polling turns (no leaked connections),
 worker exceptions surfaced not hung, per-session busy-guard.
+
+## Independent review &amp; remediation
+
+The repo was put through an independent code + design review (Codex), which
+correctly flagged that several claims were stronger than the code supported. All
+findings were remediated:
+
+- **Input guardrails** — batch and live now share ONE enforced decision
+  (`_screen_input` → `_advance`): a jailbreak is blocked before the model on
+  both paths (previously batch logged "blocked" but still forwarded it).
+- **Output guardrails** — a promise/grounding/tone violation is now regenerated
+  once and, failing that, fails closed to a human (previously logged-and-sent).
+  Promise detector strengthened (spelled numbers, "half off", unauthorized-but-
+  within-ceiling discounts).
+- **Consequential actions** — `needs_human` is now a real state transition
+  (stops the loop, hands off), not just an event label.
+- **Live outcomes** — the server rejects a `saved` outcome with no accepted
+  offer, resolution is idempotent, and every resolved conversation is graded
+  (so "grade 100%" holds on the live path too).
+- **Policy** — negative / non-finite discounts and non-positive pauses are
+  rejected; accepted offers persist cooldown state.
+- **Server** — atomic per-session busy-guard, idempotent resolve, connection
+  creation inside `try`, per-call timeout, and eviction of old turns/sessions.
+- **Evals** — trace-aware judge (sees the authorized-action trace), verdict
+  derived mechanically from the scores, coverage reported honestly (a judge
+  failure is a recorded coverage miss, never a silent drop); golden set expanded
+  and its two over-claiming "pass" fixtures fixed.
+- **Analytics** — realized margin cost only for *accepted* offers, pause cost
+  scales with months.
+- **Kill switch** — the config safety floors are now wired: new live sessions
+  enter safe mode (disclosure + human) if eval health breaches; low-confidence
+  dispositions are flagged.
+- **Provenance** — `run_demo.py` writes `dashboard/manifest.json` (cohort IDs,
+  prompt/policy hashes, model IDs, eval coverage, lift), requires a matched
+  paired cohort and a strictly-positive lift, and is described as a synthetic
+  paired demo (policy + playbook both change), not a causal estimate.
+- **Tests** — 47 (up from 34), now exercising the *enforced* behavior (batch
+  blocking, output fail-closed, needs-human transition, save-invariant, server
+  races) rather than mocking past it.
 
 ## Notes
 

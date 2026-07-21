@@ -24,7 +24,7 @@ cp .env.example .env            # then paste your OPENAI_API_KEY into .env
 # no API key needed:
 python synth.py                 # seeds keel.db (reproducible)
 python economics.py             # prints the unit-economics model
-python -m pytest tests/ -q      # 23 unit tests (policy + guardrails)
+python -m pytest tests/ -q      # 47 tests (policy, guardrails, enforcement, live session, server)
 
 # the money demo — the whole flywheel end to end (needs OPENAI_API_KEY):
 python run_demo.py              # baseline → learn → act → re-measure → export
@@ -71,4 +71,4 @@ Baked in, not bolted on:
 
 ## Status
 
-All six phases built and verified end-to-end. The flywheel demo (`python run_demo.py`) produces a real, measured lift: acting on the analytics signal (enable discounts for the price-sensitive segment) moved the save rate **28% → 50% (+22pp)** and the margin-adjusted save rate **26% → 44% (+18.5pp)** on identical customers — with eval pass rate 94%, guardrail catch rate 100%, and 100% compliance coverage. Phase-by-phase acceptance and evidence: [`BUILD.md`](BUILD.md).
+All six phases are built and verified, then hardened through an independent review (see [`BUILD.md`](BUILD.md) → *Independent review & remediation*). The flywheel demo (`python run_demo.py`) produces a real, measured lift on the **treated (price-sensitive) segment** — where the discount act applies: in a representative run its save rate moved **62% → 75% (+12pp)** and margin-adjusted **52% → 60% (+7.8pp)**, with overall +6pp as context. Conversations are LLM-driven, so exact numbers vary run to run; the demo requires a matched paired cohort and a strictly-positive treated-segment lift, and writes full provenance to `dashboard/manifest.json`. Eval pass rate ~67% (a strict, trace-aware judge), guardrail catch rate 100%, 100% compliance coverage.

@@ -25,7 +25,7 @@ import config
 import db
 import llm
 import sim
-from agent import disclosure, guardrails, policy, tools
+from agent import disclosure, guardrails, policy, safety, tools
 
 MAX_TURNS = 4          # agent<->customer exchanges before we call it lost
 MAX_HOPS = 5           # tool-resolution hops within a single agent turn
@@ -80,17 +80,35 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _screen_and_record(text: str, rec: dict, *, classify_scope: bool) -> str:
-    """Run input guardrails on a user turn, record any trips, return the
-    redacted text that is safe to store and send to the model."""
+_JAILBREAK_REPLY = ("I can't do that. I'm the retention assistant, so I can only help with your "
+                    "subscription, billing, or cancellation — is there something there I can help with?")
+_OFFSCOPE_REPLY = ("That's outside what I can help with — I'm just the retention assistant. "
+                   "I can help with your subscription, billing, or cancellation, though.")
+
+
+def _screen_input(text: str, rec: dict, *, classify_scope: bool = True, on_step=None) -> dict:
+    """The SINGLE input-guardrail decision used by BOTH the batch and live paths.
+    Returns {action, shown, reply?} where action ∈ {allow, bound, block}:
+      block  — recognized jailbreak; the safe refusal is used and the input is
+               NEVER forwarded to the model.
+      bound  — off-scope; a bounded reply is used, the model is not free-formed.
+      allow  — proceed to the agent.
+    PII is redacted before anything is stored either way."""
+    _emit(on_step, "input", "Screening the message (PII · injection · scope)…")
     s = guardrails.screen_input(text, classify_scope=classify_scope)
     if s["pii_types"]:
         rec["guardrail"].append(("pii", "redacted", ",".join(s["pii_types"])))
+        _emit(on_step, "guardrail", f"PII redacted before storage: {', '.join(s['pii_types'])}", gtype="pii")
+    shown = s["redacted_text"]
     if s["jailbreak"]["flagged"]:
         rec["guardrail"].append(("jailbreak", "blocked", s["jailbreak"]["reason"]))
+        _emit(on_step, "guardrail", "Jailbreak / injection blocked — not forwarded to the model", gtype="jailbreak")
+        return {"action": "block", "shown": shown, "reply": _JAILBREAK_REPLY}
     if s["off_scope"]:
         rec["guardrail"].append(("off_scope", "bounded", s["scope_reason"]))
-    return s["redacted_text"]
+        _emit(on_step, "guardrail", "Off-topic — bounded, not free-formed", gtype="off_scope")
+        return {"action": "bound", "shown": shown, "reply": _OFFSCOPE_REPLY}
+    return {"action": "allow", "shown": shown}
 
 
 def _emit(on_step, kind: str, text: str, **extra) -> None:
@@ -137,7 +155,10 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, o
 
     if verdict["action"] == "needs_human":  # consequential → human-in-the-loop (GDPR Art. 22)
         rec["guardrail"].append(("human_review", "routed", f"{name}: {verdict['reason']}"))
-        return {"status": "needs_human", "reason": verdict["reason"]}
+        rec["escalated"] = True  # a real state transition — the turn will hand off to a human
+        rec["escalate_reason"] = f"{name} requires human approval"
+        return {"status": "needs_human", "reason": verdict["reason"],
+                "note": "This action needs a human — routing the customer to a teammate now."}
 
     # rejected — classify the block for observability
     gtype = "cooldown" if ("cooldown" in verdict["reason"].lower() or "save offer" in verdict["reason"].lower()) else "over_limit"
@@ -170,6 +191,49 @@ def _handoff_message(input_list: list, system: str) -> str:
         return _HANDOFF_FALLBACK
 
 
+_OUTPUT_SAFE_REPLY = ("I want to make sure I give you accurate, approved information — "
+                      "let me bring in a teammate to help with this.")
+
+
+def _finalize_output(text: str, rec: dict, input_list: list, system: str, on_step) -> str:
+    """Enforce the output guardrails. If a check fires, regenerate once against a
+    corrective instruction; if it still fails, FAIL CLOSED — substitute a safe
+    reply and escalate. Nothing that trips promise/grounding/tone is delivered."""
+    authorized_discount = any(d.get("tool") == "offer_discount" and d.get("allowed")
+                              for d in rec["policy_decisions"])
+    out = guardrails.screen_output(text, rec["tool_results"], authorized_discount=authorized_discount)
+    flags = [k for k in ("promise", "grounding", "tone") if out[k]["flagged"]]
+    if not flags:
+        _emit(on_step, "output", "Output guardrails passed")
+        return text
+    # one corrective regeneration
+    fixed = None
+    try:
+        resp = llm.client().responses.create(
+            model=config.FLAGSHIP_MODEL,
+            instructions=system + ("\n\nYour previous reply was blocked by a safety check ("
+                + ", ".join(flags) + "). Rewrite it: promise ONLY what a tool authorized, state no "
+                "account facts a tool did not return, keep a professional tone. Do not call tools."),
+            input=input_list, reasoning={"effort": "low"}, max_output_tokens=600)
+        cand = (resp.output_text or "").strip()
+        if cand:
+            out2 = guardrails.screen_output(cand, rec["tool_results"], authorized_discount=authorized_discount)
+            if not any(out2[k]["flagged"] for k in ("promise", "grounding", "tone")):
+                fixed = cand
+    except Exception:
+        fixed = None
+    if fixed:
+        for k in flags:
+            rec["guardrail"].append((k, "regenerated", out[k]["reason"]))
+        _emit(on_step, "output", f"Output guardrail caught {', '.join(flags)} — safely regenerated")
+        return fixed
+    for k in flags:
+        rec["guardrail"].append((k, "blocked", out[k]["reason"]))
+    rec["escalated"] = True
+    _emit(on_step, "output", f"Output guardrail blocked {', '.join(flags)} — escalating")
+    return _OUTPUT_SAFE_REPLY
+
+
 def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: str = SYSTEM, on_step=None) -> str:
     """Produce one agent reply, resolving any tool calls first."""
     for hop in range(MAX_HOPS):
@@ -186,16 +250,7 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
         calls = [it for it in resp.output if getattr(it, "type", None) == "function_call"]
         if not calls:
             text = resp.output_text or "Thanks — is there anything else I can help with?"
-            out = guardrails.screen_output(text, rec["tool_results"])
-            flags = [k for k in ("promise", "grounding", "tone") if out[k]["flagged"]]
-            for kind in ("promise", "grounding"):
-                if out[kind]["flagged"]:
-                    rec["guardrail"].append((f"{kind}", "flagged", out[kind]["reason"]))
-            if out["tone"]["flagged"]:
-                rec["guardrail"].append(("tone", "blocked", out["tone"]["reason"]))
-                rec["escalated"] = True
-                text = "I want to make sure this is handled well — let me bring in a teammate."
-            _emit(on_step, "output", "Output guardrails passed" if not flags else f"Output guardrail flags: {', '.join(flags)}")
+            text = _finalize_output(text, rec, input_list, system, on_step)
             input_list.append({"role": "assistant", "content": text})
             return text
         for call in calls:
@@ -212,6 +267,29 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
             input_list.append({"role": "assistant", "content": msg})
             return msg
     return "Let me connect you with a teammate to make sure this is handled properly."
+
+
+def _advance(text: str, transcript: list, input_list: list, cid: int, sub: dict, conn, rec: dict,
+             *, system: str = SYSTEM, on_step=None) -> str:
+    """One agent response to one user message — the SHARED core of both the batch
+    and live paths. Screens the input (block / bound / allow), then either
+    short-circuits with a safe reply (model not called) or runs the agent turn.
+    A blocked jailbreak is shown in the transcript but never enters the model
+    input. Returns the assistant reply."""
+    dec = _screen_input(text, rec, classify_scope=True, on_step=on_step)
+    transcript.append({"role": "user", "content": dec["shown"]})
+    if dec["action"] == "block":
+        reply = dec["reply"]  # NOT added to input_list — the injection never reaches the model
+    elif dec["action"] == "bound":
+        input_list.append({"role": "user", "content": dec["shown"]})
+        input_list.append({"role": "assistant", "content": dec["reply"]})
+        reply = dec["reply"]
+    else:
+        input_list.append({"role": "user", "content": dec["shown"]})
+        reply = _agent_turn(input_list, cid, sub, conn, rec, system=system, on_step=on_step)
+    transcript.append({"role": "assistant", "content": reply})
+    _emit(on_step, "reply", reply)
+    return reply
 
 
 def _disposition(transcript: list, scenario: dict, rec: dict, outcome: str, offer_accepted: bool) -> dict:
@@ -231,13 +309,17 @@ def _disposition(transcript: list, scenario: dict, rec: dict, outcome: str, offe
     except Exception:
         read = {"intent": "cancel_subscription",
                 "churn_reason": scenario.get("churn_reason", "unknown"), "confidence": 0.5}
+    confidence = round(float(read["confidence"]), 2)
+    if confidence < config.JUDGE_CONFIDENCE_FLOOR:
+        rec["guardrail"].append(("low_confidence", "flagged",
+                                 f"disposition confidence {confidence} < floor {config.JUDGE_CONFIDENCE_FLOOR}"))
     return {
         "intent": read["intent"],
         "churn_reason": read["churn_reason"],
         "offer_made": rec["offer_made"],
         "offer_accepted": offer_accepted,
         "outcome": outcome,
-        "confidence": round(float(read["confidence"]), 2),
+        "confidence": confidence,
     }
 
 
@@ -255,34 +337,26 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
            "tool_results": [], "guardrail": [],
            "audit": [("system", "ai_disclosure_shown", "EU AI Act Art. 50")]}
 
-    # Input guardrails on the opening turn: redact PII BEFORE it is stored,
-    # screen for jailbreak/off-scope (scope classified at entry only).
-    opening = _screen_and_record(scenario["opening_message"], rec, classify_scope=True)
-    transcript = [disclosure.disclosure_message(), {"role": "user", "content": opening}]
+    transcript = [disclosure.disclosure_message()]
     input_list = list(transcript)
 
     outcome, offer_accepted = None, False
+    pending = scenario["opening_message"]  # the current user message to process
     for _ in range(MAX_TURNS):
-        reply = _agent_turn(input_list, cid, sub, conn, rec, system=system)
-        transcript.append({"role": "assistant", "content": reply})
+        reply = _advance(pending, transcript, input_list, cid, sub, conn, rec, system=system)
         if rec["escalated"]:
             outcome = "escalated"
             break
         cust = sim.respond(scenario, reply, transcript)
-        cust_text = _screen_and_record(cust["reply"], rec, classify_scope=False)
-        transcript.append({"role": "user", "content": cust_text})
-        input_list.append({"role": "user", "content": cust_text})
         if cust["decision"] == "accept":
             # A save requires an accepted *retention offer*. "Yes, cancel me" with
             # no offer on the table is the customer accepting cancellation = churn.
-            if rec["offer_made"]:
-                outcome, offer_accepted = "saved", True
-            else:
-                outcome = "lost"
+            outcome, offer_accepted = ("saved", True) if rec["offer_made"] else ("lost", False)
             break
         if cust["decision"] == "reject":
             outcome = "lost"
             break
+        pending = cust["reply"]  # screened by _advance on the next iteration
     if outcome is None:
         outcome = "lost"
 
@@ -296,11 +370,19 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
 def persist_conversation(conn, record: dict) -> int:
     """Write a simulated conversation + its audit/guardrail rows. Returns the
     new conversation id and stamps it onto the record. Call on the main thread."""
+    # De-identify before storage/embedding: user turns are already redacted at
+    # input, but redact assistant turns too — so any account PII the model echoes
+    # back is scrubbed before it's logged or clustered (data minimization).
+    stored_transcript = [
+        {"role": t["role"],
+         "content": guardrails.redact_pii(t["content"])[0] if t.get("role") == "assistant" else t["content"]}
+        for t in record["transcript"]
+    ]
     cur = conn.execute(
         "INSERT INTO conversations "
         "(customer_id, scenario_id, transcript_json, disposition_json, offer_made, outcome, created_at) "
         "VALUES (?,?,?,?,?,?,?)",
-        (record["customer_id"], record["scenario_id"], db.dumps(record["transcript"]),
+        (record["customer_id"], record["scenario_id"], db.dumps(stored_transcript),
          db.dumps(record["disposition"]), record["offer_made"], record["outcome"], _now()),
     )
     conv_id = cur.lastrowid
@@ -312,6 +394,11 @@ def persist_conversation(conn, record: dict) -> int:
         "INSERT INTO guardrail_events (conversation_id, type, action, detail, created_at) VALUES (?,?,?,?,?)",
         [(conv_id, t, a, d, _now()) for (t, a, d) in record["guardrail_events"]],
     )
+    # Persist cooldown state: extending a save offer starts the 90-day clock, so a
+    # later conversation for the same customer won't immediately offer again.
+    if record.get("offer_made"):
+        conn.execute("UPDATE subscriptions SET last_save_offer_days = 0 WHERE customer_id = ?",
+                     (record["customer_id"],))
     conn.commit()
     record["conversation_id"] = conv_id
     return conv_id
@@ -339,9 +426,11 @@ def new_session(customer_id: int, conn) -> dict:
            "tool_results": [], "guardrail": [],
            "audit": [("system", "ai_disclosure_shown", "EU AI Act Art. 50")]}
     disc = disclosure.disclosure_message()
+    state = safety.program_state(conn)  # kill switch — start in safe mode if unhealthy
     return {"customer_id": customer_id, "sub": sub, "customer": customer, "rec": rec,
             "transcript": [disc], "input_list": [disc], "outcome": None,
-            "disclosure": disc["content"]}
+            "disclosure": disc["content"], "safe_mode": not state["healthy"],
+            "safety_reasons": state["reasons"]}
 
 
 def _turn_result(session: dict, reply: str, new_events: list) -> dict:
@@ -352,70 +441,78 @@ def _turn_result(session: dict, reply: str, new_events: list) -> dict:
 
 
 def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
-    """Advance one live turn. Input guardrails run first; a jailbreak is blocked
-    before it reaches the model, off-scope is bounded, otherwise the agent runs."""
+    """Advance one live turn using the SAME shared core (_advance) as the batch
+    runner: a jailbreak is blocked before the model, off-scope is bounded,
+    otherwise the agent runs; a needs-human or output violation escalates."""
     rec = session["rec"]
-    cid = session["customer_id"]
-    sub = session["sub"]
-    _emit(on_step, "input", "Screening your message (PII · injection · scope)…")
-
-    s = guardrails.screen_input(user_text, classify_scope=True)
-    new_events: list = []
-    if s["pii_types"]:
-        ev = ("pii", "redacted", ",".join(s["pii_types"]))
-        rec["guardrail"].append(ev); new_events.append(ev)
-        _emit(on_step, "guardrail", f"PII redacted before storage: {', '.join(s['pii_types'])}", gtype="pii")
-    shown = s["redacted_text"]
-
-    # Live red-team: block a jailbreak before the model ever sees it.
-    if s["jailbreak"]["flagged"]:
-        ev = ("jailbreak", "blocked", s["jailbreak"]["reason"])
-        rec["guardrail"].append(ev); new_events.append(ev)
-        _emit(on_step, "guardrail", "Jailbreak / prompt-injection blocked — not forwarded to the model", gtype="jailbreak")
-        reply = ("I can't do that. I'm the retention assistant, so I can only help with your "
-                 "subscription, billing, or cancellation — anything there I can help with?")
-        session["transcript"].append({"role": "user", "content": shown})   # display only; NOT added to model input
+    # Kill switch: if the program is in safe mode, disclose + route to a human
+    # instead of running the agent autonomously.
+    if session.get("safe_mode"):
+        _emit(on_step, "guardrail", "Safe mode active — routing to a human teammate", gtype="safe_mode")
+        session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
+        reply = ("Thanks for reaching out. To make sure you get the best help right now, I'm "
+                 "connecting you with a human teammate who can take it from here.")
         session["transcript"].append({"role": "assistant", "content": reply})
+        ev = ("safe_mode", "engaged", "; ".join(session.get("safety_reasons", [])) or "kill switch")
+        rec["guardrail"].append(ev)
+        rec["escalated"] = True
+        session["outcome"] = "escalated"
         _emit(on_step, "reply", reply)
-        return _turn_result(session, reply, new_events)
-
-    if s["off_scope"]:
-        ev = ("off_scope", "bounded", s["scope_reason"])
-        rec["guardrail"].append(ev); new_events.append(ev)
-        _emit(on_step, "guardrail", "Off-topic request — bounded, not free-formed", gtype="off_scope")
-        reply = ("That's outside what I can help with — I'm just the retention assistant. "
-                 "I can help with your subscription, billing, or cancellation, though.")
-        for lst in (session["transcript"], session["input_list"]):
-            lst.append({"role": "user", "content": shown})
-            lst.append({"role": "assistant", "content": reply})
-        _emit(on_step, "reply", reply)
-        return _turn_result(session, reply, new_events)
-
-    # Normal path — same agent loop as the batch runner.
-    session["transcript"].append({"role": "user", "content": shown})
-    session["input_list"].append({"role": "user", "content": shown})
+        return _turn_result(session, reply, [ev])
     before = len(rec["guardrail"])
-    reply = _agent_turn(session["input_list"], cid, sub, conn, rec, on_step=on_step)
-    session["transcript"].append({"role": "assistant", "content": reply})
-    new_events += rec["guardrail"][before:]
+    reply = _advance(user_text, session["transcript"], session["input_list"],
+                     session["customer_id"], session["sub"], conn, rec, on_step=on_step)
     if rec["escalated"]:
         session["outcome"] = "escalated"
-    _emit(on_step, "reply", reply)
-    return _turn_result(session, reply, new_events)
+    return _turn_result(session, reply, rec["guardrail"][before:])
 
 
 def resolve_session(session: dict, outcome: str, conn) -> dict:
-    """End a live conversation: compute the disposition and persist it so it
-    appears in the explorer and moves the metrics. `outcome` in saved/lost/escalated."""
+    """End a live conversation: VALIDATE the outcome, persist it, and GRADE it
+    (so the live path also grades 100%). Raises ValueError on an invalid
+    transition (already resolved, or 'saved' without an accepted offer)."""
     rec = session["rec"]
+    if session.get("resolved"):
+        raise ValueError("this conversation has already been resolved")
     if session["outcome"] == "escalated":
         outcome = "escalated"
-    offer_accepted = outcome == "saved" and bool(rec["offer_made"])
+    if outcome not in ("saved", "lost", "escalated"):
+        raise ValueError("outcome must be saved, lost, or escalated")
+    if outcome == "saved" and not rec["offer_made"]:
+        raise ValueError("cannot mark 'saved' without an authorized, accepted retention offer")
+    offer_accepted = outcome == "saved"
     scenario = {"id": None, "customer_id": session["customer_id"], "churn_reason": "live session"}
     disp = _disposition(session["transcript"], scenario, rec, outcome, offer_accepted)
     record = {"customer_id": session["customer_id"], "scenario_id": None,
               "transcript": session["transcript"], "disposition": disp, "outcome": outcome,
-              "offer_made": rec["offer_made"], "guardrail_events": rec["guardrail"], "audit": rec["audit"]}
+              "offer_made": rec["offer_made"], "policy_decisions": rec["policy_decisions"],
+              "guardrail_events": rec["guardrail"], "audit": rec["audit"]}
     persist_conversation(conn, record)
+    _grade_and_store(conn, record["conversation_id"], record, session["customer_id"])
     session["resolved"] = True
     return record
+
+
+def _grade_and_store(conn, conv_id: int, record: dict, customer_id: int) -> None:
+    """Grade a persisted conversation and write its eval row, so the live path
+    grades 100% of conversations. A judge failure writes a coverage-miss eval
+    (verdict 'error') rather than silently leaving the record ungraded."""
+    from evals import judge  # local import avoids any load-order cycle
+    row = conn.execute("SELECT demographic_attr FROM customers WHERE id=?", (customer_id,)).fetchone()
+    convo = {"transcript": record["transcript"], "disposition": record["disposition"],
+             "demographic_attr": row["demographic_attr"] if row else "unknown",
+             "policy_decisions": record.get("policy_decisions", []),
+             "guardrail_events": record.get("guardrail_events", [])}
+    try:
+        v = judge.judge_conversation(convo)
+        verdict = judge.derive_verdict(v["scores"])
+        conn.execute(
+            "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (conv_id, db.dumps(v["scores"]), verdict, v["rationale"], int(v["fairness_flag"]), _now()))
+    except Exception as e:
+        conn.execute(
+            "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (conv_id, db.dumps({}), "error", f"grading failed: {type(e).__name__}", 0, _now()))
+    conn.commit()

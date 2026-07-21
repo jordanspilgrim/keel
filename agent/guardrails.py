@@ -28,6 +28,7 @@ _PII_PATTERNS = [
     (re.compile(r"\b\d(?:[ -]?\d){12,18}\b"), "[REDACTED_CARD]", "card"),
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN]", "ssn"),
     (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"), "[REDACTED_EMAIL]", "email"),
+    (re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"), "[REDACTED_DOB]", "dob"),
     (re.compile(r"\b(?:\+?1[ -.]?)?\(?\d{3}\)?[ -.]?\d{3}[ -.]?\d{4}\b"), "[REDACTED_PHONE]", "phone"),
 ]
 _SENSITIVE_TERMS = re.compile(
@@ -110,8 +111,17 @@ def screen_input(text: str, classify_scope: bool = True) -> dict:
 
 
 # --- output guardrails -----------------------------------------------------
-_BANNED_PROMISES = re.compile(r"\b(lifetime|forever|guarantee[d]?|unlimited free|permanent(?:ly)? free)\b", re.IGNORECASE)
+_BANNED_PROMISES = re.compile(
+    r"\b(lifetime|forever|guarantee[d]?|unlimited free|permanent(?:ly)? free|free for life|"
+    r"half[\s-]?(?:off|price)|waive (?:the )?(?:next )?[\w-]+ (?:invoices?|payments?|months?|bills?))\b",
+    re.IGNORECASE)
 _PCT_RX = re.compile(r"(\d{1,3})\s*%")
+_SPELLED_PCT = re.compile(
+    r"\b(ten|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|(?:one[\s-]?)?hundred)\b[\s-]*percent",
+    re.IGNORECASE)
+_SPELLED_MAP = {"ten": 10, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+                "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100, "one hundred": 100}
+_DISCOUNT_CTX = re.compile(r"\b\d{1,3}\s*%\s*(?:off|discount)|discount of\b", re.IGNORECASE)
 _MONEY_RX = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?")
 
 
@@ -125,13 +135,22 @@ def check_tone(reply: str) -> dict:
         return {"flagged": False, "reason": "moderation unavailable"}
 
 
-def check_promise(reply: str) -> dict:
-    """Catch commitments the policy layer would never authorize."""
-    if _BANNED_PROMISES.search(reply):
-        return {"flagged": True, "reason": f"banned commitment: {_BANNED_PROMISES.search(reply).group(0)!r}"}
-    over = [int(p) for p in _PCT_RX.findall(reply) if int(p) > config.MAX_DISCOUNT_PCT and int(p) <= 100]
+def check_promise(reply: str, *, authorized_discount: bool = True) -> dict:
+    """Catch commitments the policy layer would never authorize. `authorized_discount`
+    is whether an offer_discount was actually approved this conversation — a reply
+    that promises a discount when none was authorized is flagged even if within the
+    ceiling (an unauthorized, if modest, commitment)."""
+    m = _BANNED_PROMISES.search(reply)
+    if m:
+        return {"flagged": True, "reason": f"banned commitment: {m.group(0)!r}"}
+    nums = [int(p) for p in _PCT_RX.findall(reply) if int(p) <= 100]
+    nums += [_SPELLED_MAP[w.lower().replace("one ", "").strip("- ")] for w in _SPELLED_PCT.findall(reply)
+             if w.lower().replace("one ", "").strip("- ") in _SPELLED_MAP]
+    over = [n for n in nums if n > config.MAX_DISCOUNT_PCT]
     if over:
         return {"flagged": True, "reason": f"promises discount above {config.MAX_DISCOUNT_PCT}% ceiling: {over}"}
+    if not authorized_discount and _DISCOUNT_CTX.search(reply):
+        return {"flagged": True, "reason": "promises a discount that was not authorized by a tool call"}
     return {"flagged": False, "reason": ""}
 
 
@@ -147,7 +166,7 @@ def check_grounding(reply: str, tool_results: list[str]) -> dict:
     return {"flagged": False, "reason": ""}
 
 
-def screen_output(reply: str, tool_results: list[str]) -> dict:
+def screen_output(reply: str, tool_results: list[str], *, authorized_discount: bool = True) -> dict:
     """Full output-guardrail pass over an agent reply."""
-    return {"tone": check_tone(reply), "promise": check_promise(reply),
+    return {"tone": check_tone(reply), "promise": check_promise(reply, authorized_discount=authorized_discount),
             "grounding": check_grounding(reply, tool_results)}

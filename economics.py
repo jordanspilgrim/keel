@@ -16,18 +16,21 @@ from dataclasses import dataclass
 import config
 
 
-def margin_cost(offer_made: str | None, price: float) -> float:
-    """Dollar margin conceded by an offer (used by the analytics layer, §4).
+def margin_cost(offer_made: str | None, price: float, *, accepted: bool = True) -> float:
+    """REALIZED dollar margin conceded by an offer (used by the analytics layer, §4).
 
-    Discount → the % of price given away each month. Pause → a small goodwill
-    fraction of price (mostly deferred, not lost). No offer → 0."""
-    if not offer_made:
+    Only an *accepted* offer actually costs margin — a proposed-but-rejected offer
+    costs nothing (`accepted=False` → 0). Discount → the % of price given away each
+    month. Pause → a small goodwill fraction of price, scaled by the number of
+    months paused (a 3-month pause costs 3× a 1-month pause)."""
+    if not offer_made or not accepted:
         return 0.0
-    if "discount" in offer_made:
-        pct = float(re.findall(r"(\d+)", offer_made)[0])
-        return round(price * pct / 100, 2)
+    nums = re.findall(r"(\d+)", offer_made)
+    if "discount" in offer_made and nums:
+        return round(price * float(nums[0]) / 100, 2)
     if "pause" in offer_made:
-        return round(price * config.PAUSE_MARGIN_FRACTION, 2)
+        months = int(nums[0]) if nums else 1
+        return round(price * config.PAUSE_MARGIN_FRACTION * months, 2)
     return 0.0
 
 

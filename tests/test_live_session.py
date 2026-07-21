@@ -25,10 +25,18 @@ def conn(tmp_path):
     c.close()
 
 
+def _stub_grade(conn, conv_id, record, customer_id):
+    """Deterministic offline stand-in for the judge call resolve makes."""
+    conn.execute("INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, created_at) "
+                 "VALUES (?,?,?,?,?,?)", (conv_id, "{}", "pass", "stub", 0, "t"))
+    conn.commit()
+
+
 @pytest.fixture(autouse=True)
-def _no_scope_api(monkeypatch):
-    # the scope classifier hits the API; default to in-scope for determinism
+def _no_api(monkeypatch):
+    # the scope classifier + judge hit the API; stub them for deterministic offline tests
     monkeypatch.setattr(guardrails, "check_scope", lambda t: {"in_scope": True, "reason": "test"})
+    monkeypatch.setattr(runtime, "_grade_and_store", _stub_grade)
 
 
 def _fake_agent(reply="Here's a pause offer for you.", offer=None, escalate=False, calls=None):
@@ -113,3 +121,30 @@ def test_resolve_persists_and_is_readable(conn, monkeypatch):
     # disclosure audit + guardrail rows linked to the new conversation
     assert conn.execute("SELECT count(*) FROM audit_log WHERE conversation_id=? AND decision='ai_disclosure_shown'",
                         (rec["conversation_id"],)).fetchone()[0] == 1
+    # resolve auto-grades — an eval row now exists for this conversation
+    assert conn.execute("SELECT count(*) FROM evals WHERE conversation_id=?",
+                        (rec["conversation_id"],)).fetchone()[0] == 1
+
+
+def test_saved_requires_an_authorized_offer(conn, monkeypatch):
+    # agent makes NO offer this conversation
+    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(reply="I understand, I'll process that."))
+    monkeypatch.setattr(runtime, "_disposition",
+                        lambda *a: {"intent": "cancel", "churn_reason": "x", "offer_made": None,
+                                    "offer_accepted": False, "outcome": "lost", "confidence": 0.8})
+    s = runtime.new_session(1, conn)
+    runtime.live_turn(s, "Just cancel me.", conn)
+    with pytest.raises(ValueError):  # cannot claim 'saved' with no offer on the table
+        runtime.resolve_session(s, "saved", conn)
+
+
+def test_resolve_is_idempotent(conn, monkeypatch):
+    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(offer="1-month pause"))
+    monkeypatch.setattr(runtime, "_disposition",
+                        lambda *a: {"intent": "cancel", "churn_reason": "x", "offer_made": "1-month pause",
+                                    "offer_accepted": True, "outcome": "saved", "confidence": 0.8})
+    s = runtime.new_session(1, conn)
+    runtime.live_turn(s, "Too expensive.", conn)
+    runtime.resolve_session(s, "saved", conn)
+    with pytest.raises(ValueError):  # a second resolve is rejected
+        runtime.resolve_session(s, "lost", conn)

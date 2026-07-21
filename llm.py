@@ -25,7 +25,9 @@ _client: OpenAI | None = None
 def client() -> OpenAI:
     global _client
     if _client is None:
-        _client = OpenAI()
+        # A per-request timeout so a stalled call fails and surfaces rather than
+        # hanging a live turn indefinitely (the SDK also retries transient errors).
+        _client = OpenAI(timeout=90.0)
     return _client
 
 

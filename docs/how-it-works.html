@@ -117,7 +117,7 @@
   <div class="callout">A conversation is only counted <b>saved</b> when the customer accepts a <b>real retention offer</b>. Someone agreeing to cancel is a churn, not a save — a distinction that keeps the downstream analytics honest.</div>
 
   <h2>Guardrails — defense in depth</h2>
-  <p>Guardrails aren’t a prompt instruction (“please don’t…”). They’re enforced layers, each fail-closed, and every trip is written to <code>guardrail_events</code>. On the seeded red-team the catch rate is <b>100% (11/11)</b>.</p>
+  <p>Guardrails aren’t a prompt instruction (“please don’t…”). They’re <em>enforced</em> layers: a jailbreak is blocked before the model, actions are deterministically authorized, and an output that trips a check is regenerated once and, failing that, fails closed to a human hand-off. Every trip is written to <code>guardrail_events</code>. On the seeded red-team the input catch rate is <b>100% (11/11)</b>.</p>
 
   <div class="card">
     <div class="gr"><span class="tag">Input</span> &nbsp;<b>before the model acts</b>
