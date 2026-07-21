@@ -63,6 +63,8 @@ Operating principles:
 - Calibrated autonomy: you may offer a discount or a pause yourself. Consequential/irreversible actions (downgrades, contract changes) require human approval — the tools will tell you.
 - Fail safe and be honest: NEVER promise anything a tool did not authorize. If no offer is authorized (e.g. the customer is within a save-offer cooldown), do not invent one.
 - When you have no authorized save offer and the customer simply wants to cancel, acknowledge warmly and let them go — process the cancellation gracefully. Do NOT reflexively escalate; only call escalate_to_human if the customer explicitly asks for a person or requests something consequential (a refund, a contract change) that you cannot handle.
+- If the customer asks for something you have no tool for (e.g. upgrading to a higher plan) alongside the cancellation, DON'T hand off abruptly or abandon the chat. Acknowledge that specific request, tell them a teammate can set it up, and — if a retention offer is still on the table — keep helping with that in the same breath. Escalate only when the conversation genuinely cannot continue without a person.
+- If you do escalate, never be terse: name what the customer asked for, say briefly why a teammate is better placed to help, and reassure them their conversation carries over.
 - Keep replies short and human (2-4 sentences).
 
 Tools: call get_customer / get_subscription / get_usage to ground yourself before offering. Then propose offer_pause or offer_discount. The policy layer may cap or reject your proposal; respect its verdict and only tell the customer what was actually authorized.
@@ -143,6 +145,31 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, o
     return {"status": "rejected", "reason": verdict["reason"]}
 
 
+_HANDOFF_FALLBACK = ("Understood — I'm bringing in a teammate who can help with this. "
+                     "They'll have our full conversation, so you won't need to repeat anything.")
+
+
+def _handoff_message(input_list: list, system: str) -> str:
+    """A warm, contextual closing message when the agent must escalate — the
+    model writes it in its own words (no tools), with a safe fallback so a failed
+    call never leaves the customer with a dead end."""
+    try:
+        resp = llm.client().responses.create(
+            model=config.FLAGSHIP_MODEL,
+            instructions=system + (
+                "\n\nThis request needs a human teammate. Write ONLY a brief, warm closing message "
+                "(1-2 sentences) to the customer: acknowledge their specific request by name, say a "
+                "teammate will take it from here and already has the full conversation, and reassure "
+                "them. Do not offer anything new; do not call tools."),
+            input=input_list,
+            reasoning={"effort": "low"},
+            max_output_tokens=400,
+        )
+        return (resp.output_text or "").strip() or _HANDOFF_FALLBACK
+    except Exception:
+        return _HANDOFF_FALLBACK
+
+
 def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: str = SYSTEM, on_step=None) -> str:
     """Produce one agent reply, resolving any tool calls first."""
     for hop in range(MAX_HOPS):
@@ -180,8 +207,8 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
                                "output": json.dumps(result)})
         # An escalation resolves the turn — don't keep spinning tool hops.
         if rec["escalated"]:
-            _emit(on_step, "output", "Escalating to a human teammate")
-            msg = "Understood — I'm connecting you with a teammate who can take it from here."
+            _emit(on_step, "output", "Preparing a hand-off to a human teammate")
+            msg = _handoff_message(input_list, system)
             input_list.append({"role": "assistant", "content": msg})
             return msg
     return "Let me connect you with a teammate to make sure this is handled properly."
