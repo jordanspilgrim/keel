@@ -111,13 +111,13 @@
     <li><div class="t">Input guardrails</div><div class="d">Every customer message is screened: PII redacted <em>before</em> it’s stored, jailbreak patterns caught, off-topic requests bounded.</div></li>
     <li><div class="t">Reason + call tools</div><div class="d">The model (flagship) grounds itself with <code>get_customer</code> / <code>get_subscription</code> / <code>get_usage</code>, then proposes a retention offer. It can only ever see the authenticated customer’s own records.</div></li>
     <li><div class="t">Policy disposes</div><div class="d">Deterministic authorization caps or rejects the proposal — discount depth, margin floor, save-offer cooldown — and routes consequential actions to a human.</div></li>
-    <li><div class="t">Output guardrails</div><div class="d">Before the reply is sent: a moderation tone pass, a promise check (no commitments policy didn’t authorize), and a grounding check.</div></li>
+    <li><div class="t">Output guardrails</div><div class="d">The agent's final turn is a <em>structured response contract</em> (display text + declared commitments + account claims), validated deterministically against the offer ledger and tool facts before anything is sent — regex is a supplemental cross-check, not the primary control.</div></li>
     <li><div class="t">Structured disposition</div><div class="d">A JSON-schema disposition (<span class="mono">intent, churn_reason, offer_made, offer_accepted, outcome, confidence</span>) is produced and reconciled with the loop’s ground-truth outcome.</div></li>
   </ol>
   <div class="callout">A conversation is only counted <b>saved</b> when the customer accepts a <b>real retention offer</b>. Someone agreeing to cancel is a churn, not a save — a distinction that keeps the downstream analytics honest.</div>
 
   <h2>Guardrails — defense in depth</h2>
-  <p>Guardrails aren’t a prompt instruction (“please don’t…”). They’re <em>enforced</em> layers: a jailbreak is blocked before the model, actions are deterministically authorized, and an output that trips a check is regenerated once and, failing that, fails closed to a human hand-off. Every trip is written to <code>guardrail_events</code>. On the seeded red-team the input catch rate is <b>100% (11/11)</b>.</p>
+  <p>Guardrails aren’t a prompt instruction (“please don’t…”). They’re <em>enforced</em> layers: a jailbreak is blocked before the model, actions are deterministically authorized, and the customer-facing reply must pass a structured contract validated against the offer ledger (the exact terms authorized) — a reply that overstates the offer or invents an account fact is regenerated once and, failing that, fails closed to a human hand-off. Every trip is written to <code>guardrail_events</code>. On the seeded red-team the input catch rate is <b>100% (11/11)</b>.</p>
 
   <div class="card">
     <div class="gr"><span class="tag">Input</span> &nbsp;<b>before the model acts</b>

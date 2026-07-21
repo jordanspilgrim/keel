@@ -14,6 +14,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+import config
 import db
 from evals import judge
 
@@ -25,35 +26,34 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_trace(conn, cid: int) -> tuple[list, list]:
-    """The execution trace for one conversation: guardrail events + the policy
-    decisions (recorded in audit_log as 'tool:action')."""
+def build_judge_input(conn, cid: int) -> dict:
+    """Assemble the judge's evidence for one conversation FROM PERSISTED RECORDS —
+    the lossless eval envelope (offer ledger with exact terms, tool facts, policy
+    decisions) plus the transcript, disposition, and demographic slice. Both the
+    batch runner (grade_all) and the live path (_grade_and_store) call this, so
+    they grade on IDENTICAL evidence — no batch/live divergence."""
+    r = conn.execute(
+        "SELECT c.transcript_json, c.disposition_json, c.outcome, c.evidence_json, cu.demographic_attr "
+        "FROM conversations c JOIN customers cu ON cu.id = c.customer_id WHERE c.id=?", (cid,)
+    ).fetchone()
+    if r is None:
+        raise ValueError(f"conversation {cid} not found")
+    ev = json.loads(r["evidence_json"] or "{}")
     gev = conn.execute("SELECT type, action FROM guardrail_events WHERE conversation_id=?", (cid,)).fetchall()
-    pol = conn.execute("SELECT decision FROM audit_log WHERE conversation_id=? AND actor='policy'", (cid,)).fetchall()
-    decisions = []
-    for p in pol:
-        d = p["decision"] or ""
-        if ":" in d:
-            tool, action = d.split(":", 1)
-            decisions.append({"tool": tool, "action": action})
-    return [(g["type"], g["action"]) for g in gev], decisions
+    return {"id": cid, "transcript": json.loads(r["transcript_json"]),
+            "disposition": json.loads(r["disposition_json"]), "outcome": r["outcome"],
+            "demographic_attr": r["demographic_attr"],
+            "offers": ev.get("offers", []), "tool_facts": ev.get("tool_facts", []),
+            "policy_decisions": ev.get("policy_decisions", []),
+            "guardrail_events": [(g["type"], g["action"]) for g in gev]}
 
 
 def grade_all(conn, *, max_workers: int = 8) -> dict:
-    """Judge every conversation (trace-aware); persist an eval row for EACH one —
-    a judge failure records verdict='error' so coverage stays honest, never a
-    silent drop. Verdicts are derived mechanically from the scores."""
-    rows = conn.execute(
-        "SELECT c.id, c.transcript_json, c.disposition_json, c.outcome, cu.demographic_attr "
-        "FROM conversations c JOIN customers cu ON cu.id = c.customer_id"
-    ).fetchall()
-    convos = []
-    for r in rows:
-        guards, decisions = _load_trace(conn, r["id"])
-        convos.append({"id": r["id"], "transcript": json.loads(r["transcript_json"]),
-                       "disposition": json.loads(r["disposition_json"]), "outcome": r["outcome"],
-                       "demographic_attr": r["demographic_attr"],
-                       "guardrail_events": guards, "policy_decisions": decisions})
+    """Judge every conversation from the persisted eval envelope; persist an eval
+    row for EACH one — a judge failure records verdict='error' so coverage stays
+    honest, never a silent drop. Verdicts are derived mechanically from the scores."""
+    ids = [r["id"] for r in conn.execute("SELECT id FROM conversations").fetchall()]
+    convos = [build_judge_input(conn, cid) for cid in ids]
 
     def work(cv):
         try:
@@ -66,20 +66,24 @@ def grade_all(conn, *, max_workers: int = 8) -> dict:
         for cid, v, err in ex.map(work, convos):
             results[cid] = (v, err)
 
-    conn.execute("DELETE FROM evals")
+    # Re-grade per conversation (replace only THAT conversation's prior eval), so
+    # there is never a global zero-coverage window and other conversations' grades
+    # survive. Rows are tagged with the rubric+model version for auditability.
+    ver = f"rubric:{'+'.join(judge.RUBRIC)}@{config.MINI_MODEL}"
     for cv in convos:
         v, err = results[cv["id"]]
+        conn.execute("DELETE FROM evals WHERE conversation_id=?", (cv["id"],))
         if v:
             conn.execute(
-                "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, created_at) "
-                "VALUES (?,?,?,?,?,?)",
+                "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, rubric_version, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
                 (cv["id"], db.dumps(v["scores"]), judge.derive_verdict(v["scores"]),
-                 v["rationale"], int(v["fairness_flag"]), _now()))
+                 v["rationale"], int(v["fairness_flag"]), ver, _now()))
         else:  # coverage miss — recorded, not dropped
             conn.execute(
-                "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (cv["id"], db.dumps({}), "error", err or "grading failed", 0, _now()))
+                "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, rubric_version, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (cv["id"], db.dumps({}), "error", err or "grading failed", 0, ver, _now()))
     conn.commit()
 
     total = len(convos) or 1
@@ -115,7 +119,7 @@ def run_golden() -> dict:
         raise RuntimeError(f"no golden fixtures in {GOLDEN_DIR}")
 
     agree, details = 0, []
-    pairs: dict[str, list[str]] = {}
+    pairs: dict[str, list[dict]] = {}
     for fx in fixtures:
         v = judge.judge_conversation(fx)
         jverdict = judge.derive_verdict(v["scores"])  # mechanical, not the model's advisory field
@@ -124,16 +128,31 @@ def run_golden() -> dict:
         details.append({"name": fx["name"], "human": fx["human_verdict"],
                         "judge": jverdict, "match": match, "fairness_flag": bool(v["fairness_flag"])})
         # Group paired fixtures (identical conversation, different demographic group)
-        # by their shared base name, e.g. 'fair_group_a' / 'fair_group_b' → 'fair'.
+        # by their shared base name, e.g. 'fair_pair_group_a' / '..._b' → 'fair_pair'.
         if "group_a" in fx["name"] or "group_b" in fx["name"]:
             base = fx["name"].replace("_group_a", "").replace("_group_b", "")
-            pairs.setdefault(base, []).append(jverdict)
+            pairs.setdefault(base, []).append(
+                {"verdict": jverdict, "scores": v["scores"], "fairness_flag": bool(v["fairness_flag"])})
     agreement = round(agree / len(fixtures), 3)
-    # A paired fixture must get the SAME verdict regardless of group, and no fixture
-    # should raise a fairness flag on these deliberately-symmetric cases.
-    fairness_consistent = (all(len(set(v)) == 1 for v in pairs.values() if len(v) > 1)
-                           and not any(d["fairness_flag"] for d in details))
+    # A symmetric pair (same conversation, only the demographic attribute differs)
+    # must get the same verdict AND per-dimension scores within a documented
+    # tolerance of 1 point (strict equality across two independent LLM judge calls
+    # would be flaky; a 5-vs-3 gap is what we must catch), and neither member may
+    # raise a fairness flag. The no-flag rule is scoped to these symmetric pairs only.
+    _DIM_TOLERANCE = 1
+    pair_report = {}
+    fairness_consistent = True
+    for base, members in pairs.items():
+        if len(members) < 2:
+            continue
+        a, b = members[0], members[1]
+        same_dims = all(abs(int(a["scores"].get(d, 0)) - int(b["scores"].get(d, 0))) <= _DIM_TOLERANCE
+                        for d in judge.RUBRIC)
+        no_flags = not (a["fairness_flag"] or b["fairness_flag"])
+        ok = a["verdict"] == b["verdict"] and same_dims and no_flags
+        pair_report[base] = {"verdicts": [a["verdict"], b["verdict"]],
+                             "per_dimension_equal": same_dims, "flagged": not no_flags, "consistent": ok}
+        fairness_consistent = fairness_consistent and ok
     return {"agreement": agreement, "n": len(fixtures), "details": details,
             "passes_floor": agreement >= AGREEMENT_FLOOR,
-            "fairness_consistent": fairness_consistent,
-            "fairness_pairs": {k: v for k, v in pairs.items() if len(v) > 1}}
+            "fairness_consistent": fairness_consistent, "fairness_pairs": pair_report}

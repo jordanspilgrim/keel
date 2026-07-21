@@ -35,6 +35,12 @@ def run_batch(conn, scenarios, *, system: str = runtime.SYSTEM, max_workers: int
     run against a non-default DB reads the right data."""
     scenarios = [dict(s) for s in scenarios]
     worker_path = db_path or _conn_path(conn)
+    if worker_path is None:
+        # An in-memory / unnamed DB can't be shared across the worker threads' own
+        # connections — silently falling back to the global file would read the
+        # WRONG data. Fail loudly instead (callers can pass a file path).
+        raise ValueError("run_batch needs a file-backed DB (or an explicit db_path); "
+                         "in-memory connections can't be shared across worker threads")
 
     def work(scn):
         c = db.connect(worker_path)  # per-thread read connection, same DB as caller

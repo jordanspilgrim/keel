@@ -135,18 +135,23 @@ def chat_turn(req: TurnReq):
 
     def worker():
         conn = None
+        result, error = None, None
         try:
             conn = db.connect()  # inside try — a connect failure surfaces, never hangs
             result = runtime.live_turn(session, req.message, conn,
                                        on_step=lambda s: turn_state["steps"].append(s))
-            turn_state["result"] = result
         except Exception as e:  # never hang — surface the error
-            turn_state["error"] = f"{type(e).__name__}: {e}"
+            error = f"{type(e).__name__}: {e}"
         finally:
             if conn is not None:
                 conn.close()
-            session["_busy"] = False
-            turn_state["done"] = True  # set last, so 'done' implies not busy
+            # Publish the terminal state under the lock so a concurrent poll sees a
+            # consistent snapshot; 'done' is set last so it implies not busy.
+            with _LOCK:
+                turn_state["result"] = result
+                turn_state["error"] = error
+                session["_busy"] = False
+                turn_state["done"] = True
 
     threading.Thread(target=worker, daemon=True).start()
     return {"turn_id": tid}
@@ -154,11 +159,14 @@ def chat_turn(req: TurnReq):
 
 @app.get("/api/turn/{turn_id}")
 def turn_status(turn_id: str):
+    # Copy the whole turn state while holding the SAME lock the worker mutates
+    # under, so the response is a consistent snapshot (not a torn read).
     with _LOCK:
         ts = TURNS.get(turn_id)
-    if ts is None:
-        raise HTTPException(404, "turn not found")
-    return {"steps": ts["steps"], "done": ts["done"], "result": ts["result"], "error": ts["error"]}
+        if ts is None:
+            raise HTTPException(404, "turn not found")
+        return {"steps": list(ts["steps"]), "done": ts["done"],
+                "result": ts["result"], "error": ts["error"]}
 
 
 @app.post("/api/chat/resolve")
@@ -176,14 +184,17 @@ def chat_resolve(req: ResolveReq):
         # Claim the resolve under the lock so a second concurrent request can't
         # also pass the checks above before resolve_session flips 'resolved'.
         session["_resolving"] = True
-    conn = db.connect()
+    conn = None
     try:
+        conn = db.connect()  # inside try — a connect failure clears the claim, never sticks
         record = runtime.resolve_session(session, req.outcome, conn)
     except ValueError as e:  # invalid transition (e.g. 'saved' with no accepted offer)
         raise HTTPException(422, str(e))
     finally:
-        conn.close()
-        session["_resolving"] = False  # release the claim (resolved stays set on success)
+        if conn is not None:
+            conn.close()
+        with _LOCK:
+            session["_resolving"] = False  # release the claim (resolved stays set on success)
     return {"conversation_id": record["conversation_id"], "outcome": record["outcome"],
             "disposition": record["disposition"]}
 

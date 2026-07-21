@@ -10,10 +10,10 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 |---|---|---|---|
 | **0 — Scaffold + synth** | ✅ **done** | `config.py`, `db.py`, `synth.py`, `economics.py`, `.env.example`, `requirements.txt`, dashboard mockup, stubs | `python synth.py` seeds keel.db reproducibly (200 cust / 200 sub / 211 scenarios; identical SHA on re-run) ✓; `python economics.py` reproduces the $1.28/97% headline ✓ |
 | **1 — Cancellation-saver agent** | ✅ **done** | `agent/runtime.py` Responses-API loop, `agent/tools.py`, `agent/policy.py`, `agent/disclosure.py`, `sim.py` (customer simulator), `llm.py`, structured disposition | `python -m scripts.phase1_accept`: eligible → **saved** (3-mo pause), ineligible → **lost** (cooldown-rejected save offer, graceful churn); disclosure in every transcript; no offer exceeds limits ✓; 10 unit tests pass |
-| **2 — Guardrails & compliance** | ✅ **done** | `agent/guardrails.py` (input: PII redact / jailbreak / scope; output: tone / promise / grounding), policy human-in-the-loop (+`deny_refund` tool), `guardrail_events` populated, PII redacted before store | `python -m scripts.phase2_accept`: **100% catch rate (11/11)** — jailbreak 4/4 blocked, off-scope 4/4 bounded, PII 3/3 redacted, over-limit 40%→capped 20%, refund→human ✓; 54 tests pass |
-| **3 — Eval harness** | ✅ **done** | `evals/judge.py` (5-dim rubric + fairness flag), `evals/run_evals.py` (grade_all + run_golden), 9 golden fixtures, `batch.py` concurrent runner | `python -m scripts.phase3_accept` (representative run): 12/12 graded, golden agreement **100% (9/9)** at the 80% floor, paired-fairness consistent, broken agent → **fail** (derived verdict, resolution 2); fairness slice by group reported |
+| **2 — Guardrails & compliance** | ✅ **done** | `agent/guardrails.py` (input: PII redact / jailbreak / scope; output: tone / promise / grounding), policy human-in-the-loop (+`deny_refund` tool), `guardrail_events` populated, PII redacted before store | `python -m scripts.phase2_accept`: **100% catch rate (11/11)** — jailbreak 4/4 blocked, off-scope 4/4 bounded, PII 3/3 redacted, over-limit 40%→capped 20%, refund→human ✓; 69 tests pass |
+| **3 — Eval harness** | ✅ **done** | `evals/judge.py` (5-dim rubric + fairness flag, fed the persisted eval envelope), `evals/run_evals.py` (grade_all + run_golden + `build_judge_input`), 9 golden fixtures, `batch.py` concurrent runner | `python -m scripts.phase3_accept` (representative run): 12/12 graded (eval pass ~92%), golden agreement **100% (9/9)** at the 80% floor, paired-fairness consistent (per-dimension), a known-bad conversation → **fail** (policy_adherence 1, hallucination 1); fairness slice by group reported |
 | **4 — VoC analytics** | ✅ **done** | `analytics/embed.py` (batched), `analytics/cluster.py` (KMeans), `analytics/themes.py` (theme cards + offer effectiveness + ranked signals), `economics.margin_cost` | `python -m scripts.phase4_accept`: 30-conv batch → 5 themes, top-3 drivers, ranked signals, offer comparison from clusters ✓ |
-| **5 — Close the loop** | ✅ **done** | `dashboard/export.py` → `data.js` wired to a data-driven `dashboard/index.html`; `run_demo.py` SELECTS the treated segment from `themes.rank_segments`, runs baseline → learn → act → re-measure, requires a paired cohort + strictly-positive treated-segment lift, writes `manifest.json` | `python run_demo.py` (representative run): analytics selected the price-sensitive segment (worst loss impact); treated save rate **38% → 75% (+38pp this run)**, overall +22pp — **the flywheel turning**. Lift magnitude varies run to run (earlier runs baselined ~62% → +12pp); the treated segment lands ~75% after the act |
+| **5 — Close the loop** | ✅ **done** | `dashboard/export.py` → `data.js` wired to a data-driven `dashboard/index.html`; `run_demo.py` consumes a structured intervention signal (`themes.recommend_intervention`), runs baseline → learn → act → re-measure, requires a paired cohort + lever-compatible signal + strictly-positive treated-segment lift, writes `manifest.json` (+ dated copies in `dashboard/manifests/`) | `python run_demo.py` (representative run): the signal selected the price-sensitive segment (worst lever-compatible loss); treated save rate **38% → 50% (+12pp this run)**, overall −6pp (noisy context) — **the flywheel turning**. Lift is positive but run-variable (~+10 to +40pp across runs); the treated segment lands in the ~50–75% range after the act |
 | **6 — Stretch** | ⬜ | adversarial red-team suite (synth already seeds 11 probes), A/B offer testing, "propose a policy change" agent | — |
 
 ## Phase 0 — verified
@@ -49,7 +49,7 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 
 - `dashboard/export.py`: computes every dashboard view from the DB (KPIs incl. margin-adjusted save rate, before/after trend, clustered drivers, offer effectiveness, safety) → writes `dashboard/data.js` (`window.KEEL_DATA`). The dashboard loads it via `<script src>` (works on file://) and falls back to a mock if absent.
 - `dashboard/index.html`: rewritten data-driven — same design language, now rendering real demo output.
-- `run_demo.py`: the full flywheel on one identical seeded cohort — BASELINE (discounts disabled) → grade + cluster → the analytics signal **selects** the highest-loss segment via `themes.rank_segments` (lands on price-sensitive because that's where the discount lever helps; the demo bails honestly if it selects a segment the lever can't address) → ACT (enable discounts + lead-with-discount playbook for that segment) → RE-MEASURE. The lift is measured on the **treated segment** where the act applies. Representative run: 38%→75% (+38pp this run), overall +22pp. The treated segment is small (n≈8) and conversations are LLM-driven, so the baseline draw and thus the lift magnitude vary run to run (earlier runs baselined ~62% → +12pp); the after-state lands ~75% consistently. Re-seeds between batches so cooldown state doesn't carry over; requires a matched paired cohort and a strictly-positive treated-segment lift; writes `dashboard/manifest.json` (cohort IDs, selected segment + baseline segment ranking, prompt/policy hashes, model IDs, eval coverage, lift).
+- `run_demo.py`: the full flywheel on one identical seeded cohort — BASELINE (discounts disabled) → grade + cluster → a **structured intervention signal** (`themes.recommend_intervention`) selects the highest-loss segment *for which a lever exists* and surfaces any higher-loss segment it can't address → ACT (enable discounts + lead-with-discount playbook for the selected segment) → RE-MEASURE. The lift is measured on the **treated segment** where the act applies. Representative run: 38%→50% (+12pp this run); overall −6pp (noisy context that mixes untreated customers and can move negative). The treated segment is small (n≈8) and conversations are LLM-driven, so the baseline draw and lift magnitude vary run to run (~+10 to +40pp observed; after-state ~50–75%). Re-seeds between batches so cooldown state doesn't carry over; requires a matched paired cohort, a lever-compatible signal, and a strictly-positive treated-segment lift; writes `dashboard/manifest.json` plus a dated copy in `dashboard/manifests/` (cohort IDs, selected signal id + segment ranking, prompt/policy hashes, model IDs, eval coverage, lift).
 - Definition of done met: `python run_demo.py` runs generate → converse → grade → analyze → act → re-measure → export, and the dashboard shows the lift.
 
 ## Keel Console — interactive web app (post-Phase-5)
@@ -86,8 +86,10 @@ worker exceptions surfaced not hung, per-session busy-guard.
 ## Independent review &amp; remediation
 
 The repo was put through an independent code + design review (Codex), which
-correctly flagged that several claims were stronger than the code supported. All
-findings were remediated:
+correctly flagged that several claims were stronger than the code supported. The
+findings below were addressed in this pass — though two later review passes (see
+*Second* and *Third independent review*) found that some of these fixes were
+shallower than claimed and drove the deeper architectural remediation:
 
 - **Input guardrails** — batch and live now share ONE enforced decision
   (`_screen_input` → `_advance`): a jailbreak is blocked before the model on
@@ -126,8 +128,11 @@ findings were remediated:
 ## Second independent review — bounded fixes &amp; honesty pass
 
 A second review pass (Codex, AMBER verdict on commit 068622a) found real gaps
-where enforcement or claims were still softer than described. Each was fixed and
-re-verified; nothing was waved off:
+where enforcement or claims were still softer than described. These were addressed
+as bounded fixes — but a third pass later showed several were still symptomatic
+(e.g. the output check was strengthened here but remained lexical; the exact-terms
+fix reached the live path but not batch grading), which drove the architectural
+remediation in *Third independent review*:
 
 - **Output check reconciles EXACT authorized terms, not a boolean** — `check_promise`
   now takes the exact authorized `{discount_pct, pause_months}` and flags a reply
@@ -170,6 +175,41 @@ re-verified; nothing was waved off:
 - **Tests** — 54 (up from 47); the new ones cover the exact-terms output check
   (over-ceiling, unauthorized, over-authorized, pause, completion-claim), scope
   fail-closed behavior, and the duplicate-resolve claim.
+
+## Third independent review — architectural remediation
+
+The third review (Codex, AMBER on commit `b975439`) found that the second round
+had closed the easy cases but left three HIGH findings that shared ONE root
+cause: offer/authorization state was scattered across four disagreeing places
+(`offer_made` last-write, an `authorized` max-terms dict, a lossy `tool:action`
+audit string, and the reply prose). The remediation replaces all of it with a
+single typed **offer ledger** as the source of truth, and moves output safety off
+regex onto a **structured response contract** validated against that ledger.
+
+Remediation matrix (status is one of: **fixed** / **partial** / **accepted POC
+boundary**). Every "fixed" links to the mechanism and an offline test.
+
+| # | Finding | Status | Mechanism · test |
+|---|---|---|---|
+| H1 | Batch judge lost exact authorized terms | **fixed** | `evidence_json` envelope; `run_evals.build_judge_input` feeds BOTH batch (`grade_all`) and live (`_grade_and_store`) the SAME persisted offers-ledger + tool-facts · `test_authorized_terms_survive_persistence_and_reload` |
+| H2 | Authorization was mutable metadata, not a state machine | **fixed** | `agent/offers.py` typed ledger (`authorized→presented→accepted`, one active via supersede); outcome/cooldown/economics derive from the **accepted presented** offer; a below-ceiling offer is costed at presented terms · `test_two_offer_calls_leave_one_active`, `test_offer_summary_prefers_presented_then_accepted` |
+| H3 | Output control was lexical, with spelled/future bypasses | **fixed** (primary) | Structured response contract (`display_text`+`commitments`+`account_claims`) validated deterministically against the ledger + per-fact money grounding; regex demoted to a strengthened supplemental cross-check · `test_contract_validation_against_ledger`, `test_contract_grounding_rejects_invented_money`, `test_promise_catches_spelled_and_future_bypasses` |
+| M1 | Terminal simulator reply bypassed redaction | **fixed** | `persist_conversation` redacts EVERY role · `test_persistence_redacts_all_roles` |
+| M2 | Flywheel didn't consume the VoC signal layer | **partial** | Learn builds+persists a structured intervention signal (segment, lever, confidence, evidence, offer-effectiveness); it selects the highest-loss segment *for which a lever exists* and surfaces higher-loss segments it can't address (rather than bailing when a lever-less segment ranks first); Act consumes the signal id; the manifest records it. **Accepted boundary:** the segment ranking aggregates ground-truth `churn_reason`, not the free-text cluster labels |
+| M3 | Safety gate accepted stale/missing health | **fixed** | health rows tagged with `GUARDRAIL_VERSION`; `program_state` gates on version-match + max-age + floor; missing = visible advisory (console usable), stale/mismatch/below-floor = safe mode · 4 safety tests |
+| M4 | Paired fairness compared only binary verdict | **fixed** | `run_golden` retains per-dimension scores; symmetric pairs must match within ±1 per dimension + no fairness flag (scoped to pairs) |
+| M5 | Eval not atomic/versioned with persistence | **partial** | `grade_all` replaces per-conversation (no global zero-coverage window, history not wiped); rows tagged with rubric+model version. **Accepted boundary:** eval creation is not yet in the same DB transaction as the conversation |
+| M6 | Resolve connection created outside try/finally | **fixed** | `conn=None`, connect inside `try`, claim cleared in `finally` under the lock · `test_resolve_connection_failure_clears_claim` |
+| M7 | Dashboard labels overstated coverage | **fixed** | dashboard renders `eval_coverage` from data; the compliance tile is relabeled "AI disclosure coverage (transcript-verified)" |
+| L1 | In-memory batch fell back to global DB | **fixed** | `run_batch` rejects in-memory/unnamed connections · `test_batch_rejects_in_memory_connection` |
+| L2 | Server shared state read/written off-lock | **fixed** | `turn_status` snapshots under the lock; the worker publishes terminal state under the lock |
+
+**"One code path" is now also true for eval evidence:** batch and live grade from
+the *same persisted envelope* (`build_judge_input`), closing the divergence the
+third review noted. They still legitimately differ in customer (simulator vs
+human), termination (simulator decision vs operator resolution), and the
+session-creation safety gate — the accurate phrase remains "one shared enforced
+turn core with separate channel, termination, and safety orchestration."
 
 ## Notes
 

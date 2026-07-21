@@ -107,14 +107,17 @@ python economics.py
   <p class="proves">Proves: <b>Phase 0</b> — reproducible synthetic data (identical SHA across runs) and the unit-economics model reproducing the plan’s headline.</p>
 
   <div class="step"><div class="num">3</div><h2>Run the unit tests <span class="badge free">no API</span></h2></div>
-  <p>54 fast, deterministic tests over the policy layer, guardrails, enforcement, the live-session state machine, and the server — no network, ~1s.</p>
+  <p>69 fast, deterministic tests over the policy layer, guardrails, the response-contract/offer-ledger, enforcement, the live-session state machine, and the server — no network, ~1s.</p>
   <pre>python -m pytest tests/ -q
-<span class="g"># ......................................................  54 passed in ~1s</span></pre>
+<span class="g"># .....................................................................  69 passed in ~1s</span></pre>
   <table>
     <tr><th>File</th><th>Covers</th></tr>
     <tr><td class="s">test_policy.py</td><td>discount cap, save-offer cooldown, pause cap, margin floor, consequential → human, refund → human</td></tr>
     <tr><td class="s">test_guardrails.py</td><td>PII redaction (card / SSN / email / health), jailbreak patterns, promise + grounding checks</td></tr>
     <tr><td class="s">test_disclosure.py</td><td>the AI-disclosure turn and its enforced presence check</td></tr>
+    <tr><td class="s">test_enforcement.py</td><td>shared batch/live input decision, the response-contract validation against the ledger, spelled/future promise bypasses, grounding rejects invented money</td></tr>
+    <tr><td class="s">test_offer_ledger.py</td><td>offer supersession (one active), exact terms survive persistence, the safety gate's version/freshness, batch DB isolation</td></tr>
+    <tr><td class="s">test_live_session.py · test_server.py</td><td>the live-session state machine and FastAPI plumbing — busy/resolve guards, connection-failure cleanup, save-invariant</td></tr>
   </table>
 
   <div class="step"><div class="num">4</div><h2>Phase 1 — the agent <span class="badge api">~cents</span></h2></div>
@@ -140,10 +143,10 @@ over-limit 40% discount → capped 20%       deny_refund → needs_human
   <p>Grades a batch, runs the golden set (judge vs. human), and proves the eval catches a deliberately broken agent.</p>
   <pre>python -m scripts.phase3_accept</pre>
   <pre><span class="c"># abridged</span>
-graded 12/12 · eval pass rate 75% · fairness gap 0.09
-golden judge-vs-human agreement: <span class="g">100% (9/9)</span> · paired-fairness consistent
-broken-agent conversation → derived verdict=<span class="g">fail</span>  (resolution 2)</pre>
-  <p class="proves">Proves: every conversation is auto-scored; the judge is <b>calibrated</b> against human labels; and breaking the agent <b>gets caught</b> by the eval.</p>
+graded 12/12 · eval pass rate 92% · hallucination 0%
+golden judge-vs-human agreement: <span class="g">100% (9/9)</span> · paired-fairness consistent (per-dimension)
+known-bad conversation (invented offer + hallucinated credit) → <span class="g">fail</span>  (policy 1, hallucination 1)</pre>
+  <p class="proves">Proves: every conversation is auto-scored from the persisted eval envelope (exact terms + tool facts); the judge is <b>calibrated</b> against human labels; and a genuinely bad conversation <b>gets caught</b> by the eval.</p>
 
   <div class="step"><div class="num">7</div><h2>Phase 4 — VoC analytics <span class="badge api">~cents</span></h2></div>
   <p>Clusters a 30-conversation batch into churn themes and computes offer effectiveness.</p>
@@ -159,12 +162,12 @@ Offer effectiveness: pause 56% @ $16.6 · discount 100% @ $19.8
   <pre>python run_demo.py
 open dashboard/index.html   <span class="c"># shows the measured lift</span></pre>
   <pre><span class="c"># abridged — a representative run; numbers vary run to run</span>
-③ LEARN — highest-loss churn segments (data-driven, not assumed):
-  Price too high  save 38% · n=8 · loss=5.0   ← selected treated segment
+③ LEARN — structured intervention signal (worst lever-compatible segment):
+  Price too high  save 38% · n=8 · loss=5.0   ← selected · lever=discount
 FLYWHEEL RESULT  (treated price-sensitive segment)
-  price-sensitive save:  38%  →  <span class="g">75%</span>   (+38 pp this run)
-  overall (context):     44%  →  67%   (+22 pp)
-  eval pass 94% (coverage 100%) · guardrail catch 100% · compliance 100% · paired cohort: True</pre>
+  price-sensitive save:  38%  →  <span class="g">50%</span>   (+12 pp this run)
+  overall (context):     39%  →  33%   (−6 pp, noisy)
+  eval pass 89% (coverage 100%) · guardrail catch 100% · compliance 100% · paired cohort: True</pre>
   <p class="proves">Proves the definition of done: on <b>identical seeded customers</b>, acting on the analytics signal (enable discounts for the price-sensitive segment) produced a measured lift <b>on the treated segment</b> — the flywheel visibly turning. The run requires a matched paired cohort and a strictly-positive treated-segment lift, and writes provenance to <code>dashboard/manifest.json</code>.</p>
 
   <h2>What each command proves, at a glance</h2>
@@ -172,7 +175,7 @@ FLYWHEEL RESULT  (treated price-sensitive segment)
     <tr><th>Command</th><th>Phase</th><th>API</th><th>Proves</th></tr>
     <tr><td class="s">python synth.py</td><td>0</td><td>no</td><td>reproducible synthetic data</td></tr>
     <tr><td class="s">python economics.py</td><td>0</td><td>no</td><td>the cost-to-serve model</td></tr>
-    <tr><td class="s">pytest tests/</td><td>1–2</td><td>no</td><td>policy, guardrails, enforcement, live session, server (54 tests)</td></tr>
+    <tr><td class="s">pytest tests/</td><td>1–2</td><td>no</td><td>policy, guardrails, response-contract/ledger, enforcement, live session, server (69 tests)</td></tr>
     <tr><td class="s">-m scripts.phase1_accept</td><td>1</td><td>yes</td><td>save / let-churn behavior end-to-end</td></tr>
     <tr><td class="s">-m scripts.phase2_accept</td><td>2</td><td>yes</td><td>100% guardrail catch rate + compliance paths</td></tr>
     <tr><td class="s">-m scripts.phase3_accept</td><td>3</td><td>yes</td><td>grade 100% + judge calibration + broken agent caught</td></tr>

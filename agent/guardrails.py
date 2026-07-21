@@ -124,25 +124,45 @@ _SPELLED_PCT = re.compile(
     re.IGNORECASE)
 _SPELLED_MAP = {"ten": 10, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
                 "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100, "one hundred": 100}
-_DISCOUNT_CTX = re.compile(r"\b\d{1,3}\s*%\s*(?:off|discount)|discount of\b", re.IGNORECASE)
-_PAUSE_RX = re.compile(r"(\d+)[\s-]*month[\s-]*pause|pause (?:for |of )?(\d+)[\s-]*month", re.IGNORECASE)
-# The action tools only PROPOSE an offer — they do not mutate a backend. So a
-# reply claiming an action is already *applied* is an unsupported completion claim.
+# NOTE: since the response contract is now the PRIMARY output control (the model
+# declares its commitments structurally and we reconcile them against the offer
+# ledger), these regexes are a SUPPLEMENTAL cross-check on display_text — catching
+# prose that overstates the declared commitment. They cover spelled-out numbers and
+# future/alternate completion phrasings, but are not expected to be exhaustive.
+_SPELLED_NUM = "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+_DISCOUNT_CTX = re.compile(
+    r"\b\d{1,3}\s*%\s*(?:off|discount)|discount of\b|"
+    rf"\b(?:{'|'.join(_SPELLED_MAP)})\b[\s-]*percent|"
+    rf"\b({_SPELLED_NUM})\b[\s-]*percent", re.IGNORECASE)
+_PAUSE_RX = re.compile(
+    rf"(\d+|{_SPELLED_NUM})[\s-]*month[\s-]*pause|"
+    rf"pause (?:your (?:plan|subscription) )?(?:for |of )?(?:a |an )?(\d+|{_SPELLED_NUM})[\s-]*month",
+    re.IGNORECASE)
+# The action tools only PROPOSE an offer — they do not mutate a backend. So a reply
+# claiming an action is already applied, OR that it "will" be applied / "is active",
+# is an unsupported completion claim (the agent extends offers, it doesn't fulfil them).
 _COMPLETION_RX = re.compile(
-    r"\b(i(?:'ve| have) (?:applied|activated|set up|processed|cancell?ed|paused|stopped)|"
-    r"has been (?:applied|activated|cancell?ed|processed|paused)|"
-    r"cancellation (?:is|has been) (?:processed|complete|started|done))\b", re.IGNORECASE)
+    r"\b(i(?:'ve| have| will| am going to|'ll) (?:apply|applied|activat\w+|set up|process\w*|"
+    r"cancell?\w*|paus\w+|stop\w*)|"
+    r"(?:has|have|is|are) (?:been )?(?:applied|activated|active|cancell?ed|processed|paused|set up)|"
+    r"your (?:discount|pause|plan|cancellation) (?:is|has been|will be) (?:now )?"
+    r"(?:applied|active|processed|complete|started|done|set up)|"
+    r"cancellation (?:is|has been|will be) (?:processed|complete|started|done))\b", re.IGNORECASE)
+_MONTHS_WORD = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+                "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
 _MONEY_RX = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?")
 
 
 def check_tone(reply: str) -> dict:
-    """Moderation pass (free). Flags harmful/abusive content in the reply."""
+    """Moderation pass (free). Flags harmful/abusive content in the reply. If the
+    moderation service is unavailable, returns an EXPLICIT `degraded` result (not a
+    silent fail-open) so the finalizer can bound or route it."""
     try:
         r = llm.client().moderations.create(model="omni-moderation-latest", input=reply)
         flagged = bool(r.results[0].flagged)
-        return {"flagged": flagged, "reason": "moderation flagged" if flagged else ""}
+        return {"flagged": flagged, "degraded": False, "reason": "moderation flagged" if flagged else ""}
     except Exception:
-        return {"flagged": False, "reason": "moderation unavailable"}
+        return {"flagged": False, "degraded": True, "reason": "moderation unavailable"}
 
 
 def check_promise(reply: str, *, authorized: dict | None = None) -> dict:
@@ -173,7 +193,8 @@ def check_promise(reply: str, *, authorized: dict | None = None) -> dict:
     # --- pause terms vs. authorization ---
     pm = _PAUSE_RX.search(reply)
     if pm:
-        months = int(next(g for g in pm.groups() if g))
+        raw = next(g for g in pm.groups() if g)
+        months = int(raw) if str(raw).isdigit() else _MONTHS_WORD.get(str(raw).lower(), 1)
         pause_auth = authorized.get("pause_months")
         if pause_auth is None:
             return {"flagged": True, "reason": "promises a pause that was not authorized by a tool call"}

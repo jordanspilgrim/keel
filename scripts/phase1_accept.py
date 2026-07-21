@@ -39,8 +39,9 @@ def _print_convo(tag, res):
         who = {"assistant": "AGENT", "user": "CUSTOMER"}.get(t["role"], t["role"].upper())
         print(f"  {who}: {t['content']}")
     print("  disposition:", json.dumps(res["disposition"]))
-    if res["policy_decisions"]:
-        print("  policy decisions:", [f"{d['tool']}:{d['action']}" for d in res["policy_decisions"]])
+    pol = res["evidence"]["policy_decisions"]
+    if pol:
+        print("  policy decisions:", [f"{d['tool']}:{d['action']}" for d in pol])
 
 
 def main() -> int:
@@ -61,15 +62,16 @@ def main() -> int:
         if not disclosure.has_disclosure(res["transcript"]):
             failures.append(f"{tag}: AI disclosure missing")
         # no offer exceeds limits: every authorized offer decision is ok/capped within ceilings
-        for d in res["policy_decisions"]:
-            if d["tool"] == "offer_discount" and d["allowed"] and d["args"]["pct"] > config.MAX_DISCOUNT_PCT:
+        for d in res["evidence"]["policy_decisions"]:
+            authorized = d["action"] in ("ok", "capped")
+            if d["tool"] == "offer_discount" and authorized and d["args"]["pct"] > config.MAX_DISCOUNT_PCT:
                 failures.append(f"{tag}: discount {d['args']['pct']} exceeds {config.MAX_DISCOUNT_PCT}%")
-            if d["tool"] == "offer_pause" and d["allowed"] and d["args"]["months"] > config.MAX_PAUSE_MONTHS:
+            if d["tool"] == "offer_pause" and authorized and d["args"]["months"] > config.MAX_PAUSE_MONTHS:
                 failures.append(f"{tag}: pause {d['args']['months']} exceeds {config.MAX_PAUSE_MONTHS}mo")
 
     # ineligible: no save offer authorized, not saved
-    inelig_save = [d for d in res_i["policy_decisions"]
-                   if d["tool"] in ("offer_discount", "offer_pause") and d["allowed"]]
+    inelig_save = [d for d in res_i["evidence"]["policy_decisions"]
+                   if d["tool"] in ("offer_discount", "offer_pause") and d["action"] in ("ok", "capped")]
     if inelig_save:
         failures.append(f"ineligible: a save offer was authorized during cooldown: {inelig_save}")
     if res_i["outcome"] == "saved":

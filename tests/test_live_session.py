@@ -8,13 +8,14 @@ machine, the input-guardrail short-circuits, and persistence deterministically.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 import config
 import db
 import synth
-from agent import guardrails, runtime
+from agent import guardrails, offers, runtime
 
 
 @pytest.fixture
@@ -39,12 +40,22 @@ def _no_api(monkeypatch):
     monkeypatch.setattr(runtime, "_grade_and_store", _stub_grade)
 
 
+def _present(rec, offer: str) -> None:
+    """Put a PRESENTED offer in the ledger, mirroring what a real agent turn does
+    (authorize → present with exact terms) — offer like '1-month pause' / '20% discount'."""
+    n = int(re.findall(r"\d+", offer)[0])
+    kind = "pause" if "pause" in offer else "discount"
+    terms = {"months": n} if kind == "pause" else {"pct": float(n)}
+    o = offers.authorize(rec["offers"], kind, terms)
+    o.state, o.presented_terms = "presented", terms
+
+
 def _fake_agent(reply="Here's a pause offer for you.", offer=None, escalate=False, calls=None):
     def _f(input_list, cid, sub, conn, rec, system=runtime.SYSTEM, on_step=None):
         if calls is not None:
             calls.append(True)
         if offer:
-            rec["offer_made"] = offer
+            _present(rec, offer)
         if escalate:
             rec["escalated"] = True
         input_list.append({"role": "assistant", "content": reply})
@@ -56,7 +67,7 @@ def test_new_session_starts_with_disclosure(conn):
     s = runtime.new_session(1, conn)
     assert s["transcript"][0]["role"] == "assistant"
     assert s["transcript"][0]["content"].startswith(config.AI_DISCLOSURE[:30])
-    assert s["rec"]["offer_made"] is None and s["outcome"] is None
+    assert s["rec"]["offers"] == [] and s["outcome"] is None
 
 
 def test_happy_turn_appends_and_returns_reply(conn, monkeypatch):
@@ -109,7 +120,7 @@ def test_resolve_persists_and_is_readable(conn, monkeypatch):
     monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(offer="1-month pause"))
     monkeypatch.setattr(runtime, "_disposition",
                         lambda transcript, scenario, rec, outcome, accepted: {
-                            "intent": "cancel", "churn_reason": "price", "offer_made": rec["offer_made"],
+                            "intent": "cancel", "churn_reason": "price", "offer_made": runtime._offer_made(rec),
                             "offer_accepted": accepted, "outcome": outcome, "confidence": 0.8})
     s = runtime.new_session(1, conn)
     runtime.live_turn(s, "Too expensive.", conn)

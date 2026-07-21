@@ -8,6 +8,8 @@ autonomously. Surfaced in /api/metrics so the dashboard shows the active state.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import config
 import db
 
@@ -15,10 +17,29 @@ _MIN_SAMPLE = 10          # don't judge health until there's a sample
 _COVERAGE_FLOOR = 0.90    # evals must cover ≥ this share of conversations
 
 
+def _health_age_days(created_at: str) -> float | None:
+    try:
+        ts = datetime.fromisoformat(created_at)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds() / 86400.0
+    except (ValueError, TypeError):
+        return None
+
+
 def program_state(conn) -> dict:
-    """Return {mode, healthy, reasons, metrics}. healthy=False → safe mode."""
+    """Return {mode, healthy, reasons, advisories, metrics}. healthy=False → safe mode.
+
+    The red-team guardrail catch rate is an OFFLINE metric (an LLM scope call per
+    probe), so we read the value the last sweep persisted rather than recompute it.
+    A result only GATES if it was produced by the current guardrail version and is
+    recent: a stale or version-mismatched result must not keep authorizing normal
+    mode after guardrails changed, and a below-floor result forces safe mode. A
+    result that has never been recorded is surfaced as a non-gating advisory (the
+    console is usable out of the box; the 'not validated' state is visible)."""
     total = conn.execute("SELECT count(*) FROM conversations").fetchone()[0]
     reasons: list[str] = []
+    advisories: list[str] = []
     metrics: dict = {"conversations": total}
     if total >= _MIN_SAMPLE:
         passes = conn.execute("SELECT count(*) FROM evals WHERE verdict='pass'").fetchone()[0]
@@ -30,15 +51,25 @@ def program_state(conn) -> dict:
             reasons.append(f"eval pass rate {pass_rate:.0%} below floor {config.EVAL_PASS_RATE_FLOOR:.0%}")
         if coverage < _COVERAGE_FLOOR:
             reasons.append(f"eval coverage {coverage:.0%} below {_COVERAGE_FLOOR:.0%}")
-    # Red-team guardrail catch rate is an OFFLINE metric (an LLM scope call per
-    # probe), so we read the value the last red-team sweep persisted rather than
-    # recompute it on every poll. Absent = never run → not gated (surfaced as such).
-    catch_rate = db.latest_health(conn, "guardrail_catch_rate")
-    if catch_rate is not None:
+
+    row = db.latest_health_row(conn, "guardrail_catch_rate")
+    if row is None:
+        metrics["guardrail_catch_rate"] = None
+        advisories.append("guardrail red-team never run — catch rate not validated")
+    else:
+        catch_rate = float(row["value"])
+        age = _health_age_days(row["created_at"])
         metrics["guardrail_catch_rate"] = round(catch_rate, 3)
-        if catch_rate < config.GUARDRAIL_CATCH_RATE_FLOOR:
+        metrics["guardrail_health_version"] = row["version"]
+        metrics["guardrail_health_age_days"] = round(age, 2) if age is not None else None
+        if row["version"] != config.GUARDRAIL_VERSION:
+            reasons.append(f"guardrail health from version {row['version']} != current "
+                           f"{config.GUARDRAIL_VERSION} (re-run the red-team)")
+        elif age is not None and age > config.GUARDRAIL_HEALTH_MAX_AGE_DAYS:
+            reasons.append(f"guardrail health is {age:.0f}d old (> {config.GUARDRAIL_HEALTH_MAX_AGE_DAYS}d)")
+        elif catch_rate < config.GUARDRAIL_CATCH_RATE_FLOOR:
             reasons.append(
                 f"guardrail catch rate {catch_rate:.0%} below floor {config.GUARDRAIL_CATCH_RATE_FLOOR:.0%}")
     healthy = not reasons
     return {"mode": "normal" if healthy else "safe", "healthy": healthy,
-            "reasons": reasons, "metrics": metrics}
+            "reasons": reasons, "advisories": advisories, "metrics": metrics}

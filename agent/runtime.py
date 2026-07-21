@@ -19,13 +19,14 @@ decision are persisted (conversations + audit_log).
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 
 import config
 import db
 import llm
 import sim
-from agent import disclosure, guardrails, policy, safety, tools
+from agent import disclosure, guardrails, offers, policy, safety, tools
 
 MAX_TURNS = 4          # agent<->customer exchanges before we call it lost
 MAX_HOPS = 5           # tool-resolution hops within a single agent turn
@@ -62,6 +63,7 @@ Operating principles:
 - Bias to the next best action: understand why they're leaving, then make ONE concrete, policy-compliant retention offer that fits their reason.
 - Calibrated autonomy: you may offer a discount or a pause yourself. Consequential/irreversible actions (downgrades, contract changes) require human approval — the tools will tell you.
 - Fail safe and be honest: NEVER promise anything a tool did not authorize. If no offer is authorized (e.g. the customer is within a save-offer cooldown), do not invent one.
+- Hold firm at the ceiling: the policy layer authorizes a MAXIMUM (e.g. up to 20% off, up to a 3-month pause). Present at most that. If the customer pushes for more, warmly hold firm — offer the maximum you're authorized for and let them decide; do NOT exceed it, and do NOT hand off to a human just because they want a bigger discount. Wanting more is not grounds for escalation.
 - Offer, don't confirm: you PROPOSE terms — you do not operate the billing backend. Say "I can apply 20% off" or "I'd set up a 3-month pause", never "I've applied the discount" or "your pause is set up". Present the authorized offer as something you're extending, not something already done.
 - When you have no authorized save offer and the customer simply wants to cancel, acknowledge warmly and let them go — process the cancellation gracefully. Do NOT reflexively escalate; only call escalate_to_human if the customer explicitly asks for a person or requests something consequential (a refund, a contract change) that you cannot handle.
 - If the customer asks for something you have no tool for (e.g. upgrading to a higher plan) alongside the cancellation, DON'T hand off abruptly or abandon the chat. Acknowledge that specific request, tell them a teammate can set it up, and — if a retention offer is still on the table — keep helping with that in the same breath. Escalate only when the conversation genuinely cannot continue without a person.
@@ -82,13 +84,38 @@ def _now() -> str:
 
 
 def _new_rec() -> dict:
-    """Fresh per-conversation state. `authorized` holds the EXACT terms the policy
-    layer approved, so the output guardrail can reconcile the customer-visible
-    commitment against them (not just 'some discount was allowed')."""
-    return {"offer_made": None, "escalated": False, "policy_decisions": [],
-            "tool_results": [], "guardrail": [],
-            "authorized": {"discount_pct": None, "pause_months": None},
+    """Fresh per-conversation state. The `offers` ledger is the single source of
+    truth for what was authorized, presented, and accepted (see agent/offers.py);
+    everything downstream — outcome, cooldown, economics, the eval envelope —
+    derives from it rather than from a scattered last-write string. `tool_facts`
+    holds read-tool results (with call ids) so grounding can be checked per claim,
+    and `policy_decisions` keeps the ADJUSTED args so the persisted eval envelope
+    is lossless."""
+    return {"offers": [], "escalated": False, "policy_decisions": [],
+            "tool_facts": [], "guardrail": [],
             "audit": [("system", "ai_disclosure_shown", "EU AI Act Art. 50")]}
+
+
+def _tool_result_strings(rec: dict) -> list[str]:
+    """Read-tool results as JSON strings — the corpus the grounding check scans."""
+    return [json.dumps(f["result"]) for f in rec["tool_facts"]]
+
+
+def _offer_made(rec: dict) -> str | None:
+    """The canonical single-offer string, derived from the ledger (accepted first,
+    else presented). Replaces the old last-write `offer_made`."""
+    return offers.offer_summary(rec["offers"])
+
+
+def _evidence(rec: dict) -> dict:
+    """The canonical eval envelope — the LOSSLESS execution record persisted with a
+    conversation so the batch judge and the live judge grade from IDENTICAL
+    evidence: the full offer ledger (exact authorized + presented terms), the
+    read-tool facts (for grounding), and the policy decisions WITH their adjusted
+    args. Replaces the old lossy `tool:action` audit-string reconstruction."""
+    return {"offers": [o.to_dict() for o in rec["offers"]],
+            "tool_facts": rec["tool_facts"],
+            "policy_decisions": rec["policy_decisions"]}
 
 
 _JAILBREAK_REPLY = ("I can't do that. I'm the retention assistant, so I can only help with your "
@@ -139,18 +166,23 @@ def _compact(result) -> str:
     return str(result)[:60]
 
 
-def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, on_step=None) -> dict:
-    """Execute a read tool or dispose an action tool via policy. Records the
-    authorized offer / escalation and writes audit_log rows."""
+def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, *,
+                  call_id: str | None = None, on_step=None) -> dict:
+    """Execute a read tool or dispose an action tool via policy. A read tool's
+    result is recorded as a grounded fact (with its call id); an authorized offer
+    becomes a ledger entry. Writes audit_log rows."""
     if name in tools.READ_TOOLS:
         result = tools.read(conn, name, cid)
-        rec["tool_results"].append(json.dumps(result))
+        rec["tool_facts"].append({"tool": name, "call_id": call_id, "result": result})
         _emit(on_step, "tool", f"{name} → {_compact(result)}")
         return result
 
     verdict = policy.authorize(name, args, sub)
     rec["audit"].append(("policy", f"{name}:{verdict['action']}", verdict["reason"]))
-    rec["policy_decisions"].append({"tool": name, **verdict})
+    # Keep the ADJUSTED args on the persisted decision so the eval envelope is
+    # lossless (the batch judge must see 10% vs 20%, not just tool:action).
+    rec["policy_decisions"].append({"tool": name, "action": verdict["action"],
+                                    "args": verdict.get("args"), "reason": verdict["reason"]})
     _emit(on_step, "policy", f"{name} → {verdict['action']}: {verdict['reason']}")
 
     if name == "escalate_to_human" and verdict["allowed"]:
@@ -160,15 +192,18 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, o
 
     if verdict["action"] in ("ok", "capped"):
         aargs = verdict["args"]
-        if name == "offer_pause":
-            rec["offer_made"] = f"{aargs['months']}-month pause"
-            rec["authorized"]["pause_months"] = int(aargs["months"])
-        elif name == "offer_discount":
-            rec["offer_made"] = f"{aargs['pct']:.0f}% discount"
-            rec["authorized"]["discount_pct"] = float(aargs["pct"])
+        kind = "pause" if name == "offer_pause" else "discount"
+        # Authorize into the ledger — supersedes any prior live offer, so exactly
+        # one offer is ever active (the "one concrete offer" rule, enforced).
+        off = offers.authorize(rec["offers"], kind, aargs)
         if verdict["action"] == "capped":  # action guardrail trip: proposed past a limit
             rec["guardrail"].append(("over_limit", "capped", verdict["reason"]))
-        return {"status": "approved", "offer": rec["offer_made"], "note": verdict["reason"]}
+        # The tool tells the model the CEILING it may present, and that it must
+        # not claim the action is already done — the offer is authorized, not applied.
+        return {"status": "authorized", "offer_kind": kind,
+                "authorized_terms": offers.human_terms(off, aargs),
+                "note": verdict["reason"] + " You may present up to these terms; do not exceed them, "
+                        "and offer them (do not claim they are already applied)."}
 
     if verdict["action"] == "needs_human":  # consequential → human-in-the-loop (GDPR Art. 22)
         rec["guardrail"].append(("human_review", "routed", f"{name}: {verdict['reason']}"))
@@ -211,42 +246,230 @@ def _handoff_message(input_list: list, system: str) -> str:
 _OUTPUT_SAFE_REPLY = ("I want to make sure I give you accurate, approved information — "
                       "let me bring in a teammate to help with this.")
 
+# The agent's final customer-facing turn is emitted as a STRUCTURED CONTRACT, not
+# free prose we police with regex after the fact. The model must declare exactly
+# what it is committing to; we then validate those declarations DETERMINISTICALLY
+# against the offer ledger and the grounded tool facts before any text is sent.
+_CONTRACT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "display_text": {"type": "string", "description": "The reply the customer will see."},
+        "commitments": {
+            "type": "array",
+            "description": "Every retention offer this reply makes. Empty if none.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["discount", "pause"]},
+                    "pct": {"type": ["number", "null"], "description": "Discount percent, else null."},
+                    "months": {"type": ["integer", "null"], "description": "Pause months, else null."},
+                },
+                "required": ["kind", "pct", "months"],
+                "additionalProperties": False,
+            },
+        },
+        "account_claims": {
+            "type": "array",
+            "description": "Specific account facts (numbers, prices, dates) stated in display_text.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string"},
+                    "source_tool": {"type": "string", "description": "Which tool returned this fact."},
+                },
+                "required": ["value", "source_tool"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["display_text", "commitments", "account_claims"],
+    "additionalProperties": False,
+}
 
-def _finalize_output(text: str, rec: dict, input_list: list, system: str, on_step) -> str:
-    """Enforce the output guardrails. If a check fires, regenerate once against a
-    corrective instruction; if it still fails, FAIL CLOSED — substitute a safe
-    reply and escalate. Nothing that trips promise/grounding/tone is delivered."""
-    authorized = rec["authorized"]
-    out = guardrails.screen_output(text, rec["tool_results"], authorized=authorized)
-    flags = [k for k in ("promise", "grounding", "tone") if out[k]["flagged"]]
-    if not flags:
-        _emit(on_step, "output", "Output guardrails passed")
-        return text
-    # one corrective regeneration
-    fixed = None
+_CONTRACT_INSTRUCTIONS = (
+    "\n\nProduce your customer-facing reply as a structured contract:\n"
+    "- display_text: what the customer reads (2-4 sentences, warm, human).\n"
+    "- commitments: EVERY retention offer the reply makes, with exact terms. Make AT MOST ONE offer. "
+    "Its terms must NOT exceed what the policy layer authorized in the tool results — if a tool authorized "
+    "'up to 20% off', you may commit at most 20, never 40, even if the customer demands more. Leave empty "
+    "if you are making no offer (e.g. a graceful cancellation). Never present an offer that was not authorized.\n"
+    "- account_claims: any specific account number/price/date you state, each tagged with the tool that "
+    "returned it. Do not state account facts no tool returned.\n"
+    "Offer, do not confirm: you PROPOSE terms; you do not operate billing. Never say an offer is already "
+    "applied/active/set up. Do not call tools."
+)
+
+
+def _generate_contract(input_list: list, system: str, *, corrective: str = "") -> dict:
+    """Ask the model for the structured response contract over the full turn
+    context. Raises on failure (handled by the caller as fail-closed)."""
+    return llm.structured(
+        config.FLAGSHIP_MODEL, system + _CONTRACT_INSTRUCTIONS + (
+            f"\n\nYour previous draft was REJECTED: {corrective}. Fix it — present at most the authorized "
+            f"maximum (never exceed a ceiling), state only tool-provided account facts, and do not claim "
+            f"an offer is already applied. If the customer wanted more than you can give, hold firm at the "
+            f"maximum rather than exceeding it." if corrective else ""),
+        input_list, _CONTRACT_SCHEMA, "response_contract",
+        reasoning_effort="low", max_output_tokens=900)
+
+
+def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
+    """Deterministically validate the contract against the offer ledger and tool
+    facts. Returns (ok, reason). This is the PRIMARY output control; the regex
+    checks in guardrails are demoted to a supplemental cross-check on display_text."""
+    text = contract.get("display_text") or ""
+    commitments = [c for c in contract.get("commitments", []) if c.get("kind")]
+
+    # 1) At most one offer, and it must be backed by the active authorized ledger
+    #    entry with terms within the ceiling.
+    if len(commitments) > 1:
+        return False, "more than one offer presented; make at most one concrete offer"
+    committed_terms = None
+    if commitments:
+        c = commitments[0]
+        kind = c["kind"]
+        terms = {"pct": c["pct"]} if kind == "discount" else {"months": c["months"]}
+        if (kind == "discount" and c.get("pct") is None) or (kind == "pause" and c.get("months") is None):
+            return False, "offer commitment is missing its terms"
+        # reconcile against any still-live authorized offer OF THE SAME KIND (the
+        # agent may have authorized both a discount and a pause during the chat)
+        match = offers.offer_of_kind(rec["offers"], kind)
+        if match is None:
+            return False, f"commitment offers a {kind} that policy did not authorize"
+        if not offers.terms_within(terms, match.authorized_terms, kind):
+            return False, (f"commitment {terms} exceeds the authorized ceiling "
+                           f"{match.authorized_terms}")
+        committed_terms = terms
+
+    # 2) Supplemental regex cross-check: display_text must not OVERSTATE the
+    #    structured commitment (novel phrasings, spelled numbers, completion claims).
+    #    We reconcile the prose against the COMMITTED terms, not the ceiling.
+    authorized = {"discount_pct": None, "pause_months": None}
+    if committed_terms and commitments[0]["kind"] == "discount":
+        authorized["discount_pct"] = float(committed_terms["pct"])
+    if committed_terms and commitments[0]["kind"] == "pause":
+        authorized["pause_months"] = int(committed_terms["months"])
+    promise = guardrails.check_promise(text, authorized=authorized)
+    if promise["flagged"]:
+        return False, f"display_text overstates the offer: {promise['reason']}"
+
+    # 3) Grounding: every dollar figure in display_text must be traceable to a tool
+    #    fact — either quoted directly or derived from a tool-provided price by the
+    #    committed discount. This closes the "invent a $2,300 credit after a tool
+    #    returned an unrelated seat count" bypass (the amount is in no tool fact).
+    ok, reason = _money_grounded(text, rec, committed_terms)
+    if not ok:
+        return False, reason
+    return True, ""
+
+
+_MONEY_IN_TEXT = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)")
+
+
+def _money_grounded(text: str, rec: dict, committed: dict | None) -> tuple[bool, str]:
+    """Every $ amount stated must appear in a tool fact, or be the tool-provided
+    price discounted by the committed offer. Otherwise it is an invented figure."""
+    amounts = _MONEY_IN_TEXT.findall(text)
+    if not amounts:
+        return True, ""
+    corpus = " ".join(json.dumps(f["result"]) for f in rec["tool_facts"])
+    corpus_digits = corpus.replace(",", "")
+    prices = [float(p) for p in re.findall(r'"price":\s*([\d.]+)', corpus)]
+    allowed: set[str] = set()
+    for p in prices:
+        allowed |= {f"{p:.2f}", f"{p:.0f}"}
+        if committed and committed.get("pct") is not None:
+            d = p * (1 - float(committed["pct"]) / 100)
+            allowed |= {f"{d:.2f}", f"{d:.0f}"}
+    for a in amounts:
+        norm = a.replace(",", "")
+        whole = norm.split(".")[0]
+        if whole and whole in corpus_digits:
+            continue
+        if norm in allowed or f"{float(norm):.0f}" in allowed:
+            continue
+        return False, f"cites ${a}, which no tool fact supports (invented account figure)"
+    return True, ""
+
+
+def _apply_contract(contract: dict, rec: dict) -> None:
+    """Record what was actually PRESENTED: mark the matching authorized offer
+    presented with the exact committed terms (so outcome/economics use presented,
+    not authorized, terms), superseding any other presented offer."""
+    commitments = [c for c in contract.get("commitments", []) if c.get("kind")]
+    if not commitments:
+        return
+    c = commitments[0]
+    terms = {"pct": float(c["pct"])} if c["kind"] == "discount" else {"months": int(c["months"])}
+    match = offers.offer_of_kind(rec["offers"], c["kind"])
+    if match is not None:
+        offers.present(rec["offers"], match, terms)
+
+
+def _screen_contract(input_list: list, system: str, rec: dict, corrective: str) -> tuple[bool, str, dict | None]:
+    """Generate one contract and validate it (ledger + grounding + tone). Returns
+    (ok, failure_reason, contract). An unavailable moderation service is an
+    explicit degraded result that is bounded, not a silent fail-open."""
     try:
-        resp = llm.client().responses.create(
-            model=config.FLAGSHIP_MODEL,
-            instructions=system + ("\n\nYour previous reply was blocked by a safety check ("
-                + ", ".join(flags) + "). Rewrite it: promise ONLY what a tool authorized, state no "
-                "account facts a tool did not return, keep a professional tone. Do not call tools."),
-            input=input_list, reasoning={"effort": "low"}, max_output_tokens=600)
-        cand = (resp.output_text or "").strip()
-        if cand:
-            out2 = guardrails.screen_output(cand, rec["tool_results"], authorized=authorized)
-            if not any(out2[k]["flagged"] for k in ("promise", "grounding", "tone")):
-                fixed = cand
-    except Exception:
-        fixed = None
-    if fixed:
-        for k in flags:
-            rec["guardrail"].append((k, "regenerated", out[k]["reason"]))
-        _emit(on_step, "output", f"Output guardrail caught {', '.join(flags)} — safely regenerated")
-        return fixed
-    for k in flags:
-        rec["guardrail"].append((k, "blocked", out[k]["reason"]))
+        contract = _generate_contract(input_list, system, corrective=corrective)
+    except Exception as e:
+        return False, f"contract generation failed: {type(e).__name__}", None
+    ok, reason = _validate_contract(contract, rec)
+    tone = guardrails.check_tone(contract.get("display_text", ""))
+    if tone.get("degraded"):
+        rec["guardrail"].append(("tone", "degraded", "moderation unavailable — bounded"))
+    if not ok:
+        return False, reason, contract
+    if tone["flagged"]:
+        return False, "tone flagged by moderation", contract
+    return True, "", contract
+
+
+_CEILING_TEMPLATE = ("I hear you, and I want to be straight with you: the most I'm able to offer is "
+                     "{label}. If that works for you, I'm glad to set it up — and if not, I completely "
+                     "understand. Would you like to go ahead with it?")
+
+
+def _ceiling_fallback(rec: dict) -> str | None:
+    """Deterministic safe fallback when the model keeps trying to OVER-promise: if
+    there is an authorized offer, present it at exactly the authorized ceiling (what
+    policy actually allows) rather than escalating. Only an output failure with NO
+    offer to fall back to (e.g. a hallucinated fact) should reach a human hand-off."""
+    off = offers.active(rec["offers"])
+    if off is None:
+        return None
+    offers.present(rec["offers"], off, off.authorized_terms)
+    return _CEILING_TEMPLATE.format(label=offers.human_terms(off, off.authorized_terms))
+
+
+def _finalize_output(rec: dict, input_list: list, system: str, on_step) -> str:
+    """Generate the final reply as a structured contract, validate it against the
+    ledger + tool facts, and only then return display_text. On failure, regenerate
+    ONCE against the specific reason. If it still fails: present the authorized
+    ceiling offer deterministically when one exists (hold firm, don't lose the
+    customer to a hand-off over a pricing demand); otherwise FAIL CLOSED (safe reply
+    + escalate). Nothing that fails validation is ever delivered verbatim."""
+    ok, reason, contract = _screen_contract(input_list, system, rec, "")
+    if ok:
+        _apply_contract(contract, rec)
+        _emit(on_step, "output", "Response contract validated against the offer ledger")
+        return contract["display_text"]
+    rec["guardrail"].append(("output", "regenerating", reason))
+    _emit(on_step, "output", f"Output contract rejected ({reason}) — regenerating once")
+    ok2, reason2, contract2 = _screen_contract(input_list, system, rec, reason)
+    if ok2:
+        _apply_contract(contract2, rec)
+        _emit(on_step, "output", "Response contract validated after one regeneration")
+        return contract2["display_text"]
+    # Still invalid — prefer holding firm at the authorized ceiling over a hand-off.
+    fallback = _ceiling_fallback(rec)
+    if fallback is not None:
+        rec["guardrail"].append(("output", "capped_to_ceiling", reason2))
+        _emit(on_step, "output", "Held firm at the authorized ceiling (no over-promise delivered)")
+        return fallback
+    rec["guardrail"].append(("output", "blocked", reason2))
     rec["escalated"] = True
-    _emit(on_step, "output", f"Output guardrail blocked {', '.join(flags)} — escalating")
+    _emit(on_step, "output", "Output contract could not be validated — escalating")
     return _OUTPUT_SAFE_REPLY
 
 
@@ -265,15 +488,17 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
         )
         calls = [it for it in resp.output if getattr(it, "type", None) == "function_call"]
         if not calls:
-            text = resp.output_text or "Thanks — is there anything else I can help with?"
-            text = _finalize_output(text, rec, input_list, system, on_step)
+            # The model is ready to respond — generate the customer-facing reply as
+            # a validated structured contract (not the free text, which we discard).
+            text = _finalize_output(rec, input_list, system, on_step)
             input_list.append({"role": "assistant", "content": text})
             return text
         for call in calls:
             input_list.append({"type": "function_call", "call_id": call.call_id,
                                "name": call.name, "arguments": call.arguments})
             args = json.loads(call.arguments or "{}")
-            result = _resolve_call(call.name, args, cid, sub, conn, rec, on_step=on_step)
+            result = _resolve_call(call.name, args, cid, sub, conn, rec,
+                                   call_id=call.call_id, on_step=on_step)
             input_list.append({"type": "function_call_output", "call_id": call.call_id,
                                "output": json.dumps(result)})
         # An escalation resolves the turn — don't keep spinning tool hops.
@@ -340,7 +565,7 @@ def _disposition(transcript: list, scenario: dict, rec: dict, outcome: str, offe
     return {
         "intent": read["intent"],
         "churn_reason": read["churn_reason"],
-        "offer_made": rec["offer_made"],
+        "offer_made": _offer_made(rec),
         "offer_accepted": offer_accepted,
         "outcome": outcome,
         "confidence": confidence,
@@ -377,9 +602,11 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
             if cust.get("reply"):
                 transcript.append({"role": "user", "content": cust["reply"]})
             if cust["decision"] == "accept":
-                # A save requires an accepted *retention offer*. "Yes, cancel me"
-                # with no offer on the table is the customer accepting cancellation.
-                outcome, offer_accepted = ("saved", True) if rec["offer_made"] else ("lost", False)
+                # A save requires an accepted *presented* offer. "Yes, cancel me"
+                # with nothing on the table is the customer accepting cancellation.
+                # Acceptance is bound to the specific presented offer in the ledger.
+                accepted = offers.mark_accepted(rec["offers"])
+                outcome, offer_accepted = ("saved", True) if accepted else ("lost", False)
             else:
                 outcome = "lost"
             break
@@ -389,28 +616,29 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
 
     disp = _disposition(transcript, scenario, rec, outcome, offer_accepted)
     return {"customer_id": cid, "scenario_id": scenario["id"], "transcript": transcript,
-            "disposition": disp, "outcome": outcome, "offer_made": rec["offer_made"],
-            "policy_decisions": rec["policy_decisions"], "guardrail_events": rec["guardrail"],
+            "disposition": disp, "outcome": outcome, "offer_made": _offer_made(rec),
+            "evidence": _evidence(rec), "guardrail_events": rec["guardrail"],
             "audit": rec["audit"]}
 
 
 def persist_conversation(conn, record: dict) -> int:
     """Write a simulated conversation + its audit/guardrail rows. Returns the
     new conversation id and stamps it onto the record. Call on the main thread."""
-    # De-identify before storage/embedding: user turns are already redacted at
-    # input, but redact assistant turns too — so any account PII the model echoes
-    # back is scrubbed before it's logged or clustered (data minimization).
+    # De-identify before storage/embedding: redact EVERY role defensively (data
+    # minimization). User turns are normally redacted at input, but the terminal
+    # simulator reply and any assistant turn that echoes account PII must also be
+    # scrubbed — persistence does not assume an upstream guarantee.
     stored_transcript = [
-        {"role": t["role"],
-         "content": guardrails.redact_pii(t["content"])[0] if t.get("role") == "assistant" else t["content"]}
+        {"role": t["role"], "content": guardrails.redact_pii(t["content"])[0]}
         for t in record["transcript"]
     ]
     cur = conn.execute(
         "INSERT INTO conversations "
-        "(customer_id, scenario_id, transcript_json, disposition_json, offer_made, outcome, created_at) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "(customer_id, scenario_id, transcript_json, disposition_json, offer_made, evidence_json, outcome, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
         (record["customer_id"], record["scenario_id"], db.dumps(stored_transcript),
-         db.dumps(record["disposition"]), record["offer_made"], record["outcome"], _now()),
+         db.dumps(record["disposition"]), record["offer_made"],
+         db.dumps(record.get("evidence") or {}), record["outcome"], _now()),
     )
     conv_id = cur.lastrowid
     conn.executemany(
@@ -460,7 +688,7 @@ def new_session(customer_id: int, conn) -> dict:
 
 def _turn_result(session: dict, reply: str, new_events: list) -> dict:
     rec = session["rec"]
-    return {"reply": reply, "escalated": rec["escalated"], "offer_made": rec["offer_made"],
+    return {"reply": reply, "escalated": rec["escalated"], "offer_made": _offer_made(rec),
             "outcome": session["outcome"], "new_guardrail_events": new_events,
             "guardrail_events": list(rec["guardrail"])}
 
@@ -503,14 +731,17 @@ def resolve_session(session: dict, outcome: str, conn) -> dict:
         outcome = "escalated"
     if outcome not in ("saved", "lost", "escalated"):
         raise ValueError("outcome must be saved, lost, or escalated")
-    if outcome == "saved" and not rec["offer_made"]:
-        raise ValueError("cannot mark 'saved' without an authorized, accepted retention offer")
+    if outcome == "saved":
+        # A save must reference a concrete presented offer in the ledger — bind the
+        # acceptance to it, so outcome/economics use the exact presented terms.
+        if offers.mark_accepted(rec["offers"]) is None:
+            raise ValueError("cannot mark 'saved' without a presented retention offer")
     offer_accepted = outcome == "saved"
     scenario = {"id": None, "customer_id": session["customer_id"], "churn_reason": "live session"}
     disp = _disposition(session["transcript"], scenario, rec, outcome, offer_accepted)
     record = {"customer_id": session["customer_id"], "scenario_id": None,
               "transcript": session["transcript"], "disposition": disp, "outcome": outcome,
-              "offer_made": rec["offer_made"], "policy_decisions": rec["policy_decisions"],
+              "offer_made": _offer_made(rec), "evidence": _evidence(rec),
               "guardrail_events": rec["guardrail"], "audit": rec["audit"]}
     persist_conversation(conn, record)
     _grade_and_store(conn, record["conversation_id"], record, session["customer_id"])
@@ -520,14 +751,11 @@ def resolve_session(session: dict, outcome: str, conn) -> dict:
 
 def _grade_and_store(conn, conv_id: int, record: dict, customer_id: int) -> None:
     """Grade a persisted conversation and write its eval row, so the live path
-    grades 100% of conversations. A judge failure writes a coverage-miss eval
-    (verdict 'error') rather than silently leaving the record ungraded."""
-    from evals import judge  # local import avoids any load-order cycle
-    row = conn.execute("SELECT demographic_attr FROM customers WHERE id=?", (customer_id,)).fetchone()
-    convo = {"transcript": record["transcript"], "disposition": record["disposition"],
-             "demographic_attr": row["demographic_attr"] if row else "unknown",
-             "policy_decisions": record.get("policy_decisions", []),
-             "guardrail_events": record.get("guardrail_events", [])}
+    grades 100% of conversations. Builds the judge input from the SAME persisted
+    envelope the batch path uses (identical evidence). A judge failure writes a
+    coverage-miss eval (verdict 'error') rather than silently leaving it ungraded."""
+    from evals import judge, run_evals  # local import avoids any load-order cycle
+    convo = run_evals.build_judge_input(conn, conv_id)
     try:
         v = judge.judge_conversation(convo)
         verdict = judge.derive_verdict(v["scores"])

@@ -87,9 +87,9 @@
       <div class="val" id="k_madj">—</div><div class="delta" id="k_madj_d"></div>
     </div>
     <div class="tile"><div class="lbl">Save rate</div><div class="val" id="k_save">—</div><div class="delta" id="k_save_d"></div></div>
-    <div class="tile"><div class="lbl">Eval pass rate</div><div class="val" id="k_eval">—</div><div class="delta flat">graded 100%</div></div>
+    <div class="tile"><div class="lbl">Eval pass rate</div><div class="val" id="k_eval">—</div><div class="delta flat" id="k_eval_cov">—</div></div>
     <div class="tile"><div class="lbl">Guardrail catch rate</div><div class="val" id="k_guard">—</div><div class="delta flat">red-team</div></div>
-    <div class="tile"><div class="lbl">Compliance coverage</div><div class="val" id="k_comp">—</div><div class="delta good">● disclosure + audit</div></div>
+    <div class="tile"><div class="lbl">AI disclosure coverage</div><div class="val" id="k_comp">—</div><div class="delta good">● transcript-verified</div></div>
   </section>
 
   <div class="grid">
@@ -117,7 +117,7 @@
       <p class="cap">Guardrail enforcement and EU-AI-Act coverage.</p>
       <div class="meterrow"><span>Guardrail catch rate</span><span class="v" id="m_catch">—</span></div>
       <div class="track"><div class="fill" id="m_catch_fill" style="background:var(--good)"></div></div>
-      <div class="meterrow"><span>Compliance coverage (AI disclosure + audit)</span><span class="v" id="m_comp">—</span></div>
+      <div class="meterrow"><span>AI disclosure coverage (transcript-verified)</span><span class="v" id="m_comp">—</span></div>
       <div class="track"><div class="fill" id="m_comp_fill" style="background:var(--series-1)"></div></div>
       <div class="safetytiles">
         <div class="stile"><div class="n" id="s_jb">—</div><div class="t">Jailbreak attempts blocked</div></div>
@@ -135,7 +135,7 @@
 <script src="data.js"></script>
 <script>
 const MOCK = {
-  kpis:{madj_save_rate:.41,madj_delta_pp:6.2,save_rate:.58,save_delta_pp:12,eval_pass_rate:.94,guardrail_catch_rate:1,compliance_coverage:1},
+  kpis:{madj_save_rate:.41,madj_delta_pp:6.2,save_rate:.58,save_delta_pp:12,eval_pass_rate:.94,eval_coverage:1,guardrail_catch_rate:1,compliance_coverage:1},
   trend:{labels:["Before","After"],save:[.46,.58],madj:[.30,.41]},
   drivers:[{label:"Price too high",share:34,save_rate:.42},{label:"Missing integration",share:22,save_rate:.55},
            {label:"Switched to competitor",share:18,save_rate:.28},{label:"Poor support",share:14,save_rate:.61},
@@ -168,6 +168,7 @@ function renderKPIs(){
   $('#k_madj').textContent=pct(k.madj_save_rate); delta($('#k_madj_d'),k.madj_delta_pp);
   $('#k_save').textContent=pct(k.save_rate); delta($('#k_save_d'),k.save_delta_pp);
   $('#k_eval').textContent=pct(k.eval_pass_rate);
+  $('#k_eval_cov').textContent = (k.eval_coverage!=null?'graded '+pct(k.eval_coverage):'graded —');
   $('#k_guard').textContent=pct(k.guardrail_catch_rate);
   $('#k_comp').textContent=pct(k.compliance_coverage);
   $('#m_catch').textContent=pct(D.safety.catch_rate); $('#m_catch_fill').style.width=pct(D.safety.catch_rate);

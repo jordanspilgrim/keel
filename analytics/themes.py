@@ -129,6 +129,72 @@ def rank_segments(conn) -> list[dict]:
     return sorted(segs, key=lambda s: (s["loss"], s["n"]), reverse=True)
 
 
+# The lever the demo can actually pull, and the segment it addresses. A signal
+# recommending a segment this lever does not fit is marked lever-incompatible so
+# Act refuses it rather than misattributing a lift.
+_DISCOUNT_LEVER_SEGMENT = "Price too high"
+
+
+def _lever_for(reason: str) -> str | None:
+    """Which available policy lever addresses a churn segment (None if none fits)."""
+    return "discount" if reason == _DISCOUNT_LEVER_SEGMENT else None
+
+
+def recommend_intervention(conn) -> dict:
+    """Build a STRUCTURED intervention signal from the baseline evidence. Analytics
+    proposes WHAT to do, not just where: it ranks segments by loss impact and
+    selects the highest-loss segment FOR WHICH AN AVAILABLE LEVER EXISTS — acting
+    on the worst problem it can actually address, and transparently noting any
+    higher-loss segment it has no lever for (rather than either hard-coding the
+    target or bailing whenever a lever-less segment happens to rank first)."""
+    segments = rank_segments(conn)
+    views = build_conversation_views(conn)
+    offers = offer_effectiveness(views)
+    if not segments:
+        return {"segment": None, "recommended_lever": None, "lever_compatible": False,
+                "confidence": 0.0, "evidence": {}, "offer_effectiveness": offers,
+                "unaddressable_higher_loss": []}
+    # the higher-loss segments we have NO lever for (surfaced, not hidden)
+    unaddressable = []
+    chosen = None
+    for seg in segments:
+        if _lever_for(seg["reason"]) is not None:
+            chosen = seg
+            break
+        unaddressable.append({"reason": seg["reason"], "loss": seg["loss"], "save_rate": seg["save_rate"]})
+    if chosen is None:
+        return {"segment": segments[0]["reason"], "recommended_lever": None, "lever_compatible": False,
+                "recommended_action": "no available lever fits any at-risk segment",
+                "confidence": 0.0, "evidence": {"segment_ranking": segments[:3]},
+                "offer_effectiveness": offers, "unaddressable_higher_loss": unaddressable}
+    lever = _lever_for(chosen["reason"])
+    confidence = round(min(1.0, chosen["n"] / 8.0), 2)
+    note = (f"enable the {lever} lever for the '{chosen['reason']}' segment"
+            + (f" (higher-loss segments {[u['reason'] for u in unaddressable]} have no available lever)"
+               if unaddressable else ""))
+    return {
+        "segment": chosen["reason"],
+        "recommended_lever": lever,
+        "recommended_action": note,
+        "lever_compatible": True,
+        "confidence": confidence,
+        "evidence": {"n": chosen["n"], "save_rate": chosen["save_rate"], "loss": chosen["loss"],
+                     "segment_ranking": segments[:3]},
+        "offer_effectiveness": offers,
+        "unaddressable_higher_loss": unaddressable,
+    }
+
+
+def persist_signal(conn, signal: dict) -> int:
+    """Persist the structured intervention signal (into `signals`) and return its
+    id, so Act consumes an approved signal ID and the manifest can record it."""
+    cur = conn.execute(
+        "INSERT INTO signals (theme_id, recommendation, priority_score, created_at) VALUES (?,?,?,?)",
+        (None, db.dumps(signal), float(signal.get("evidence", {}).get("loss", 0.0)), _now()))
+    conn.commit()
+    return cur.lastrowid
+
+
 def rank_signals(cards: list[dict]) -> list[dict]:
     """Rank themes by volume × loss impact (unsaved conversations)."""
     signals = []

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -100,7 +101,9 @@ def _redteam(conn) -> tuple[dict, float]:
     rate = caught / total if total else 0.0
     # Persist so the kill switch (safety.program_state) can gate on the latest
     # red-team result without recomputing it (an LLM call per probe) on every poll.
-    db.record_health(conn, "guardrail_catch_rate", rate, f"{caught}/{total} probes caught")
+    # Tag it with the guardrail version so a later guardrail change invalidates it.
+    db.record_health(conn, "guardrail_catch_rate", rate, f"{caught}/{total} probes caught",
+                     version=config.GUARDRAIL_VERSION)
     return counts, rate
 
 
@@ -118,22 +121,25 @@ def main() -> int:
     recs_a = batch.run_batch(conn, cohort, system=runtime.SYSTEM, max_workers=WORKERS)
     before = export.conversation_metrics(conn)
 
-    # ---- LEARN: SELECT the treated segment from the analytics signal ---------
-    themes.run_analytics(conn)
-    segments = themes.rank_segments(conn)
-    print("③ LEARN — highest-loss churn segments (data-driven, not assumed):")
-    for s in segments[:3]:
+    # ---- LEARN: cluster the VoC, then CONSUME a structured intervention signal --
+    themes.run_analytics(conn)  # embed → cluster → theme cards → ranked signals (persisted)
+    signal = themes.recommend_intervention(conn)  # structured: segment + lever + confidence + evidence
+    signal_id = themes.persist_signal(conn, signal)
+    print("③ LEARN — structured intervention signal (analytics proposes what to do):")
+    for s in signal["evidence"].get("segment_ranking", []):
         print(f"     {s['reason']:<22} save {s['save_rate']*100:>3.0f}%  ·  n={s['n']}  ·  loss={s['loss']}")
-    target = segments[0]["reason"] if segments else DISCOUNT_LEVER_REASON
-    before_seg = _segment_metrics(conn, target)
-    # The discount lever is designed for price-sensitivity. If the signal selects a
-    # segment the lever doesn't address, don't pretend a discount would fix it.
-    if target != DISCOUNT_LEVER_REASON:
-        print(f"\n   ⚠ top-loss segment is '{target}', which the discount lever does not address — "
-              f"the honest move is a different intervention. Demo bails rather than misattribute.")
+    print(f"   signal #{signal_id}: segment='{signal['segment']}' · lever={signal['recommended_lever']} · "
+          f"confidence={signal['confidence']} · action: {signal['recommended_action']}")
+    # Act consumes the signal. If analytics recommends a segment no available lever
+    # fits, the demo BAILS rather than misattribute a lift to the wrong lever.
+    if not signal["lever_compatible"]:
+        print(f"\n   ⚠ no available policy lever fits '{signal['segment']}' — the honest move is a "
+              f"different intervention. Demo bails rather than misattribute.")
         conn.close()
         return 1
-    print(f"   → selected treated segment: '{target}' (worst loss impact) → enable the discount lever.\n")
+    target = signal["segment"]
+    before_seg = _segment_metrics(conn, target)
+    print(f"   → Act will apply the '{signal['recommended_lever']}' lever to the '{target}' segment.\n")
 
     # ---- ACT: enable discounts + improved playbook (TWO variables) ----------
     # Re-seed to an IDENTICAL fresh cohort (same seed) so cooldown state written
@@ -168,8 +174,10 @@ def main() -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "cohort_size": len(cohort), "cohort_scenario_ids": cohort_ids, "paired_cohort": paired,
         "treated_segment": target,
-        "segment_selection": "data-driven (highest loss impact in baseline)",
-        "baseline_segments": segments[:3],
+        "segment_selection": "data-driven (structured intervention signal consumed by Act)",
+        "intervention_signal_id": signal_id,
+        "intervention_signal": signal,
+        "guardrail_version": config.GUARDRAIL_VERSION,
         "variables_changed": ["discount_policy", "agent_playbook"],
         "models": {"flagship": config.FLAGSHIP_MODEL, "mini": config.MINI_MODEL, "embedding": config.EMBEDDING_MODEL},
         "baseline": {"policy": "discounts_disabled", "playbook_sha": _sha(runtime.SYSTEM), "conversations": len(recs_a),
@@ -186,6 +194,12 @@ def main() -> int:
                  "Numbers vary run to run."),
     }
     with open("dashboard/manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+    # Retain a DATED copy of every run's manifest, so any range/consistency claim
+    # in the docs is backed by a persisted artifact (not just prose).
+    os.makedirs("dashboard/manifests", exist_ok=True)
+    stamp = manifest["generated_at"].replace(":", "").replace("-", "").split(".")[0]
+    with open(f"dashboard/manifests/manifest-{stamp}.json", "w") as f:
         json.dump(manifest, f, indent=2)
 
     print("⑥ EXPORT — writing dashboard/data.js + dashboard/manifest.json")

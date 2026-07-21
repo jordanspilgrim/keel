@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     scenario_id       INTEGER REFERENCES scenarios(id),
     transcript_json   TEXT NOT NULL,           -- [{role, content}, ...]
     disposition_json  TEXT,                    -- {intent, churn_reason, offer_made, ...}
-    offer_made        TEXT,
+    offer_made        TEXT,                    -- canonical accepted/presented offer string
+    evidence_json     TEXT,                    -- lossless eval envelope: {offers, tool_facts, policy_decisions}
     outcome           TEXT,                    -- saved / lost / escalated
     created_at        TEXT NOT NULL
 );
@@ -68,9 +69,10 @@ CREATE TABLE IF NOT EXISTS evals (
     id                INTEGER PRIMARY KEY,
     conversation_id   INTEGER NOT NULL REFERENCES conversations(id),
     scores_json       TEXT NOT NULL,           -- {resolution, policy, offer_fit, tone, grounding}
-    verdict           TEXT NOT NULL,           -- pass / fail
+    verdict           TEXT NOT NULL,           -- pass / fail / error
     rationale         TEXT,
     fairness_flag     INTEGER NOT NULL DEFAULT 0,
+    rubric_version    TEXT,                     -- rubric+model that produced this grade (auditability)
     created_at        TEXT NOT NULL
 );
 
@@ -113,11 +115,14 @@ CREATE TABLE IF NOT EXISTS signals (
 
 -- Offline health metrics that can't be derived cheaply on every read (e.g. the
 -- red-team guardrail catch rate, which needs an LLM scope call per probe). The
--- red-team sweep writes the latest value here; the kill switch reads it.
+-- red-team sweep writes the latest value here; the kill switch reads it. `version`
+-- binds a result to the guardrail version that produced it, so a stale or
+-- version-mismatched result can't keep authorizing normal mode after a change.
 CREATE TABLE IF NOT EXISTS program_health (
     id                INTEGER PRIMARY KEY,
     metric            TEXT NOT NULL,            -- e.g. 'guardrail_catch_rate'
     value             REAL NOT NULL,
+    version           TEXT,                     -- guardrail version that produced it
     detail            TEXT,
     created_at        TEXT NOT NULL
 );
@@ -130,22 +135,30 @@ _TABLES = [
 ]
 
 
-def record_health(conn: sqlite3.Connection, metric: str, value: float, detail: str = "") -> None:
-    """Append a program-health datapoint (latest wins on read)."""
+def record_health(conn: sqlite3.Connection, metric: str, value: float, detail: str = "",
+                  version: str | None = None) -> None:
+    """Append a program-health datapoint (latest wins on read), tagged with the
+    guardrail version that produced it."""
     from datetime import datetime, timezone
     conn.execute(
-        "INSERT INTO program_health (metric, value, detail, created_at) VALUES (?,?,?,?)",
-        (metric, float(value), detail, datetime.now(timezone.utc).isoformat()),
+        "INSERT INTO program_health (metric, value, version, detail, created_at) VALUES (?,?,?,?,?)",
+        (metric, float(value), version, detail, datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
 
 
 def latest_health(conn: sqlite3.Connection, metric: str) -> float | None:
     """Most-recent value for a program-health metric, or None if never recorded."""
-    row = conn.execute(
-        "SELECT value FROM program_health WHERE metric=? ORDER BY id DESC LIMIT 1", (metric,)
-    ).fetchone()
+    row = latest_health_row(conn, metric)
     return None if row is None else float(row["value"])
+
+
+def latest_health_row(conn: sqlite3.Connection, metric: str):
+    """Most-recent full health row (value, version, created_at), or None."""
+    return conn.execute(
+        "SELECT value, version, created_at FROM program_health WHERE metric=? ORDER BY id DESC LIMIT 1",
+        (metric,),
+    ).fetchone()
 
 
 def connect(db_path: str | None = None) -> sqlite3.Connection:
@@ -156,9 +169,24 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
     return conn
 
 
+# Columns added after the initial schema shipped. CREATE TABLE IF NOT EXISTS does
+# not alter an existing table, so an established keel.db needs these back-filled —
+# a lightweight, idempotent migration (no migration framework for a local POC).
+_ADDED_COLUMNS = [
+    ("conversations", "evidence_json", "TEXT"),
+    ("program_health", "version", "TEXT"),
+    ("evals", "rubric_version", "TEXT"),
+]
+
+
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create all tables if they don't exist."""
+    """Create all tables if they don't exist, then back-fill any columns added
+    after the table was first created (idempotent)."""
     conn.executescript(SCHEMA)
+    for table, col, decl in _ADDED_COLUMNS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     conn.commit()
 
 

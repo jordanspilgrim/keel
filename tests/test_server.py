@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 import config
 import db
 import synth
-from agent import guardrails, runtime
+from agent import guardrails, offers, runtime
 
 
 @pytest.fixture
@@ -31,14 +31,16 @@ def client(tmp_path, monkeypatch):
     def fake_agent(input_list, cid, sub, conn, rec, system=runtime.SYSTEM, on_step=None):
         if on_step:
             on_step({"kind": "tool", "text": "get_subscription → Pro"})
-        rec["offer_made"] = "1-month pause"
+        # Mirror a real turn: authorize + present a 1-month pause in the ledger.
+        o = offers.authorize(rec["offers"], "pause", {"months": 1})
+        o.state, o.presented_terms = "presented", {"months": 1}
         input_list.append({"role": "assistant", "content": "How about a 1-month pause?"})
         return "How about a 1-month pause?"
 
     monkeypatch.setattr(runtime, "_agent_turn", fake_agent)
     monkeypatch.setattr(runtime, "_disposition",
                         lambda transcript, scenario, rec, outcome, accepted: {
-                            "intent": "cancel", "churn_reason": "price", "offer_made": rec["offer_made"],
+                            "intent": "cancel", "churn_reason": "price", "offer_made": runtime._offer_made(rec),
                             "offer_accepted": accepted, "outcome": outcome, "confidence": 0.8})
     monkeypatch.setattr(runtime, "_grade_and_store", lambda *a: None)  # no judge API in tests
 
@@ -111,6 +113,18 @@ def test_busy_session_rejects_overlapping_turn_and_resolve(client):
     server.SESSIONS[sid]["_busy"] = True  # simulate a turn in flight
     assert client.post("/api/chat/turn", json={"session_id": sid, "message": "hi"}).status_code == 409
     assert client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"}).status_code == 409
+
+
+def test_resolve_connection_failure_clears_claim(client, monkeypatch):
+    # If opening the DB connection fails during resolve, the _resolving claim must
+    # be cleared (inside try/finally) — the session must not stick permanently.
+    import server
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    monkeypatch.setattr(server.db, "connect",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")))
+    with pytest.raises(RuntimeError):  # surfaced, not swallowed
+        client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"})
+    assert server.SESSIONS[sid].get("_resolving") is False  # claim released in finally, not stuck
 
 
 def test_duplicate_resolve_claim_rejected(client):

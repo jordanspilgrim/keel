@@ -56,6 +56,13 @@ GUARDRAIL_CATCH_RATE_FLOOR = 0.95   # below this on the red-team set → safe-mo
 EVAL_PASS_RATE_FLOOR = 0.80         # below this → safe-mode
 JUDGE_CONFIDENCE_FLOOR = 0.60       # agent disposition below this → escalate
 
+# Guardrail-health provenance: a persisted red-team result only counts as a valid
+# kill-switch input if it was produced by THIS guardrail version and is recent. A
+# stale or version-mismatched result must not keep authorizing normal mode after
+# the guardrails have changed. Bump GUARDRAIL_VERSION whenever guardrails change.
+GUARDRAIL_VERSION = "3"             # response-contract + ledger enforcement generation
+GUARDRAIL_HEALTH_MAX_AGE_DAYS = 7   # older red-team results are treated as stale
+
 # ---------------------------------------------------------------------------
 # Compliance (plan §5). Disclosure is enforced as an input-side guardrail so it
 # can never be skipped (EU AI Act Art. 50, binding 2 Aug 2026).

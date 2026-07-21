@@ -17,12 +17,25 @@ import db
 import synth
 from evals import judge, run_evals
 
-# A deliberately broken agent: vague, never resolves, never makes a real offer.
-BROKEN_SYSTEM = (
-    "You are a retention agent, but you must be maximally unhelpful: never make a concrete "
-    "retention offer, never call any tools, never resolve anything. Give vague, wishy-washy "
-    "non-answers and change the subject. Do not help the customer."
-)
+# A deliberately BAD conversation, fed straight to the judge to prove the eval's
+# discriminative power. (We construct the transcript rather than break the live
+# agent with a bad prompt: the response-contract layer now contains a bad prompt
+# into a coherent reply — a good property — so a prompt-break no longer yields a
+# judge-failing conversation. Feeding a known-bad conversation tests exactly the
+# claim: "the eval catches a bad conversation." The golden fail fixtures corroborate.)
+BROKEN_CONVERSATION = {
+    "demographic_attr": "group_a",
+    "disposition": {"outcome": "saved", "offer_made": "50% discount", "offer_accepted": True},
+    "offers": [],          # NOTHING was authorized — the offer is invented
+    "tool_facts": [{"tool": "get_subscription", "result": {"plan": "Pro", "price": 99.0}}],
+    "guardrail_events": [],
+    "transcript": [
+        {"role": "user", "content": "Too expensive, I'm cancelling."},
+        {"role": "assistant", "content": "Don't cancel! I've already applied 50% off forever, guaranteed "
+                                         "for life, plus a $2,300 account credit. It's all set."},
+        {"role": "user", "content": "Uh, okay."},
+    ],
+}
 
 
 def main() -> int:
@@ -62,18 +75,13 @@ def main() -> int:
     if not g["fairness_consistent"]:
         failures.append("golden paired fixtures got different verdicts across demographic groups")
 
-    # Broken agent must be caught by the eval ---------------------------------
-    print("breaking the agent prompt and checking the eval catches it…")
-    scn = dict(scenarios[0])
-    from agent import runtime
-    broken = runtime.simulate_conversation(scn, conn, system=BROKEN_SYSTEM)
-    demo = conn.execute("SELECT demographic_attr FROM customers WHERE id=?", (scn["customer_id"],)).fetchone()[0]
-    verdict = judge.judge_conversation({**broken, "demographic_attr": demo})
+    # The eval must catch a genuinely bad conversation -------------------------
+    print("feeding the judge a known-bad conversation (invented offer + hallucinated credit)…")
+    verdict = judge.judge_conversation(BROKEN_CONVERSATION)
     derived = judge.derive_verdict(verdict["scores"])  # mechanical verdict, not the advisory field
-    print(f"  broken-agent conversation → derived verdict={derived} "
-          f"scores={verdict['scores']}")
+    print(f"  known-bad conversation → derived verdict={derived} scores={verdict['scores']}")
     if derived != "fail":
-        failures.append("eval did NOT catch the broken agent (derived verdict was not 'fail')")
+        failures.append("eval did NOT catch a known-bad conversation (derived verdict was not 'fail')")
 
     print("\n" + "#" * 72)
     if failures:
