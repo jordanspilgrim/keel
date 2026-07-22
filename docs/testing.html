@@ -109,7 +109,7 @@ python economics.py
   <div class="step"><div class="num">3</div><h2>Run the unit tests <span class="badge free">no API</span></h2></div>
   <p>69 fast, deterministic tests over the policy layer, guardrails, the response-contract/offer-ledger, enforcement, the live-session state machine, and the server — no network, ~1s.</p>
   <pre>python -m pytest tests/ -q
-<span class="g"># .....................................................................  69 passed in ~1s</span></pre>
+<span class="g"># .....................................................................  79 passed in ~1s</span></pre>
   <table>
     <tr><th>File</th><th>Covers</th></tr>
     <tr><td class="s">test_policy.py</td><td>discount cap, save-offer cooldown, pause cap, margin floor, consequential → human, refund → human</td></tr>
@@ -140,7 +140,7 @@ over-limit 40% discount → capped 20%       deny_refund → needs_human
   <p class="proves">Proves: jailbreak <b>blocked</b>, off-scope <b>bounded</b>, PII <b>redacted before storage</b>, over-limit discount <b>capped</b> to the ceiling, refund-denial <b>routed to a human</b>.</p>
 
   <div class="step"><div class="num">6</div><h2>Phase 3 — eval harness <span class="badge api">~cents</span></h2></div>
-  <p>Grades a batch, runs the golden set (judge vs. human), and proves the eval catches a deliberately broken agent.</p>
+  <p>Grades a batch, runs the golden set (judge vs. human), and proves the eval catches a known-bad conversation fed straight to the judge.</p>
   <pre>python -m scripts.phase3_accept</pre>
   <pre><span class="c"># abridged</span>
 graded 12/12 · eval pass rate 92% · hallucination 0%
@@ -163,11 +163,11 @@ Offer effectiveness: pause 56% @ $16.6 · discount 100% @ $19.8
 open dashboard/index.html   <span class="c"># shows the measured lift</span></pre>
   <pre><span class="c"># abridged — a representative run; numbers vary run to run</span>
 ③ LEARN — structured intervention signal (worst lever-compatible segment):
-  Price too high  save 38% · n=8 · loss=5.0   ← selected · lever=discount
-FLYWHEEL RESULT  (treated price-sensitive segment)
-  price-sensitive save:  38%  →  <span class="g">50%</span>   (+12 pp this run)
-  overall (context):     39%  →  33%   (−6 pp, noisy)
-  eval pass 89% (coverage 100%) · guardrail catch 100% · compliance 100% · paired cohort: True</pre>
+  Price too high  n=20 · loss=… · lever=discount   ← selected, persisted signal #1
+FLYWHEEL RESULT  (treated price-sensitive segment · single committed run)
+  price-sensitive save:  15%  →  <span class="g">50%</span>   (+35 pp)
+  overall (context):     27%  →  43%   (+17 pp)
+  eval pass 100% (coverage 100%) · guardrail catch 100% · compliance 100% · paired cohort: True</pre>
   <p class="proves">Proves the definition of done: on <b>identical seeded customers</b>, acting on the analytics signal (enable discounts for the price-sensitive segment) produced a measured lift <b>on the treated segment</b> — the flywheel visibly turning. The run requires a matched paired cohort and a strictly-positive treated-segment lift, and writes provenance to <code>dashboard/manifest.json</code>.</p>
 
   <h2>What each command proves, at a glance</h2>
@@ -175,10 +175,10 @@ FLYWHEEL RESULT  (treated price-sensitive segment)
     <tr><th>Command</th><th>Phase</th><th>API</th><th>Proves</th></tr>
     <tr><td class="s">python synth.py</td><td>0</td><td>no</td><td>reproducible synthetic data</td></tr>
     <tr><td class="s">python economics.py</td><td>0</td><td>no</td><td>the cost-to-serve model</td></tr>
-    <tr><td class="s">pytest tests/</td><td>1–2</td><td>no</td><td>policy, guardrails, response-contract/ledger, enforcement, live session, server (69 tests)</td></tr>
+    <tr><td class="s">pytest tests/</td><td>1–2</td><td>no</td><td>policy, guardrails, response-contract/ledger, enforcement, live session, server (79 tests)</td></tr>
     <tr><td class="s">-m scripts.phase1_accept</td><td>1</td><td>yes</td><td>save / let-churn behavior end-to-end</td></tr>
     <tr><td class="s">-m scripts.phase2_accept</td><td>2</td><td>yes</td><td>100% guardrail catch rate + compliance paths</td></tr>
-    <tr><td class="s">-m scripts.phase3_accept</td><td>3</td><td>yes</td><td>grade 100% + judge calibration + broken agent caught</td></tr>
+    <tr><td class="s">-m scripts.phase3_accept</td><td>3</td><td>yes</td><td>grade 100% + judge calibration + known-bad conversation caught</td></tr>
     <tr><td class="s">-m scripts.phase4_accept</td><td>4</td><td>yes</td><td>clustered churn drivers + offer effectiveness</td></tr>
     <tr><td class="s">run_demo.py</td><td>5</td><td>yes</td><td>the full flywheel + the measured lift</td></tr>
   </table>

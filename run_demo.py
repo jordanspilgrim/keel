@@ -12,8 +12,10 @@ The money demo. Runs the loop once, end to end, and shows it turning:
   re-measure→ run the SAME customers again under the new policy.
   export    → dashboard/data.js, so the dashboard shows the measured lift.
 
-The lift between BEFORE and AFTER — on identical customers, changing only the
-policy the analytics recommended — is the flywheel visibly turning.
+The lift between BEFORE and AFTER — on identical seeded customers, changing TWO
+variables together (the discount policy AND the agent playbook, both from the
+analytics recommendation) — is the flywheel visibly turning. Because two variables
+move together this is a paired demonstration, not an isolated causal estimate.
 
 Run:  python run_demo.py
 """
@@ -40,7 +42,10 @@ from evals import run_evals
 def _sha(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:12]
 
-COHORT_PRICE = 8      # price-sensitive scenarios (the segment the act targets)
+COHORT_PRICE = 20     # price-sensitive scenarios (the treated segment). n=20 keeps
+                      # the treated-segment estimate stable (±1 customer ≈ 5pp) — at
+                      # n=8 a single customer swings it 12.5pp, so a one-run lift was
+                      # noise-dominated. Larger n = an honest, reproducible read.
 COHORT_OTHER = 10     # other churn reasons, for a representative population
 WORKERS = 10
 # The treated segment is SELECTED from the baseline analytics signal (see main),
@@ -124,11 +129,10 @@ def main() -> int:
     # ---- LEARN: cluster the VoC, then CONSUME a structured intervention signal --
     themes.run_analytics(conn)  # embed → cluster → theme cards → ranked signals (persisted)
     signal = themes.recommend_intervention(conn)  # structured: segment + lever + confidence + evidence
-    signal_id = themes.persist_signal(conn, signal)
     print("③ LEARN — structured intervention signal (analytics proposes what to do):")
     for s in signal["evidence"].get("segment_ranking", []):
         print(f"     {s['reason']:<22} save {s['save_rate']*100:>3.0f}%  ·  n={s['n']}  ·  loss={s['loss']}")
-    print(f"   signal #{signal_id}: segment='{signal['segment']}' · lever={signal['recommended_lever']} · "
+    print(f"   signal: segment='{signal['segment']}' · lever={signal['recommended_lever']} · "
           f"confidence={signal['confidence']} · action: {signal['recommended_action']}")
     # Act consumes the signal. If analytics recommends a segment no available lever
     # fits, the demo BAILS rather than misattribute a lift to the wrong lever.
@@ -139,15 +143,21 @@ def main() -> int:
         return 1
     target = signal["segment"]
     before_seg = _segment_metrics(conn, target)
-    print(f"   → Act will apply the '{signal['recommended_lever']}' lever to the '{target}' segment.\n")
 
     # ---- ACT: enable discounts + improved playbook (TWO variables) ----------
     # Re-seed to an IDENTICAL fresh cohort (same seed) so cooldown state written
     # during batch A doesn't carry into batch B — each batch measures fresh state.
-    improved_system = _improved_system(target)
-    print(f"④ ACT — enable discounts AND update the playbook to lead with a discount for the '{target}' segment")
+    # Persist the signal AFTER the re-seed and load it back by id, so Act genuinely
+    # consumes the signal THROUGH the datastore (durable Learn→Act lineage), not an
+    # in-memory object the re-seed would have invalidated.
     policy.DISCOUNTS_ENABLED = True
     synth.generate(conn)
+    signal_id = themes.persist_signal(conn, signal)
+    signal = themes.load_signal(conn, signal_id)  # Act reads the persisted signal by id
+    target = signal["segment"]
+    improved_system = _improved_system(target)
+    print(f"④ ACT — consuming persisted signal #{signal_id}: enable discounts + lead-with-discount "
+          f"playbook for the '{target}' segment")
     cohort2 = _cohort(conn)
     cohort2_ids = sorted(s["id"] for s in cohort2)
 

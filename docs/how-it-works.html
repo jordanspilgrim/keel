@@ -108,7 +108,7 @@
   <p>One retention conversation runs through this pipeline, resolving to <span class="mono">saved / lost / escalated</span>.</p>
   <ol class="pipe">
     <li><div class="t">AI disclosure</div><div class="d">The first turn tells the customer they’re talking to an AI. Enforced as an input-side guardrail so it can never be skipped (EU AI Act Art. 50).</div></li>
-    <li><div class="t">Input guardrails</div><div class="d">Every customer message is screened: PII redacted <em>before</em> it’s stored, jailbreak patterns caught, off-topic requests bounded.</div></li>
+    <li><div class="t">Input guardrails</div><div class="d">Every customer message is screened: a defined set of sensitive patterns (card / SSN / email / DOB / phone) redacted before storage, known jailbreak <em>patterns</em> caught (100% on the 11 seeded probes — common paraphrases can still evade regex; the deterministic policy layer is the real backstop), off-topic requests bounded.</div></li>
     <li><div class="t">Reason + call tools</div><div class="d">The model (flagship) grounds itself with <code>get_customer</code> / <code>get_subscription</code> / <code>get_usage</code>, then proposes a retention offer. It can only ever see the authenticated customer’s own records.</div></li>
     <li><div class="t">Policy disposes</div><div class="d">Deterministic authorization caps or rejects the proposal — discount depth, margin floor, save-offer cooldown — and routes consequential actions to a human.</div></li>
     <li><div class="t">Output guardrails</div><div class="d">The agent's final turn is a <em>structured response contract</em> (display text + declared commitments + account claims), validated deterministically against the offer ledger and tool facts before anything is sent — regex is a supplemental cross-check, not the primary control.</div></li>
@@ -117,7 +117,7 @@
   <div class="callout">A conversation is only counted <b>saved</b> when the customer accepts a <b>real retention offer</b>. Someone agreeing to cancel is a churn, not a save — a distinction that keeps the downstream analytics honest.</div>
 
   <h2>Guardrails — defense in depth</h2>
-  <p>Guardrails aren’t a prompt instruction (“please don’t…”). They’re <em>enforced</em> layers: a jailbreak is blocked before the model, actions are deterministically authorized, and the customer-facing reply must pass a structured contract validated against the offer ledger (the exact terms authorized) — a reply that overstates the offer or invents an account fact is regenerated once and, failing that, fails closed to a human hand-off. Every trip is written to <code>guardrail_events</code>. On the seeded red-team the input catch rate is <b>100% (11/11)</b>.</p>
+  <p>Guardrails aren’t a prompt instruction (“please don’t…”). They’re <em>enforced</em> layers: known jailbreak patterns are blocked before the model (100% on the 11 seeded probes — regex, so paraphrases can evade it; the deterministic policy layer is the real backstop), actions are deterministically authorized, and the customer-facing reply must pass a structured contract validated against the offer ledger and tool facts — a reply whose prose overstates the declared offer or invents an account fact is regenerated once and, failing that, held at the authorized ceiling or handed to a human. Every trip is written to <code>guardrail_events</code>.</p>
 
   <div class="card">
     <div class="gr"><span class="tag">Input</span> &nbsp;<b>before the model acts</b>
@@ -150,7 +150,7 @@
     <tr><th>Obligation</th><th>Where it lives in Keel</th></tr>
     <tr><td>AI Act Art. 50 — AI disclosure</td><td class="mono">agent/disclosure.py (enforced input guardrail)</td></tr>
     <tr><td>GDPR Art. 22 — human review of significant decisions</td><td class="mono">agent/policy.py (consequential → human)</td></tr>
-    <tr><td>Data minimization / purpose limitation</td><td class="mono">guardrails.redact_pii before log + embed</td></tr>
+    <tr><td>Data minimization (defined pattern set, not all PII)</td><td class="mono">guardrails.redact_pii before log + embed</td></tr>
     <tr><td>Bias monitoring (all systems, per Digital Omnibus)</td><td class="mono">fairness slice in evals/judge.py + run_evals.py</td></tr>
     <tr><td>Traceability / record-keeping</td><td class="mono">audit_log + guardrail_events</td></tr>
   </table>
@@ -170,7 +170,7 @@ themes / signals   clustered churn themes and ranked roadmap signals</pre>
   <p>The unit-economics model surfaces one finding that reframes everything: <b>~97% of blended cost-to-serve is human escalation; the entire AI stack — agent, grading every conversation, guardrails — is about 3¢ per conversation.</b></p>
   <div class="callout">Two consequences are baked into the design: the optimization lever is <b>containment</b> (safely reducing escalation), not model choice or token-shaving; and you <b>grade 100% of conversations</b> because evaluation is nearly free. Sampling to “save money” saves nothing and costs you signal. <a href="economics-calculator.html">Explore the model →</a></div>
 
-  <p class="foot">All six phases built and verified end-to-end — agent, guardrails, evals, analytics, and the closed loop (a measured, run-dependent save-rate lift on the treated price-sensitive segment from acting on one analytics signal — the segment lands around ~75% after the act; the lift magnitude varies with the baseline draw). See <a href="testing.html">How to test</a> to run any of it. Regulatory references are architecture, not legal advice.</p>
+  <p class="foot">All six phases built and verified end-to-end — agent, guardrails, evals, analytics, and the closed loop (in the single committed run, acting on one analytics signal moved the treated price-sensitive segment 15% → 50%, +35pp, at a stable n=20; numbers vary run to run and only the committed run is claimed). See <a href="testing.html">How to test</a> to run any of it. Regulatory references are architecture, not legal advice.</p>
 </div>
 <script>
   document.getElementById('themeBtn').addEventListener('click',()=>{

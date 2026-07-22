@@ -49,6 +49,18 @@ def test_offer_summary_prefers_presented_then_accepted():
     assert offers.accepted(led) is o and offers.offer_summary(led) == "15% discount"
 
 
+def test_rejection_transitions_presented_to_rejected():
+    led: list[offers.Offer] = []
+    o = offers.authorize(led, "discount", {"pct": 20})
+    offers.present(led, o, {"pct": 20})
+    offers.mark_rejected(led)
+    assert o.state == "rejected"
+    # a rejected offer was still EXTENDED — it shows in the offer summary (cooldown/analytics)
+    assert offers.extended(led) is o and offers.offer_summary(led) == "20% discount"
+    # …but it is no longer 'presented' (a faithful state machine)
+    assert offers.presented(led) is None
+
+
 def test_terms_within_ceiling():
     assert offers.terms_within({"pct": 10}, {"pct": 20}, "discount")
     assert not offers.terms_within({"pct": 25}, {"pct": 20}, "discount")

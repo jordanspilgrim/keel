@@ -2,7 +2,8 @@
 
 Asserts the handoff §3 acceptance:
   - every conversation is auto-scored;
-  - deliberately breaking the agent prompt makes the eval catch it (fail);
+  - a known-bad conversation (invented offer + hallucinated credit) fed to the
+    judge is caught (fail) — the eval's discriminative power;
   - judge-vs-human agreement on the golden set is reported (calibration).
 
 Run:  python -m scripts.phase3_accept
@@ -91,7 +92,7 @@ def main() -> int:
         conn.close()
         return 1
     print("PHASE 3 ACCEPTANCE: PASS")
-    print(f"  every conversation graded · golden agreement {g['agreement']*100:.0f}% · broken agent caught")
+    print(f"  every conversation graded · golden agreement {g['agreement']*100:.0f}% · known-bad conversation caught")
     conn.close()
     return 0
 

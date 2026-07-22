@@ -130,6 +130,82 @@ def test_contract_grounding_rejects_invented_money():
     assert not ok and "2,300" in reason
 
 
+# --- the fourth-review bypass probes are now regressions --------------------
+def _rec_facts():
+    r = _rec()
+    r["tool_facts"] = [{"tool": "get_subscription", "call_id": "c1",
+                        "result": {"price": 99.0, "licensed_seats": 12}}]
+    return r
+
+
+def _contract(text, pct=None, months=None, claims=None):
+    c = []
+    if pct is not None:
+        c = [{"kind": "discount", "pct": pct, "months": None}]
+    if months is not None:
+        c = [{"kind": "pause", "pct": None, "months": months}]
+    return {"display_text": text, "commitments": c, "account_claims": claims or []}
+
+
+def test_prose_offer_must_match_commitment():
+    from agent import offers as offers_mod
+    # prose promises a discount with NO structured commitment → rejected
+    assert not runtime._validate_contract(_contract("I can offer 15 percent off."), _rec_facts())[0]
+    # prose says spelled 'twenty-five percent' but only 10% is committed → rejected
+    rec = _rec_facts(); offers_mod.authorize(rec["offers"], "discount", {"pct": 10})
+    assert not runtime._validate_contract(_contract("I can offer twenty-five percent off.", pct=10), rec)[0]
+    # 'a quarter off' (=25%) over the committed 10% → rejected
+    rec = _rec_facts(); offers_mod.authorize(rec["offers"], "discount", {"pct": 10})
+    assert not runtime._validate_contract(_contract("I can take a quarter off your bill.", pct=10), rec)[0]
+
+
+def test_money_not_laundered_by_unrelated_number():
+    # $12 is invented — it matches only because seats==12, not a dollar field
+    assert not runtime._validate_contract(_contract("Your credit is $12."), _rec_facts())[0]
+
+
+def test_account_claim_must_cite_a_real_tool_and_value():
+    # a claim citing a tool that never ran is rejected
+    bad = _contract("You have 500 seats.", claims=[{"value": "500 seats", "source_tool": "made_up_tool"}])
+    assert not runtime._validate_contract(bad, _rec_facts())[0]
+    # a claim whose number isn't in the cited tool's result is rejected
+    bad2 = _contract("You have 500 seats.", claims=[{"value": "500 seats", "source_tool": "get_subscription"}])
+    assert not runtime._validate_contract(bad2, _rec_facts())[0]
+
+
+def test_non_positive_committed_terms_rejected():
+    from agent import offers as offers_mod
+    assert not offers_mod.terms_within({"pct": -10}, {"pct": 20}, "discount")
+    assert not offers_mod.terms_within({"pct": 0}, {"pct": 20}, "discount")
+    assert not offers_mod.terms_within({"months": 0}, {"months": 3}, "pause")
+
+
+# --- moderation outage is BOUNDED, not fail-open (M7) -----------------------
+def test_moderation_outage_does_not_deliver_model_prose(monkeypatch):
+    from agent import offers as offers_mod
+    # a valid contract, but moderation is unavailable → its prose must NOT be delivered
+    monkeypatch.setattr(runtime, "_generate_contract",
+                        lambda *a, **k: {"display_text": "Here is a lovely 10% off.", "account_claims": [],
+                                         "commitments": [{"kind": "discount", "pct": 10, "months": None}]})
+    monkeypatch.setattr(guardrails, "check_tone", lambda r: {"flagged": False, "degraded": True, "reason": "down"})
+    rec = _rec()
+    offers_mod.authorize(rec["offers"], "discount", {"pct": 20})
+    out = runtime._finalize_output(rec, [], runtime.SYSTEM, None)
+    assert out != "Here is a lovely 10% off."          # tone-unverified prose withheld
+    assert "10% discount" in out or "20% discount" in out  # fell back to our safe ceiling text
+
+
+# --- the hand-off path is screened like any other reply (H2) ----------------
+def test_handoff_message_is_output_screened():
+    rec = _rec()
+    rec["tool_facts"] = [{"tool": "get_subscription", "call_id": "c1", "result": {"price": 99.0}}]
+    # a clean routing message is safe
+    assert runtime._handoff_safe("A teammate has the full conversation and will follow up shortly.", rec)
+    # a hand-off that floats an offer or invents a credit is NOT safe → fixed fallback used
+    assert not runtime._handoff_safe("A teammate will apply your 50% discount and $500 credit.", rec)
+    assert not runtime._handoff_safe("I've applied the discount; a teammate will confirm.", rec)
+
+
 # --- malformed offers rejected ---------------------------------------------
 def test_negative_discount_rejected():
     v = policy.authorize("offer_discount", {"pct": -25}, {"plan": "Basic", "price": 29.0, "last_save_offer_days": None})
@@ -164,7 +240,7 @@ def test_promise_catches_spelled_and_future_bypasses():
     assert guardrails.check_promise("twenty percent off", authorized={"discount_pct": 10})["flagged"]
     # spelled, unauthorized pause
     assert guardrails.check_promise("I can pause your plan for three months", authorized=None)["flagged"]
-    # future-tense unsupported application
-    assert guardrails.check_promise("Great, I will apply that discount now")["flagged"]
+    # completion claim — an offer stated as already applied
+    assert guardrails.check_promise("I have applied that discount to your account")["flagged"]
     # alternate completion language
     assert guardrails.check_promise("Your discount is active now")["flagged"]

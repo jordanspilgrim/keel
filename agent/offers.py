@@ -110,12 +110,26 @@ def mark_accepted(offers: list[Offer]) -> Offer | None:
     return p
 
 
+def mark_rejected(offers: list[Offer]) -> Offer | None:
+    """The customer rejected the offer on the table — transition the presented offer
+    to 'rejected' so the ledger is a faithful state machine (a rejected offer is not
+    left dangling as 'presented'). Returns it, or None if none was presented."""
+    p = presented(offers)
+    if p is not None:
+        p.state = "rejected"
+    return p
+
+
 def terms_within(committed: dict, ceiling: dict, kind: str) -> bool:
-    """Is a committed offer within the authorized ceiling for its kind?"""
+    """Is a committed offer POSITIVE and within the authorized ceiling for its kind?
+    A non-positive committed term (0 or negative) is never valid — the tools only
+    authorize genuine positive offers."""
     if kind == "discount":
-        return float(committed.get("pct", 0)) <= float(ceiling.get("pct", 0)) + 0.5
+        pct = float(committed.get("pct", 0))
+        return 0 < pct <= float(ceiling.get("pct", 0)) + 0.5
     if kind == "pause":
-        return int(committed.get("months", 0)) <= int(ceiling.get("months", 0))
+        months = int(committed.get("months", 0))
+        return 0 < months <= int(ceiling.get("months", 0))
     return False
 
 
@@ -129,8 +143,19 @@ def human_terms(offer: Offer, terms: dict | None = None) -> str:
     return offer.kind
 
 
+def extended(offers: list[Offer]) -> Offer | None:
+    """The offer that was actually EXTENDED to the customer this conversation —
+    accepted, else presented, else rejected. (An offer the customer rejected was
+    still made: it matters for cooldown and offer-effectiveness analytics.)"""
+    for state in ("accepted", "presented", "rejected"):
+        for o in reversed(offers):
+            if o.state == state:
+                return o
+    return None
+
+
 def offer_summary(offers: list[Offer]) -> str | None:
-    """The canonical single offer string for persistence/back-compat: the accepted
-    offer if there is one, else the offer currently presented, else None."""
-    o = accepted(offers) or presented(offers)
+    """The canonical single offer string for persistence/back-compat: the offer
+    extended to the customer (accepted, presented, or rejected), else None."""
+    o = extended(offers)
     return human_terms(o) if o is not None else None

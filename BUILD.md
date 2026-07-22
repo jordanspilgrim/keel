@@ -10,10 +10,10 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 |---|---|---|---|
 | **0 — Scaffold + synth** | ✅ **done** | `config.py`, `db.py`, `synth.py`, `economics.py`, `.env.example`, `requirements.txt`, dashboard mockup, stubs | `python synth.py` seeds keel.db reproducibly (200 cust / 200 sub / 211 scenarios; identical SHA on re-run) ✓; `python economics.py` reproduces the $1.28/97% headline ✓ |
 | **1 — Cancellation-saver agent** | ✅ **done** | `agent/runtime.py` Responses-API loop, `agent/tools.py`, `agent/policy.py`, `agent/disclosure.py`, `sim.py` (customer simulator), `llm.py`, structured disposition | `python -m scripts.phase1_accept`: eligible → **saved** (3-mo pause), ineligible → **lost** (cooldown-rejected save offer, graceful churn); disclosure in every transcript; no offer exceeds limits ✓; 10 unit tests pass |
-| **2 — Guardrails & compliance** | ✅ **done** | `agent/guardrails.py` (input: PII redact / jailbreak / scope; output: tone / promise / grounding), policy human-in-the-loop (+`deny_refund` tool), `guardrail_events` populated, PII redacted before store | `python -m scripts.phase2_accept`: **100% catch rate (11/11)** — jailbreak 4/4 blocked, off-scope 4/4 bounded, PII 3/3 redacted, over-limit 40%→capped 20%, refund→human ✓; 69 tests pass |
+| **2 — Guardrails & compliance** | ✅ **done** | `agent/guardrails.py` (input: PII redact / jailbreak / scope; output: tone / promise / grounding), policy human-in-the-loop (+`deny_refund` tool), `guardrail_events` populated, PII redacted before store | `python -m scripts.phase2_accept`: **100% catch rate (11/11)** — jailbreak 4/4 blocked, off-scope 4/4 bounded, PII 3/3 redacted, over-limit 40%→capped 20%, refund→human ✓; 79 tests pass |
 | **3 — Eval harness** | ✅ **done** | `evals/judge.py` (5-dim rubric + fairness flag, fed the persisted eval envelope), `evals/run_evals.py` (grade_all + run_golden + `build_judge_input`), 9 golden fixtures, `batch.py` concurrent runner | `python -m scripts.phase3_accept` (representative run): 12/12 graded (eval pass ~92%), golden agreement **100% (9/9)** at the 80% floor, paired-fairness consistent (per-dimension), a known-bad conversation → **fail** (policy_adherence 1, hallucination 1); fairness slice by group reported |
 | **4 — VoC analytics** | ✅ **done** | `analytics/embed.py` (batched), `analytics/cluster.py` (KMeans), `analytics/themes.py` (theme cards + offer effectiveness + ranked signals), `economics.margin_cost` | `python -m scripts.phase4_accept`: 30-conv batch → 5 themes, top-3 drivers, ranked signals, offer comparison from clusters ✓ |
-| **5 — Close the loop** | ✅ **done** | `dashboard/export.py` → `data.js` wired to a data-driven `dashboard/index.html`; `run_demo.py` consumes a structured intervention signal (`themes.recommend_intervention`), runs baseline → learn → act → re-measure, requires a paired cohort + lever-compatible signal + strictly-positive treated-segment lift, writes `manifest.json` (+ dated copies in `dashboard/manifests/`) | `python run_demo.py` (representative run): the signal selected the price-sensitive segment (worst lever-compatible loss); treated save rate **38% → 50% (+12pp this run)**, overall −6pp (noisy context) — **the flywheel turning**. Lift is positive but run-variable (~+10 to +40pp across runs); the treated segment lands in the ~50–75% range after the act |
+| **5 — Close the loop** | ✅ **done** | `dashboard/export.py` → `data.js` wired to a data-driven `dashboard/index.html`; `run_demo.py` consumes a structured intervention signal (persisted + loaded by id), runs baseline → learn → act → re-measure over an **n=20** treated cohort (stable estimate), requires a paired cohort + lever-compatible signal + strictly-positive treated-segment lift, writes `manifest.json` (+ dated copies in `dashboard/manifests/`) | `python run_demo.py` (single committed run): the signal selected the price-sensitive segment (worst lever-compatible loss); treated save rate **15% → 50% (+35pp)**, margin-adjusted 12% → 41%, overall +17pp context, eval pass 100% — **the flywheel turning**. Numbers vary run to run; only the committed run is claimed |
 | **6 — Stretch** | ⬜ | adversarial red-team suite (synth already seeds 11 probes), A/B offer testing, "propose a policy change" agent | — |
 
 ## Phase 0 — verified
@@ -33,7 +33,7 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 
 ## Phase 2 — verified
 
-- `agent/guardrails.py`: input pipeline (PII regex+keyword redaction → deterministic jailbreak patterns → mini scope classifier) and output pipeline (Moderation tone + deterministic promise/grounding). PII is scrubbed BEFORE anything is stored or embedded.
+- `agent/guardrails.py`: input pipeline (redaction of a DEFINED sensitive-pattern set — card/SSN/email/DOB/phone + keywords, NOT names/addresses — → deterministic jailbreak patterns → mini scope classifier) and output pipeline (Moderation tone + the deterministic response-contract validation). That pattern set is scrubbed before anything is stored or embedded; broader PII (names/addresses) is out of scope for the POC redactor.
 - Wired into `runtime.py`: every user turn screened (scope classified at entry; PII+jailbreak every turn); every agent reply screened; `guardrail_events` written per conversation; a tone block escalates.
 - Action guardrail: `deny_refund` added; consequential tools route to human (`human_review` event).
 - Acceptance: 100% catch rate on the 11-probe red-team; over-limit discount capped to the 20% ceiling; refund routed to a human. 13 new unit tests (redaction, jailbreak patterns, promise/grounding) — 23 total.
@@ -49,7 +49,7 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 
 - `dashboard/export.py`: computes every dashboard view from the DB (KPIs incl. margin-adjusted save rate, before/after trend, clustered drivers, offer effectiveness, safety) → writes `dashboard/data.js` (`window.KEEL_DATA`). The dashboard loads it via `<script src>` (works on file://) and falls back to a mock if absent.
 - `dashboard/index.html`: rewritten data-driven — same design language, now rendering real demo output.
-- `run_demo.py`: the full flywheel on one identical seeded cohort — BASELINE (discounts disabled) → grade + cluster → a **structured intervention signal** (`themes.recommend_intervention`) selects the highest-loss segment *for which a lever exists* and surfaces any higher-loss segment it can't address → ACT (enable discounts + lead-with-discount playbook for the selected segment) → RE-MEASURE. The lift is measured on the **treated segment** where the act applies. Representative run: 38%→50% (+12pp this run); overall −6pp (noisy context that mixes untreated customers and can move negative). The treated segment is small (n≈8) and conversations are LLM-driven, so the baseline draw and lift magnitude vary run to run (~+10 to +40pp observed; after-state ~50–75%). Re-seeds between batches so cooldown state doesn't carry over; requires a matched paired cohort, a lever-compatible signal, and a strictly-positive treated-segment lift; writes `dashboard/manifest.json` plus a dated copy in `dashboard/manifests/` (cohort IDs, selected signal id + segment ranking, prompt/policy hashes, model IDs, eval coverage, lift).
+- `run_demo.py`: the full flywheel on one identical seeded cohort — BASELINE (discounts disabled) → grade + cluster → a **structured intervention signal** (`themes.recommend_intervention`) selects the highest-loss segment *for which a lever exists* and surfaces any higher-loss segment it can't address → ACT (enable discounts + lead-with-discount playbook for the selected segment) → RE-MEASURE. The lift is measured on the **treated segment** where the act applies, over an **n=20** treated cohort (at n=8 a single customer swung it 12.5pp, so a one-run lift was noise). Single committed run: 15%→50% (+35pp), margin-adjusted 12%→41%, overall +17pp context, eval pass 100%. Conversations are LLM-driven so numbers vary run to run — only the committed run is claimed. The signal is persisted after the pre-Act re-seed and **loaded back by id** (durable Learn→Act lineage). Re-seeds between batches so cooldown state doesn't carry over; requires a matched paired cohort, a lever-compatible signal, and a strictly-positive treated-segment lift; writes `dashboard/manifest.json` plus a dated copy in `dashboard/manifests/` (cohort IDs, signal id + segment ranking, prompt/policy hashes, model IDs, eval coverage, lift).
 - Definition of done met: `python run_demo.py` runs generate → converse → grade → analyze → act → re-measure → export, and the dashboard shows the lift.
 
 ## Keel Console — interactive web app (post-Phase-5)
@@ -210,6 +210,33 @@ third review noted. They still legitimately differ in customer (simulator vs
 human), termination (simulator decision vs operator resolution), and the
 session-creation safety gate — the accurate phrase remains "one shared enforced
 turn core with separate channel, termination, and safety orchestration."
+
+## Fourth independent review — closing the validator bypasses
+
+The fourth review (Codex, AMBER on `1896868`) ran **executable probes** against the
+response-contract validator and found it accepted several invalid contracts — the
+differentiator was weaker than claimed. Each probe is now a regression test.
+
+| # | Finding | Status | Mechanism · test |
+|---|---|---|---|
+| H1 | Contract self-attested; prose not bound to the ledger, `account_claims` unused, money laundered by substring, non-positive terms accepted | **fixed** | Every discount %/pause length in `display_text` is extracted (digits, "percent", spelled incl. hyphenated, fractions) and reconciled ≤ the committed terms; `account_claims` validated against the actual tool that ran + its values; money grounding matches only tool DOLLAR fields (price/credit/…) or a derived price, not any substring; `terms_within` rejects non-positive · `test_prose_offer_must_match_commitment`, `test_money_not_laundered_by_unrelated_number`, `test_account_claim_must_cite_a_real_tool_and_value`, `test_non_positive_committed_terms_rejected` |
+| H2 | Hand-off bypassed output safety; escalation wasn't terminal | **fixed** | `_handoff_message` is screened (`_handoff_safe`: no offer, no invented fact) with a fixed fallback; escalation is a terminal state — `live_turn` and `/api/chat/turn` refuse further agent turns · `test_handoff_message_is_output_screened`, `test_escalation_is_terminal_no_more_agent_turns`, `test_escalated_session_rejects_further_turns` |
+| M3 | Ledger never recorded rejection; fallback used ambiguous `active()` | **fixed** | `offers.mark_rejected` on sim-reject + live-lost; `offer_summary` still reflects an extended-then-rejected offer (cooldown/analytics); the ceiling fallback targets the failed commitment's kind · `test_rejection_transitions_presented_to_rejected` |
+| M7 | Moderation outage logged "degraded" but still delivered | **fixed** | A degraded moderation result now fails the screen, so the reply falls through to deterministic safe text (ceiling template or hand-off), never tone-unverified model prose · `test_moderation_outage_does_not_deliver_model_prose` |
+| M6 | Signal deleted before Act; range claim unbacked | **fixed** | The signal is persisted AFTER the pre-Act re-seed and Act loads it by id (durable Learn→Act lineage); docs report only the single committed run, not a range |
+| M1 | "jailbreak blocked before the model" overstated | **fixed (docs)** | Reworded to "100% on the 11 seeded probes; paraphrases can evade regex — the deterministic policy layer is the backstop" |
+| M2 | "PII scrubbed before anything logged/embedded" overstated | **fixed (docs)** | Reworded to "a defined sensitive-pattern set (card/SSN/email/DOB/phone + keywords), not names/addresses" |
+| L2 | Stale counts / labels | **fixed (docs)** | 79 tests; single-run demo figure; run_demo header notes two variables; "known-bad conversation" not "broken agent" |
+
+**Still open / larger (honestly scoped, not claimed done):** full *server-authoritative*
+factual rendering (the model returning only offer/fact IDs with the server writing
+all factual sentences) — the extract-and-reconcile approach above closes the
+reported probes but a novel prose expression of a quantity the extractor doesn't
+recognize remains a residual risk, mitigated by the deterministic policy layer that
+still caps real tool actions; a durable/idempotent resolution outbox (M5); a
+versioned eval-spec hashed over rubric+schema+model with live/batch parity (M4); and
+a replayable `run_id` experiment model preserving baseline→signal→act→after under one
+immutable lineage (M6 full). These are the remaining architectural steps to GREEN.
 
 ## Notes
 

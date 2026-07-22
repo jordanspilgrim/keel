@@ -117,7 +117,7 @@
   <h2>Safe &amp; compliant by design</h2>
   <p>The same observability spine that makes Keel measurable also makes it safe. Guardrails sit around the agent as enforced layers it can’t talk its way past, and the EU compliance pieces are built in, not bolted on:</p>
   <div class="callout">
-    <b>Told it’s an AI</b> (EU AI Act Art. 50) · <b>a human confirms consequential actions</b> (GDPR Art. 22) · <b>PII scrubbed before anything is logged or embedded</b> · <b>a fairness slice</b> in every grade · <b>a full audit trail</b>. On the seeded red-team, the guardrails caught <b>100%</b> of jailbreak, off-scope, and PII attempts.
+    <b>Told it’s an AI</b> (EU AI Act Art. 50) · <b>a human confirms consequential actions</b> (GDPR Art. 22) · <b>a defined sensitive-pattern set redacted before logging/embedding</b> (card / SSN / email / DOB / phone — not names/addresses) · <b>a fairness slice</b> in every grade · <b>a full audit trail</b>. On the 11 seeded red-team probes the guardrails caught <b>100%</b> (4 jailbreak + 4 off-scope + 3 PII); this is that corpus, not a universal-prevention claim.
   </div>
 
   <h2>What’s built today</h2>
@@ -132,7 +132,7 @@
     <tr><td class="s">5</td><td>Close the loop — act on a signal, show the lift</td><td class="s done">✓ done</td></tr>
   </table>
 
-  <div class="callout"><b>The flywheel, turning (representative run):</b> a structured intervention signal ranked churn segments by loss impact and <b>selected</b> the price-sensitive segment (under-saved under the conservative no-discount policy). Enabling discounts — the recommended act — moved that <b>treated segment’s</b> save rate <b>38% → 50% (+12pp this run)</b> and margin-adjusted <b>30% → 40%</b>, with a strict trace-aware eval, guardrail catch rate 100%, and 100% compliance. Conversations are LLM-driven and the segment is small (n≈8), so the lift is positive but run-variable (~+10 to +40pp; after-state ~50–75%); the <b>overall</b> figure is noisier context that can even move negative on a given draw. The run requires a paired cohort, a lever-compatible signal, and a strictly-positive treated-segment lift, and records full provenance (dated copies in <code>dashboard/manifests/</code>). Run it yourself with <code>python run_demo.py</code>.</div>
+  <div class="callout"><b>The flywheel, turning (single committed run):</b> a structured intervention signal ranked churn segments by loss impact and <b>selected</b> the price-sensitive segment (under-saved under the conservative no-discount policy). Enabling discounts — the recommended act, its signal persisted and loaded back by id — moved that <b>treated segment’s</b> save rate <b>15% → 50% (+35pp)</b> and margin-adjusted <b>12% → 41%</b>, overall <b>+17pp</b> as context, with a strict trace-aware eval (100% on this run), guardrail catch 100%, and 100% AI-disclosure coverage. The treated cohort is n=20 (a stable estimate — at n=8 one customer swings the segment 12.5pp); conversations are LLM-driven so numbers vary run to run, and only this committed run (manifest retained in <code>dashboard/manifests/</code>) is claimed. The run requires a paired cohort, a lever-compatible signal, and a strictly-positive treated-segment lift. Run it yourself with <code>python run_demo.py</code>.</div>
 
   <h2>Keep reading</h2>
   <p><a href="how-it-works.html">How it works →</a> the architecture, the agent loop, and the guardrail design in detail.<br>

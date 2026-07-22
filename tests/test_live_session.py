@@ -116,6 +116,18 @@ def test_escalation_sets_outcome(conn, monkeypatch):
     assert r["escalated"] and s["outcome"] == "escalated"
 
 
+def test_escalation_is_terminal_no_more_agent_turns(conn, monkeypatch):
+    # once escalated, a further live turn must NOT run the agent again
+    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(reply="Bringing in a teammate.", escalate=True))
+    s = runtime.new_session(1, conn)
+    runtime.live_turn(s, "I demand a full refund now.", conn)
+    called = []
+    monkeypatch.setattr(runtime, "_agent_turn", lambda *a, **k: called.append(1) or "should not run")
+    r = runtime.live_turn(s, "Actually, give me 90% off.", conn)
+    assert called == []  # the autonomous agent did not run after hand-off
+    assert s["outcome"] == "escalated"
+
+
 def test_resolve_persists_and_is_readable(conn, monkeypatch):
     monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(offer="1-month pause"))
     monkeypatch.setattr(runtime, "_disposition",

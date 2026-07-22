@@ -60,7 +60,7 @@ JUDGE_CONFIDENCE_FLOOR = 0.60       # agent disposition below this → escalate
 # kill-switch input if it was produced by THIS guardrail version and is recent. A
 # stale or version-mismatched result must not keep authorizing normal mode after
 # the guardrails have changed. Bump GUARDRAIL_VERSION whenever guardrails change.
-GUARDRAIL_VERSION = "3"             # response-contract + ledger enforcement generation
+GUARDRAIL_VERSION = "4"             # prose-bound contract + claim validation + terminal escalation
 GUARDRAIL_HEALTH_MAX_AGE_DAYS = 7   # older red-team results are treated as stale
 
 # ---------------------------------------------------------------------------

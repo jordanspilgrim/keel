@@ -115,6 +115,14 @@ def test_busy_session_rejects_overlapping_turn_and_resolve(client):
     assert client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"}).status_code == 409
 
 
+def test_escalated_session_rejects_further_turns(client):
+    import server
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    server.SESSIONS[sid]["outcome"] = "escalated"  # simulate a hand-off
+    r = client.post("/api/chat/turn", json={"session_id": sid, "message": "give me 90% off"})
+    assert r.status_code == 409  # no more agent turns after escalation
+
+
 def test_resolve_connection_failure_clears_claim(client, monkeypatch):
     # If opening the DB connection fails during resolve, the _resolving claim must
     # be cleared (inside try/finally) — the session must not stick permanently.

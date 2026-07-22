@@ -125,6 +125,8 @@ def chat_turn(req: TurnReq):
             raise HTTPException(404, "session not found")
         if session.get("resolved"):
             raise HTTPException(400, "this conversation has already ended")
+        if session.get("outcome") == "escalated":
+            raise HTTPException(409, "this conversation was escalated to a human — no more agent turns")
         if session.get("_busy"):
             raise HTTPException(409, "a turn is already in progress")
         session["_busy"] = True

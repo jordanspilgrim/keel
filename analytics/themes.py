@@ -195,6 +195,13 @@ def persist_signal(conn, signal: dict) -> int:
     return cur.lastrowid
 
 
+def load_signal(conn, signal_id: int) -> dict | None:
+    """Load a persisted intervention signal by id — Act consumes the signal THROUGH
+    the datastore (durable Learn→Act lineage), not an in-memory object."""
+    row = conn.execute("SELECT recommendation FROM signals WHERE id=?", (signal_id,)).fetchone()
+    return json.loads(row["recommendation"]) if row else None
+
+
 def rank_signals(cards: list[dict]) -> list[dict]:
     """Rank themes by volume × loss impact (unsaved conversations)."""
     signals = []

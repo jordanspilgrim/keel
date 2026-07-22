@@ -222,23 +222,41 @@ _HANDOFF_FALLBACK = ("Understood — I'm bringing in a teammate who can help wit
                      "They'll have our full conversation, so you won't need to repeat anything.")
 
 
-def _handoff_message(input_list: list, system: str) -> str:
-    """A warm, contextual closing message when the agent must escalate — the
-    model writes it in its own words (no tools), with a safe fallback so a failed
-    call never leaves the customer with a dead end."""
+def _handoff_safe(text: str, rec: dict) -> bool:
+    """A hand-off must make NO offer and invent NO account fact — it just routes to
+    a human. Screen the drafted text with the SAME deterministic checks the output
+    contract uses, so the escalation path isn't weaker than an ordinary reply."""
+    if not text:
+        return False
+    if guardrails.extract_discount_pcts(text) or guardrails.extract_pause_months(text):
+        return False  # a hand-off must not float an offer
+    if guardrails.check_completion_claim(text):
+        return False
+    ok, _ = _money_grounded(text, rec, None)
+    return ok
+
+
+def _handoff_message(input_list: list, system: str, rec: dict | None = None) -> str:
+    """A warm, contextual closing message when the agent must escalate. The model
+    writes it, but it is SCREENED with the same deterministic output checks as a
+    normal reply (no offer, no invented account fact); anything that fails those
+    checks falls back to a fixed safe message — the hand-off path is not a weaker
+    output channel than an ordinary turn."""
+    rec = rec if rec is not None else _new_rec()
     try:
         resp = llm.client().responses.create(
             model=config.FLAGSHIP_MODEL,
             instructions=system + (
                 "\n\nThis request needs a human teammate. Write ONLY a brief, warm closing message "
-                "(1-2 sentences) to the customer: acknowledge their specific request by name, say a "
-                "teammate will take it from here and already has the full conversation, and reassure "
-                "them. Do not offer anything new; do not call tools."),
+                "(1-2 sentences) to the customer: acknowledge their specific request, say a teammate "
+                "will take it from here and already has the full conversation, and reassure them. "
+                "Make NO offer and state NO specific account numbers/prices; do not call tools."),
             input=input_list,
             reasoning={"effort": "low"},
             max_output_tokens=400,
         )
-        return (resp.output_text or "").strip() or _HANDOFF_FALLBACK
+        text = (resp.output_text or "").strip()
+        return text if _handoff_safe(text, rec) else _HANDOFF_FALLBACK
     except Exception:
         return _HANDOFF_FALLBACK
 
@@ -341,25 +359,59 @@ def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
                            f"{match.authorized_terms}")
         committed_terms = terms
 
-    # 2) Supplemental regex cross-check: display_text must not OVERSTATE the
-    #    structured commitment (novel phrasings, spelled numbers, completion claims).
-    #    We reconcile the prose against the COMMITTED terms, not the ceiling.
-    authorized = {"discount_pct": None, "pause_months": None}
-    if committed_terms and commitments[0]["kind"] == "discount":
-        authorized["discount_pct"] = float(committed_terms["pct"])
-    if committed_terms and commitments[0]["kind"] == "pause":
-        authorized["pause_months"] = int(committed_terms["months"])
-    promise = guardrails.check_promise(text, authorized=authorized)
-    if promise["flagged"]:
-        return False, f"display_text overstates the offer: {promise['reason']}"
+    # 2) Bind the PROSE to the committed offer: extract EVERY discount % and pause
+    #    length the display_text expresses (digits, 'percent', spelled, fractions)
+    #    and require each to not exceed the committed terms — so the customer can't
+    #    read a bigger offer than the ledger records. A prose offer with NO matching
+    #    commitment is an unauthorized promise.
+    committed_pct = committed_terms.get("pct") if committed_terms and commitments[0]["kind"] == "discount" else None
+    committed_months = committed_terms.get("months") if committed_terms and commitments[0]["kind"] == "pause" else None
+    for p in guardrails.extract_discount_pcts(text):
+        if committed_pct is None:
+            return False, f"display_text promises a {p:.0f}% discount not in any structured commitment"
+        if p > float(committed_pct) + 0.5:
+            return False, f"display_text promises {p:.0f}% but the commitment is {float(committed_pct):.0f}%"
+    for mo in guardrails.extract_pause_months(text):
+        if committed_months is None:
+            return False, f"display_text promises a {mo}-month pause not in any structured commitment"
+        if mo > int(committed_months):
+            return False, f"display_text promises {mo} months but the commitment is {int(committed_months)}"
+    # completion claims ("already applied") remain caught by the promise check
+    if guardrails.check_completion_claim(text):
+        return False, "display_text claims an action is already applied (tools only propose)"
 
-    # 3) Grounding: every dollar figure in display_text must be traceable to a tool
-    #    fact — either quoted directly or derived from a tool-provided price by the
-    #    committed discount. This closes the "invent a $2,300 credit after a tool
-    #    returned an unrelated seat count" bypass (the amount is in no tool fact).
+    # 3) Validate every declared account_claim against the ACTUAL tool facts: the
+    #    cited tool must have run, and the claimed value must appear in that tool's
+    #    result. An unsourced or invented claim is rejected.
+    ok, reason = _claims_grounded(contract.get("account_claims", []), rec)
+    if not ok:
+        return False, reason
+
+    # 4) Grounding: every dollar figure in display_text must be a tool-provided PRICE
+    #    or a price derived by the committed discount — not merely a substring of some
+    #    unrelated tool number (closes the "$12 credit laundered by seats=12" bypass).
     ok, reason = _money_grounded(text, rec, committed_terms)
     if not ok:
         return False, reason
+    return True, ""
+
+
+def _claims_grounded(claims: list, rec: dict) -> tuple[bool, str]:
+    """Each declared account_claim must cite a tool that actually ran, and its value
+    must appear in that tool's result. Rejects fabricated tools and invented values."""
+    facts_by_tool: dict[str, list[str]] = {}
+    for f in rec["tool_facts"]:
+        facts_by_tool.setdefault(f.get("tool"), []).append(json.dumps(f.get("result")).lower())
+    for claim in claims or []:
+        tool = claim.get("source_tool")
+        value = str(claim.get("value", "")).lower()
+        if tool not in facts_by_tool:
+            return False, f"account_claim cites tool '{tool}' that did not run"
+        corpus = " ".join(facts_by_tool[tool])
+        # every numeric token in the claimed value must appear in that tool's result
+        nums = re.findall(r"\d[\d,]*", value)
+        if any(n.replace(",", "") not in corpus.replace(",", "") for n in nums):
+            return False, f"account_claim '{claim.get('value')}' is not supported by {tool}"
     return True, ""
 
 
@@ -367,28 +419,29 @@ _MONEY_IN_TEXT = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)")
 
 
 def _money_grounded(text: str, rec: dict, committed: dict | None) -> tuple[bool, str]:
-    """Every $ amount stated must appear in a tool fact, or be the tool-provided
-    price discounted by the committed offer. Otherwise it is an invented figure."""
+    """Every $ amount stated must equal a tool-provided PRICE, or that price
+    discounted by the committed offer. It must NOT merely be a substring of some
+    unrelated tool number (a seat count, an id) — that laundering is the bug the
+    reviewer found ("$12 credit" grounded only because seats==12)."""
     amounts = _MONEY_IN_TEXT.findall(text)
     if not amounts:
         return True, ""
     corpus = " ".join(json.dumps(f["result"]) for f in rec["tool_facts"])
-    corpus_digits = corpus.replace(",", "")
-    prices = [float(p) for p in re.findall(r'"price":\s*([\d.]+)', corpus)]
+    # Only DOLLAR-typed tool fields (price / amount / balance / credit) are valid
+    # sources for a $ figure — not arbitrary integers like seat counts or ids.
+    dollar_vals = [float(v) for v in re.findall(
+        r'"(?:price|amount|balance|credit|total|fee)":\s*([\d.]+)', corpus)]
     allowed: set[str] = set()
-    for p in prices:
+    for p in dollar_vals:
         allowed |= {f"{p:.2f}", f"{p:.0f}"}
         if committed and committed.get("pct") is not None:
             d = p * (1 - float(committed["pct"]) / 100)
             allowed |= {f"{d:.2f}", f"{d:.0f}"}
     for a in amounts:
         norm = a.replace(",", "")
-        whole = norm.split(".")[0]
-        if whole and whole in corpus_digits:
+        if norm in allowed or f"{float(norm):.0f}" in allowed or f"{float(norm):.2f}" in allowed:
             continue
-        if norm in allowed or f"{float(norm):.0f}" in allowed:
-            continue
-        return False, f"cites ${a}, which no tool fact supports (invented account figure)"
+        return False, f"cites ${a}, which no tool price supports (invented account figure)"
     return True, ""
 
 
@@ -415,13 +468,18 @@ def _screen_contract(input_list: list, system: str, rec: dict, corrective: str) 
     except Exception as e:
         return False, f"contract generation failed: {type(e).__name__}", None
     ok, reason = _validate_contract(contract, rec)
-    tone = guardrails.check_tone(contract.get("display_text", ""))
-    if tone.get("degraded"):
-        rec["guardrail"].append(("tone", "degraded", "moderation unavailable — bounded"))
     if not ok:
         return False, reason, contract
+    tone = guardrails.check_tone(contract.get("display_text", ""))
     if tone["flagged"]:
         return False, "tone flagged by moderation", contract
+    if tone.get("degraded"):
+        # BOUND the degraded state (not merely log it): when moderation is
+        # unavailable we cannot verify the tone of this model prose, so we refuse to
+        # deliver it and fall through to the deterministic safe fallback (our own
+        # ceiling template or a human hand-off), which needs no tone check.
+        rec["guardrail"].append(("tone", "degraded", "moderation unavailable — output not delivered"))
+        return False, "moderation unavailable — cannot verify output tone", contract
     return True, "", contract
 
 
@@ -430,12 +488,22 @@ _CEILING_TEMPLATE = ("I hear you, and I want to be straight with you: the most I
                      "understand. Would you like to go ahead with it?")
 
 
-def _ceiling_fallback(rec: dict) -> str | None:
+def _intended_kind(contract: dict | None) -> str | None:
+    """The offer kind the failed contract was trying to present (so the fallback
+    targets THAT offer, not an ambiguous 'latest live' one)."""
+    for c in (contract or {}).get("commitments", []) or []:
+        if c.get("kind"):
+            return c["kind"]
+    return None
+
+
+def _ceiling_fallback(rec: dict, kind: str | None) -> str | None:
     """Deterministic safe fallback when the model keeps trying to OVER-promise: if
-    there is an authorized offer, present it at exactly the authorized ceiling (what
-    policy actually allows) rather than escalating. Only an output failure with NO
-    offer to fall back to (e.g. a hallucinated fact) should reach a human hand-off."""
-    off = offers.active(rec["offers"])
+    there is an authorized offer of the kind the contract was presenting, present it
+    at exactly the authorized ceiling (what policy actually allows) rather than
+    escalating. Only an output failure with NO offer to fall back to (e.g. a
+    hallucinated fact) should reach a human hand-off."""
+    off = offers.offer_of_kind(rec["offers"], kind) if kind else offers.active(rec["offers"])
     if off is None:
         return None
     offers.present(rec["offers"], off, off.authorized_terms)
@@ -461,8 +529,9 @@ def _finalize_output(rec: dict, input_list: list, system: str, on_step) -> str:
         _apply_contract(contract2, rec)
         _emit(on_step, "output", "Response contract validated after one regeneration")
         return contract2["display_text"]
-    # Still invalid — prefer holding firm at the authorized ceiling over a hand-off.
-    fallback = _ceiling_fallback(rec)
+    # Still invalid — prefer holding firm at the authorized ceiling over a hand-off,
+    # targeting the specific offer kind the contract was trying to present.
+    fallback = _ceiling_fallback(rec, _intended_kind(contract2) or _intended_kind(contract))
     if fallback is not None:
         rec["guardrail"].append(("output", "capped_to_ceiling", reason2))
         _emit(on_step, "output", "Held firm at the authorized ceiling (no over-promise delivered)")
@@ -504,7 +573,7 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
         # An escalation resolves the turn — don't keep spinning tool hops.
         if rec["escalated"]:
             _emit(on_step, "output", "Preparing a hand-off to a human teammate")
-            msg = _handoff_message(input_list, system)
+            msg = _handoff_message(input_list, system, rec)
             input_list.append({"role": "assistant", "content": msg})
             return msg
     # MAX_HOPS exhausted without a final reply — treat it as a real escalation
@@ -513,7 +582,7 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
     rec["escalate_reason"] = "tool-resolution hop limit reached without a final reply"
     rec["guardrail"].append(("max_hops", "routed", f"exceeded {MAX_HOPS} tool hops; handing off"))
     _emit(on_step, "output", "Hop limit reached — handing off to a human teammate")
-    msg = _handoff_message(input_list, system)
+    msg = _handoff_message(input_list, system, rec)
     input_list.append({"role": "assistant", "content": msg})
     return msg
 
@@ -607,7 +676,8 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
                 # Acceptance is bound to the specific presented offer in the ledger.
                 accepted = offers.mark_accepted(rec["offers"])
                 outcome, offer_accepted = ("saved", True) if accepted else ("lost", False)
-            else:
+            else:  # rejected — transition the presented offer to 'rejected'
+                offers.mark_rejected(rec["offers"])
                 outcome = "lost"
             break
         pending = cust["reply"]  # screened by _advance on the next iteration
@@ -693,11 +763,23 @@ def _turn_result(session: dict, reply: str, new_events: list) -> dict:
             "guardrail_events": list(rec["guardrail"])}
 
 
+_ESCALATED_REPLY = ("You're already connected with a human teammate on this — they have the full "
+                    "conversation and will follow up. I'll leave it in their hands.")
+
+
 def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
     """Advance one live turn using the SAME shared core (_advance) as the batch
     runner: a jailbreak is blocked before the model, off-scope is bounded,
     otherwise the agent runs; a needs-human or output violation escalates."""
     rec = session["rec"]
+    # Escalation is a TERMINAL state: once the conversation has been handed to a
+    # human, the autonomous agent does not run again on this session (mirrors the
+    # batch path, which stops on escalation). No more model turns after hand-off.
+    if session.get("outcome") == "escalated" or rec.get("escalated"):
+        session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
+        session["transcript"].append({"role": "assistant", "content": _ESCALATED_REPLY})
+        _emit(on_step, "guardrail", "Session already escalated — not running the agent", gtype="escalated")
+        return _turn_result(session, _ESCALATED_REPLY, [])
     # Kill switch: if the program is in safe mode, disclose + route to a human
     # instead of running the agent autonomously.
     if session.get("safe_mode"):
@@ -736,6 +818,8 @@ def resolve_session(session: dict, outcome: str, conn) -> dict:
         # acceptance to it, so outcome/economics use the exact presented terms.
         if offers.mark_accepted(rec["offers"]) is None:
             raise ValueError("cannot mark 'saved' without a presented retention offer")
+    elif outcome == "lost":  # a presented-but-declined offer transitions to 'rejected'
+        offers.mark_rejected(rec["offers"])
     offer_accepted = outcome == "saved"
     scenario = {"id": None, "customer_id": session["customer_id"], "churn_reason": "live session"}
     disp = _disposition(session["transcript"], scenario, rec, outcome, offer_accepted)

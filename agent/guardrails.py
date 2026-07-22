@@ -139,18 +139,93 @@ _PAUSE_RX = re.compile(
     rf"pause (?:your (?:plan|subscription) )?(?:for |of )?(?:a |an )?(\d+|{_SPELLED_NUM})[\s-]*month",
     re.IGNORECASE)
 # The action tools only PROPOSE an offer — they do not mutate a backend. So a reply
-# claiming an action is already applied, OR that it "will" be applied / "is active",
-# is an unsupported completion claim (the agent extends offers, it doesn't fulfil them).
+# claiming an offer is ALREADY applied / active / set up is an unsupported completion
+# claim. We flag past/perfect/active-STATE language ("I've applied", "is now active"),
+# NOT future commitments ("I'll set up a pause") or processing a requested
+# cancellation ("I'll process your cancellation") — those are legitimate.
 _COMPLETION_RX = re.compile(
-    r"\b(i(?:'ve| have| will| am going to|'ll) (?:apply|applied|activat\w+|set up|process\w*|"
-    r"cancell?\w*|paus\w+|stop\w*)|"
-    r"(?:has|have|is|are) (?:been )?(?:applied|activated|active|cancell?ed|processed|paused|set up)|"
-    r"your (?:discount|pause|plan|cancellation) (?:is|has been|will be) (?:now )?"
-    r"(?:applied|active|processed|complete|started|done|set up)|"
-    r"cancellation (?:is|has been|will be) (?:processed|complete|started|done))\b", re.IGNORECASE)
+    r"\b(i(?:'ve| have) (?:applied|activated|set up|processed|paused)(?: your| the| a)?\s"
+    r"(?:discount|pause|offer|credit|plan)?|"
+    r"(?:your |the )?(?:discount|pause|offer|credit) (?:has been|is|is now|are) "
+    r"(?:applied|activated|active|processed|set up)|"
+    r"(?:has|have) been (?:applied|activated|processed|set up))\b", re.IGNORECASE)
 _MONTHS_WORD = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                 "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
 _MONEY_RX = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?")
+
+# --- robust extraction of the QUANTITIES a reply commits to ----------------
+# The response contract's display_text must not express a bigger discount / longer
+# pause than the structured commitment. Because prose can say a number many ways
+# ("15%", "15 percent", "twenty-five percent", "a quarter off"), we extract EVERY
+# discount percentage and pause length from the prose and reconcile each against
+# the committed terms — rather than trying to recognize one canonical phrasing.
+_ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+         "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+         "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+         "nineteen": 19}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+         "seventy": 70, "eighty": 80, "ninety": 90}
+_FRACTION_PCT = {"a third": 33, "one third": 33, "a quarter": 25, "one quarter": 25,
+                 "a half": 50, "one half": 50, "half": 50, "three quarters": 75,
+                 "two thirds": 66}
+_SPELLED_WORD_RX = re.compile(r"\b((?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)"
+                              r"(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|"
+                              r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+                              r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+                              r"one hundred|hundred)\b", re.IGNORECASE)
+
+
+def _word_to_num(phrase: str) -> int | None:
+    """Convert a spelled cardinal 1-100 (incl. 'twenty-five') to an int, else None."""
+    p = phrase.lower().strip()
+    if p in ("hundred", "one hundred"):
+        return 100
+    if p in _ONES:
+        return _ONES[p]
+    parts = re.split(r"[\s-]+", p)
+    if len(parts) == 2 and parts[0] in _TENS and parts[1] in _ONES and _ONES[parts[1]] < 10:
+        return _TENS[parts[0]] + _ONES[parts[1]]
+    if p in _TENS:
+        return _TENS[p]
+    return None
+
+
+def extract_discount_pcts(text: str) -> list[float]:
+    """Every discount percentage the prose expresses (digits, 'percent', spelled,
+    or a fraction 'off') — used to reconcile prose against the committed offer."""
+    out: list[float] = []
+    for m in re.finditer(r"(\d{1,3})\s*(?:%|percent\b)", text, re.IGNORECASE):
+        out.append(float(m.group(1)))
+    # spelled '<number> percent'
+    for m in re.finditer(r"\b([a-z][a-z\s-]*?)\s+percent\b", text, re.IGNORECASE):
+        v = _word_to_num(m.group(1).split()[-1] if " " in m.group(1) else m.group(1))
+        # handle 'twenty-five percent' where the whole token is the number
+        v2 = _word_to_num(m.group(1).strip())
+        for cand in (v2, v):
+            if cand is not None:
+                out.append(float(cand))
+                break
+    # fraction 'off' / 'discount' (a quarter off, half off)
+    low = text.lower()
+    for phrase, val in _FRACTION_PCT.items():
+        if re.search(rf"\b{re.escape(phrase)}\b[^.]*\b(off|discount)\b", low) or \
+           re.search(rf"\b(off|discount)\b[^.]*\b{re.escape(phrase)}\b", low):
+            out.append(float(val))
+    return out
+
+
+def extract_pause_months(text: str) -> list[int]:
+    """Every pause length (in months) the prose expresses."""
+    out: list[int] = []
+    for m in re.finditer(r"(\d{1,3}|[a-z][a-z\s-]*?)[\s-]*month", text, re.IGNORECASE):
+        raw = m.group(1).strip()
+        if raw.isdigit():
+            out.append(int(raw))
+        else:
+            v = _word_to_num(raw.split()[-1]) if raw else None
+            if v is not None:
+                out.append(v)
+    return out
 
 
 def check_tone(reply: str) -> dict:
@@ -206,6 +281,12 @@ def check_promise(reply: str, *, authorized: dict | None = None) -> dict:
     if cm:
         return {"flagged": True, "reason": f"claims an action is already applied ({cm.group(0)!r}); tools only propose"}
     return {"flagged": False, "reason": ""}
+
+
+def check_completion_claim(reply: str) -> bool:
+    """True if the reply claims an offer/action is already applied/active — the
+    tools only PROPOSE, so a completion claim is unsupported."""
+    return bool(_COMPLETION_RX.search(reply))
 
 
 def check_grounding(reply: str, tool_results: list[str]) -> dict:
