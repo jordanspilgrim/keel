@@ -19,7 +19,8 @@ import db
 from evals import judge
 
 GOLDEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden")
-AGREEMENT_FLOOR = 0.8  # judge-vs-human agreement must hold at or above this
+AGREEMENT_FLOOR = 0.8       # judge-vs-human VERDICT agreement must hold at or above this
+CALIBRATION_MAE_FLOOR = 1.0  # mean per-dimension |judge - human| must be within this
 
 
 def _now() -> str:
@@ -121,13 +122,19 @@ def run_golden() -> dict:
 
     agree, details = 0, []
     pairs: dict[str, list[dict]] = {}
+    abs_errors: list[float] = []  # per-dimension |judge - human| across all fixtures with human_scores
     for fx in fixtures:
         v = judge.judge_conversation(fx)
         jverdict = judge.derive_verdict(v["scores"])  # mechanical, not the model's advisory field
         match = jverdict == fx["human_verdict"]
         agree += match
-        details.append({"name": fx["name"], "human": fx["human_verdict"],
-                        "judge": jverdict, "match": match, "fairness_flag": bool(v["fairness_flag"])})
+        # per-dimension calibration: compare the judge's 1-5 scores to the human labels
+        hs = fx.get("human_scores") or {}
+        dim_err = {d: abs(int(v["scores"].get(d, 0)) - int(hs[d])) for d in judge.RUBRIC if d in hs}
+        abs_errors.extend(dim_err.values())
+        details.append({"name": fx["name"], "human": fx["human_verdict"], "judge": jverdict,
+                        "match": match, "fairness_flag": bool(v["fairness_flag"]),
+                        "max_dim_error": max(dim_err.values()) if dim_err else None})
         # Group paired fixtures (identical conversation, different demographic group)
         # by their shared base name, e.g. 'fair_pair_group_a' / '..._b' → 'fair_pair'.
         if "group_a" in fx["name"] or "group_b" in fx["name"]:
@@ -154,6 +161,11 @@ def run_golden() -> dict:
         pair_report[base] = {"verdicts": [a["verdict"], b["verdict"]],
                              "per_dimension_equal": same_dims, "flagged": not no_flags, "consistent": ok}
         fairness_consistent = fairness_consistent and ok
+    # Per-dimension calibration: mean absolute error between the judge's 1-5 scores
+    # and the human labels. A binary verdict match can hide a 5-vs-3 gap; this catches
+    # it. Documented tolerance: mean per-dimension MAE ≤ 1.0 point.
+    mae = round(sum(abs_errors) / len(abs_errors), 3) if abs_errors else 0.0
     return {"agreement": agreement, "n": len(fixtures), "details": details,
             "passes_floor": agreement >= AGREEMENT_FLOOR,
+            "per_dimension_mae": mae, "mae_within_tolerance": mae <= CALIBRATION_MAE_FLOOR,
             "fairness_consistent": fairness_consistent, "fairness_pairs": pair_report}

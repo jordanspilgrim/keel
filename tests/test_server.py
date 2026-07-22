@@ -135,6 +135,28 @@ def test_resolve_connection_failure_clears_claim(client, monkeypatch):
     assert server.SESSIONS[sid].get("_resolving") is False  # claim released in finally, not stuck
 
 
+def test_two_threads_racing_resolve_only_one_wins(client):
+    # A REAL race (not a pre-set flag): fire two resolves at the same session
+    # concurrently; the atomic _resolving claim must let exactly one through.
+    import threading
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    results, barrier = [], threading.Barrier(2)
+
+    def go():
+        barrier.wait()  # line both threads up so they truly contend
+        results.append(client.post("/api/chat/resolve",
+                                   json={"session_id": sid, "outcome": "lost"}).status_code)
+
+    ts = [threading.Thread(target=go) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    # one 200 (resolved), one 409/400 (rejected) — never two successes
+    assert sorted(results)[0] == 200 and results.count(200) == 1
+    assert results.count(200) + sum(1 for r in results if r in (400, 409)) == 2
+
+
 def test_duplicate_resolve_claim_rejected(client):
     # A resolve in flight (the atomic _resolving claim) rejects a second resolve,
     # so two concurrent requests can't both run resolve_session.

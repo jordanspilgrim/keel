@@ -24,12 +24,20 @@ import config
 import llm
 
 # --- PII / sensitive-data redaction (runs before any log or embed) ---------
+_STREET = (r"\b\d{1,6}\s+(?:[A-Z][a-z]+\.?\s+){1,3}"
+           r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Terrace|Ter|Place|Pl)\b")
 _PII_PATTERNS = [
     (re.compile(r"\b\d(?:[ -]?\d){12,18}\b"), "[REDACTED_CARD]", "card"),
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN]", "ssn"),
     (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"), "[REDACTED_EMAIL]", "email"),
     (re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"), "[REDACTED_DOB]", "dob"),
     (re.compile(r"\b(?:\+?1[ -.]?)?\(?\d{3}\)?[ -.]?\d{3}[ -.]?\d{4}\b"), "[REDACTED_PHONE]", "phone"),
+    (re.compile(_STREET), "[REDACTED_ADDRESS]", "address"),
+    # Self-identified name ("my name is Jane Doe", "I'm John Smith") — heuristic, so it
+    # only fires on the explicit-introduction shape, not any capitalized words. The
+    # intro is kept; only the name is redacted.
+    (re.compile(r"\b(?i:(my name is|i am|i'm|this is))\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b"),
+     r"\1 [REDACTED_NAME]", "name"),
 ]
 _SENSITIVE_TERMS = re.compile(
     r"\b(health record|medical record|diagnosis|diagnosed|my condition|prescription|password|api key|routing number)\b",
@@ -55,9 +63,12 @@ def redact_pii(text: str) -> tuple[str, list[str]]:
 _JAILBREAK_PATTERNS = [
     r"ignore (?:all |your |the |previous |prior )*(?:instructions|rules|prompt|guidelines)",
     r"disregard (?:all |your |the |previous |prior )",
+    r"forget (?:everything|all|any|your|the|previous|earlier|prior|every )",
     r"developer mode|dev mode|no restrictions|without restrictions|unrestricted",
     r"pretend (?:the|that|you)|act as if|you are now",
-    r"^\s*system\s*:|new directive|override (?:the )?(?:policy|rules|system)",
+    r"^\s*system\s*:|new directive|override (?:the )?(?:policy|rules|system|limits?)",
+    r"replacement (?:policy|rules|instructions|directive)|obey the following|new (?:policy|rules?) (?:is|:)",
+    r"from now on,? (?:you|ignore|forget|grant|approve)|as (?:an? )?(?:admin|administrator|developer)",
     r"jailbreak|do anything now|\bDAN\b",
 ]
 _JAILBREAK_RX = re.compile("|".join(_JAILBREAK_PATTERNS), re.IGNORECASE)

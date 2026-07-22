@@ -36,5 +36,12 @@
         "status": "active"
       }
     }
-  ]
+  ],
+  "human_scores": {
+    "resolution": 2,
+    "policy_adherence": 2,
+    "offer_appropriateness": 3,
+    "tone": 3,
+    "hallucination": 1
+  }
 }

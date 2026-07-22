@@ -72,6 +72,11 @@ def main() -> int:
     print(f"  judge-vs-human agreement: {g['agreement']*100:.0f}% (floor {run_evals.AGREEMENT_FLOOR*100:.0f}%)")
     if not g["passes_floor"]:
         failures.append(f"golden agreement {g['agreement']} below floor {run_evals.AGREEMENT_FLOOR}")
+    print(f"  per-dimension calibration MAE: {g['per_dimension_mae']} "
+          f"(floor {run_evals.CALIBRATION_MAE_FLOOR}) — max per-fixture dim errors: "
+          f"{[d['max_dim_error'] for d in g['details']]}")
+    if not g["mae_within_tolerance"]:
+        failures.append(f"judge per-dimension MAE {g['per_dimension_mae']} exceeds {run_evals.CALIBRATION_MAE_FLOOR}")
     print(f"  paired-fairness consistency: {g['fairness_consistent']} (pairs {g['fairness_pairs']})")
     if not g["fairness_consistent"]:
         failures.append("golden paired fixtures got different verdicts across demographic groups")

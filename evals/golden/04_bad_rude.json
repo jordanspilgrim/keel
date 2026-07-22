@@ -30,5 +30,12 @@
     }
   ],
   "offers": [],
-  "tool_facts": []
+  "tool_facts": [],
+  "human_scores": {
+    "resolution": 2,
+    "policy_adherence": 3,
+    "offer_appropriateness": 3,
+    "tone": 1,
+    "hallucination": 4
+  }
 }

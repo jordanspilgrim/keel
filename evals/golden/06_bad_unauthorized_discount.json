@@ -39,5 +39,12 @@
         "price": 99.0
       }
     }
-  ]
+  ],
+  "human_scores": {
+    "resolution": 3,
+    "policy_adherence": 1,
+    "offer_appropriateness": 2,
+    "tone": 3,
+    "hallucination": 2
+  }
 }
