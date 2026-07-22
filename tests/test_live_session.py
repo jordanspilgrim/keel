@@ -168,6 +168,34 @@ def test_resolve_is_idempotent(conn, monkeypatch):
                                     "offer_accepted": True, "outcome": "saved", "confidence": 0.8})
     s = runtime.new_session(1, conn)
     runtime.live_turn(s, "Too expensive.", conn)
-    runtime.resolve_session(s, "saved", conn)
-    with pytest.raises(ValueError):  # a second resolve is rejected
-        runtime.resolve_session(s, "lost", conn)
+    r1 = runtime.resolve_session(s, "saved", conn)
+    # a second resolve returns the SAME persisted record (idempotent), not a new/duplicate one
+    r2 = runtime.resolve_session(s, "lost", conn)
+    assert r2 is r1 and r1["conversation_id"]
+    assert conn.execute("SELECT count(*) FROM conversations WHERE id=?",
+                        (r1["conversation_id"],)).fetchone()[0] == 1
+
+
+def test_resolve_rolls_back_on_persist_failure(conn, monkeypatch):
+    from agent import offers
+    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(offer="1-month pause"))
+    monkeypatch.setattr(runtime, "_disposition",
+                        lambda *a: {"intent": "cancel", "churn_reason": "x", "offer_made": "1-month pause",
+                                    "offer_accepted": True, "outcome": "saved", "confidence": 0.8})
+    calls = {"n": 0}
+    real_persist = runtime.persist_conversation
+
+    def flaky(c, rec):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("db down")
+        return real_persist(c, rec)
+    monkeypatch.setattr(runtime, "persist_conversation", flaky)
+    s = runtime.new_session(1, conn)
+    runtime.live_turn(s, "Too expensive.", conn)
+    with pytest.raises(RuntimeError):
+        runtime.resolve_session(s, "saved", conn)
+    # the offer transition was ROLLED BACK — it's presented again, so a retry works
+    assert offers.presented(s["rec"]["offers"]) is not None and not s.get("resolved")
+    r = runtime.resolve_session(s, "saved", conn)  # retry succeeds
+    assert r["conversation_id"]

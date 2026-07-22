@@ -185,12 +185,14 @@ def recommend_intervention(conn) -> dict:
     }
 
 
-def persist_signal(conn, signal: dict) -> int:
+def persist_signal(conn, signal: dict, run_id: str | None = None) -> int:
     """Persist the structured intervention signal (into `signals`) and return its
-    id, so Act consumes an approved signal ID and the manifest can record it."""
+    id, so Act consumes an approved signal ID and the manifest can record it. The
+    `run_id` ties the signal to its experiment run (Learn→Act→after lineage)."""
     cur = conn.execute(
-        "INSERT INTO signals (theme_id, recommendation, priority_score, created_at) VALUES (?,?,?,?)",
-        (None, db.dumps(signal), float(signal.get("evidence", {}).get("loss", 0.0)), _now()))
+        "INSERT INTO signals (theme_id, recommendation, priority_score, run_id, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (None, db.dumps(signal), float(signal.get("evidence", {}).get("loss", 0.0)), run_id, _now()))
     conn.commit()
     return cur.lastrowid
 

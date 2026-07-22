@@ -66,13 +66,14 @@ def grade_all(conn, *, max_workers: int = 8) -> dict:
         for cid, v, err in ex.map(work, convos):
             results[cid] = (v, err)
 
-    # Re-grade per conversation (replace only THAT conversation's prior eval), so
-    # there is never a global zero-coverage window and other conversations' grades
-    # survive. Rows are tagged with the rubric+model version for auditability.
-    ver = f"rubric:{'+'.join(judge.RUBRIC)}@{config.MINI_MODEL}"
+    # Re-grade per conversation (replace only THAT conversation's prior eval for the
+    # CURRENT spec version), so there is never a global zero-coverage window and
+    # grades from other spec versions survive as history. Rows are tagged with the
+    # content-hashed eval-spec version — identical for live and batch.
+    ver = judge.EVAL_SPEC_VERSION
     for cv in convos:
         v, err = results[cv["id"]]
-        conn.execute("DELETE FROM evals WHERE conversation_id=?", (cv["id"],))
+        conn.execute("DELETE FROM evals WHERE conversation_id=? AND rubric_version=?", (cv["id"], ver))
         if v:
             conn.execute(
                 "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, rubric_version, created_at) "

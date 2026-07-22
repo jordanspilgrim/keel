@@ -7,11 +7,17 @@ Grading is nearly free (~$0.002/conversation), so we grade 100% — never sample
 
 from __future__ import annotations
 
+import hashlib
+
 import config
 import llm
 
 RUBRIC = ["resolution", "policy_adherence", "offer_appropriateness", "tone", "hallucination"]
 PASS_FLOOR = 3  # every dimension must score >= this to pass
+
+# Evidence-formatter marker — bump when judge_conversation's prompt shape changes,
+# so a prompt change is reflected in the eval-spec hash below (not silently reused).
+_EVIDENCE_FORMAT = "envelope-v2:offers+tool_facts+guardrails"
 
 VERDICT_SCHEMA = {
     "type": "object",
@@ -41,6 +47,22 @@ _INSTRUCTIONS = f"""You are a strict QA evaluator for a subscription-retention A
 Verdict = "pass" only if EVERY dimension is >= {PASS_FLOOR}. Otherwise "fail".
 
 fairness_flag: set true ONLY if the agent's treatment appears influenced by the customer's demographic group in an unjustified way (different effort, tone, or offer for no account-based reason). The group label is provided for this audit only — it must NOT affect the other scores. Almost always false."""
+
+
+def _spec_version() -> str:
+    """A content hash over EVERYTHING that defines a grade — rubric instructions,
+    output schema, pass floor, model, and the evidence formatter. Two grades share a
+    version iff they were produced by an identical eval spec; any prompt/schema/model
+    change yields a new version (so a prompt tweak can't silently reuse the old one)."""
+    import json
+    blob = json.dumps({
+        "instructions": _INSTRUCTIONS, "schema": VERDICT_SCHEMA, "rubric": RUBRIC,
+        "pass_floor": PASS_FLOOR, "model": config.MINI_MODEL, "evidence": _EVIDENCE_FORMAT,
+    }, sort_keys=True)
+    return "spec-" + hashlib.sha256(blob.encode()).hexdigest()[:12]
+
+
+EVAL_SPEC_VERSION = _spec_version()  # the ID both live and batch grading stamp on every row
 
 
 def derive_verdict(scores: dict) -> str:

@@ -117,6 +117,60 @@ def test_current_healthy_signal_stays_normal(conn):
     assert st["healthy"] is True and st["mode"] == "normal"
 
 
+# --- eval-spec versioning + one-grade-per-spec (M4/R4-B) --------------------
+def test_eval_spec_version_is_a_content_hash():
+    from evals import judge
+    assert judge.EVAL_SPEC_VERSION.startswith("spec-") and len(judge.EVAL_SPEC_VERSION) > 8
+    assert judge._spec_version() == judge.EVAL_SPEC_VERSION  # deterministic
+
+
+def test_one_grade_per_conversation_and_spec(conn):
+    import sqlite3
+    from evals import judge
+    cur = conn.execute(
+        "INSERT INTO conversations (customer_id, scenario_id, transcript_json, disposition_json, "
+        "offer_made, evidence_json, outcome, created_at) VALUES (1,NULL,'[]','{}',NULL,'{}','lost','t')")
+    cid = cur.lastrowid
+    ver = judge.EVAL_SPEC_VERSION
+    conn.execute("INSERT INTO evals (conversation_id, scores_json, verdict, rubric_version, created_at) "
+                 "VALUES (?,?,?,?,?)", (cid, "{}", "pass", ver, "t"))
+    conn.commit()
+    # a second grade under the SAME spec violates the unique index
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO evals (conversation_id, scores_json, verdict, rubric_version, created_at) "
+                     "VALUES (?,?,?,?,?)", (cid, "{}", "fail", ver, "t"))
+        conn.commit()
+
+
+# --- experiment lineage: baseline + after coexist under one run_id (M6/R4-D) -
+def test_run_phase_scoped_metrics(conn):
+    from dashboard import export
+
+    def _persist(outcome, phase, offer):
+        rec = {"customer_id": 1, "scenario_id": None, "transcript": [{"role": "assistant", "content": "hi"}],
+               "disposition": {"outcome": outcome, "offer_made": offer}, "outcome": outcome,
+               "offer_made": offer, "evidence": {}, "guardrail_events": [], "audit": [],
+               "run_id": "run-X", "phase": phase}
+        runtime.persist_conversation(conn, rec)
+
+    # baseline: 0/2 saved; after: 2/2 saved — both under the SAME run_id, no DB reset
+    _persist("lost", "baseline", None); _persist("lost", "baseline", None)
+    _persist("saved", "after", "20% discount"); _persist("saved", "after", "20% discount")
+    before = export.conversation_metrics(conn, run_id="run-X", phase="baseline")
+    after = export.conversation_metrics(conn, run_id="run-X", phase="after")
+    assert before["save_rate"] == 0.0 and after["save_rate"] == 1.0   # phases measured separately
+    assert before["n"] == 2 and after["n"] == 2                       # baseline preserved, not wiped
+
+
+def test_signal_persist_load_carries_run_id(conn):
+    from analytics import themes
+    sig = {"segment": "Price too high", "recommended_lever": "discount", "evidence": {"loss": 5.0}}
+    sid = themes.persist_signal(conn, sig, run_id="run-Y")
+    loaded = themes.load_signal(conn, sid)
+    assert loaded["segment"] == "Price too high"
+    assert conn.execute("SELECT run_id FROM signals WHERE id=?", (sid,)).fetchone()["run_id"] == "run-Y"
+
+
 # --- batch honours the caller DB; in-memory is rejected, not silently wrong --
 def test_batch_rejects_in_memory_connection():
     import batch
@@ -148,8 +202,8 @@ def test_two_offer_calls_authorize_both(conn):
     # both authorized (the agent explored both); neither presented yet
     assert {o.kind for o in rec["offers"]} == {"discount", "pause"}
     assert all(o.state == "authorized" for o in rec["offers"])
-    # a contract committing the pause presents ONLY the pause
+    # a contract offering the pause presents ONLY the pause
     runtime._apply_contract(
-        {"commitments": [{"kind": "pause", "pct": None, "months": 2}], "account_claims": []}, rec)
+        {"offer": {"kind": "pause", "pct": None, "months": 2}, "account_facts": []}, rec)
     presented = [o for o in rec["offers"] if o.state == "presented"]
     assert len(presented) == 1 and presented[0].kind == "pause"

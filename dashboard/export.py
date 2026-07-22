@@ -23,11 +23,18 @@ from analytics import themes as themes_mod
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def conversation_metrics(conn) -> dict:
-    """Save rate and margin-adjusted save rate over the current conversations."""
+def conversation_metrics(conn, *, run_id: str | None = None, phase: str | None = None) -> dict:
+    """Save rate and margin-adjusted save rate. Optionally scoped to one experiment
+    run/phase (so a flywheel run measures baseline vs after without a DB reset)."""
+    where, params = [], []
+    if run_id is not None:
+        where.append("c.run_id = ?"); params.append(run_id)
+    if phase is not None:
+        where.append("c.phase = ?"); params.append(phase)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
     rows = conn.execute(
         "SELECT c.outcome, c.offer_made, s.price FROM conversations c "
-        "JOIN subscriptions s ON s.customer_id = c.customer_id"
+        "JOIN subscriptions s ON s.customer_id = c.customer_id" + clause, params
     ).fetchall()
     n = len(rows) or 1
     saved = sum(1 for r in rows if r["outcome"] == "saved")

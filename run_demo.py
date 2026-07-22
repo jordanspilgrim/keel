@@ -54,15 +54,21 @@ WORKERS = 10
 DISCOUNT_LEVER_REASON = "Price too high"
 
 
-def _segment_metrics(conn, reason: str) -> dict:
-    """Save rate + margin-adjusted save rate for the conversations in ONE churn
-    segment — the treated group, where an intervention's effect actually lands
-    (measuring it on the whole cohort dilutes it with untreated customers)."""
+def _segment_metrics(conn, reason: str, run_id: str | None = None, phase: str | None = None) -> dict:
+    """Save rate + margin-adjusted save rate for ONE churn segment (the treated
+    group) within a specific experiment run/phase — so baseline and after are
+    measured on their own conversations even though both live in the same DB."""
+    where = ["sc.churn_reason = ?"]
+    params: list = [reason]
+    if run_id is not None:
+        where.append("c.run_id = ?"); params.append(run_id)
+    if phase is not None:
+        where.append("c.phase = ?"); params.append(phase)
     rows = conn.execute(
         "SELECT c.outcome, c.offer_made, s.price FROM conversations c "
         "JOIN scenarios sc ON sc.id = c.scenario_id "
         "JOIN subscriptions s ON s.customer_id = c.customer_id "
-        "WHERE sc.churn_reason = ?", (reason,)).fetchall()
+        "WHERE " + " AND ".join(where), params).fetchall()
     n = len(rows) or 1
     saved = sum(1 for r in rows if r["outcome"] == "saved")
     madj = 0.0
@@ -112,19 +118,32 @@ def _redteam(conn) -> tuple[dict, float]:
     return counts, rate
 
 
+def _reset_cohort_cooldown(conn, cohort_ids: list[int]) -> None:
+    """Clear the save-offer cooldown for the cohort so the AFTER batch measures fresh
+    state — WITHOUT wiping the database. This preserves the baseline conversations,
+    the signal, and the after conversations as one immutable run lineage."""
+    marks = ",".join("?" for _ in cohort_ids)
+    conn.execute(f"UPDATE subscriptions SET last_save_offer_days = NULL WHERE customer_id IN ({marks})",
+                 cohort_ids)
+    conn.commit()
+
+
 def main() -> int:
     conn = db.connect()
-    print("① generate — seeded synthetic customers")
+    run_id = "run-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    print(f"① generate — seeded synthetic customers  (run {run_id})")
     synth.generate(conn)
     cohort = _cohort(conn)
     cohort_ids = sorted(s["id"] for s in cohort)
+    customer_ids = [s["customer_id"] for s in cohort]
     print(f"   cohort: {len(cohort)} customers ({COHORT_PRICE} price-sensitive + {COHORT_OTHER} other)\n")
 
     # ---- BEFORE: conservative policy, discounts disabled --------------------
     print("② BASELINE — discounts DISABLED (conservative launch policy)")
     policy.DISCOUNTS_ENABLED = False
-    recs_a = batch.run_batch(conn, cohort, system=runtime.SYSTEM, max_workers=WORKERS)
-    before = export.conversation_metrics(conn)
+    recs_a = batch.run_batch(conn, cohort, system=runtime.SYSTEM, max_workers=WORKERS,
+                             run_id=run_id, phase="baseline")
+    before = export.conversation_metrics(conn, run_id=run_id, phase="baseline")
 
     # ---- LEARN: cluster the VoC, then CONSUME a structured intervention signal --
     themes.run_analytics(conn)  # embed → cluster → theme cards → ranked signals (persisted)
@@ -142,28 +161,29 @@ def main() -> int:
         conn.close()
         return 1
     target = signal["segment"]
-    before_seg = _segment_metrics(conn, target)
+    before_seg = _segment_metrics(conn, target, run_id, "baseline")
+    # Persist the signal under this run_id and load it back by id, so Act consumes
+    # the signal THROUGH the datastore (durable Learn→Act lineage).
+    signal_id = themes.persist_signal(conn, signal, run_id=run_id)
+    signal = themes.load_signal(conn, signal_id)
+    target = signal["segment"]
 
     # ---- ACT: enable discounts + improved playbook (TWO variables) ----------
-    # Re-seed to an IDENTICAL fresh cohort (same seed) so cooldown state written
-    # during batch A doesn't carry into batch B — each batch measures fresh state.
-    # Persist the signal AFTER the re-seed and load it back by id, so Act genuinely
-    # consumes the signal THROUGH the datastore (durable Learn→Act lineage), not an
-    # in-memory object the re-seed would have invalidated.
-    policy.DISCOUNTS_ENABLED = True
-    synth.generate(conn)
-    signal_id = themes.persist_signal(conn, signal)
-    signal = themes.load_signal(conn, signal_id)  # Act reads the persisted signal by id
-    target = signal["segment"]
+    # Reset ONLY the cohort's cooldown (not the whole DB) so the AFTER batch measures
+    # fresh state while baseline conversations + the signal survive under one run_id.
     improved_system = _improved_system(target)
     print(f"④ ACT — consuming persisted signal #{signal_id}: enable discounts + lead-with-discount "
           f"playbook for the '{target}' segment")
-    cohort2 = _cohort(conn)
+    policy.DISCOUNTS_ENABLED = True
+    _reset_cohort_cooldown(conn, customer_ids)
+    cohort2 = _cohort(conn)  # SAME scenarios (not re-seeded) → paired by construction
     cohort2_ids = sorted(s["id"] for s in cohort2)
 
     print("⑤ RE-MEASURE — the same customers under the new policy + playbook")
-    recs_b = batch.run_batch(conn, cohort2, system=improved_system, max_workers=WORKERS)
-    after, after_seg = export.conversation_metrics(conn), _segment_metrics(conn, target)
+    recs_b = batch.run_batch(conn, cohort2, system=improved_system, max_workers=WORKERS,
+                             run_id=run_id, phase="after")
+    after = export.conversation_metrics(conn, run_id=run_id, phase="after")
+    after_seg = _segment_metrics(conn, target, run_id, "after")
     print(f"   overall save {after['save_rate']*100:.0f}%  ·  price-sensitive save {after_seg['save_rate']*100:.0f}%")
 
     print("   grading every conversation + re-clustering…")
@@ -182,6 +202,7 @@ def main() -> int:
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id,
         "cohort_size": len(cohort), "cohort_scenario_ids": cohort_ids, "paired_cohort": paired,
         "treated_segment": target,
         "segment_selection": "data-driven (structured intervention signal consumed by Act)",

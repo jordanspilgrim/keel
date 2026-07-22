@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     offer_made        TEXT,                    -- canonical accepted/presented offer string
     evidence_json     TEXT,                    -- lossless eval envelope: {offers, tool_facts, policy_decisions}
     outcome           TEXT,                    -- saved / lost / escalated
+    run_id            TEXT,                    -- experiment run this belongs to (flywheel lineage)
+    phase             TEXT,                    -- baseline / after (within a run)
     created_at        TEXT NOT NULL
 );
 
@@ -72,7 +74,7 @@ CREATE TABLE IF NOT EXISTS evals (
     verdict           TEXT NOT NULL,           -- pass / fail / error
     rationale         TEXT,
     fairness_flag     INTEGER NOT NULL DEFAULT 0,
-    rubric_version    TEXT,                     -- rubric+model that produced this grade (auditability)
+    rubric_version    TEXT,                     -- content-hashed eval-spec id (rubric+schema+model+evidence)
     created_at        TEXT NOT NULL
 );
 
@@ -110,6 +112,7 @@ CREATE TABLE IF NOT EXISTS signals (
     theme_id          INTEGER REFERENCES themes(id),
     recommendation    TEXT NOT NULL,
     priority_score    REAL NOT NULL,
+    run_id            TEXT,                    -- experiment run this signal drove (lineage)
     created_at        TEXT NOT NULL
 );
 
@@ -174,19 +177,31 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
 # a lightweight, idempotent migration (no migration framework for a local POC).
 _ADDED_COLUMNS = [
     ("conversations", "evidence_json", "TEXT"),
+    ("conversations", "run_id", "TEXT"),
+    ("conversations", "phase", "TEXT"),
     ("program_health", "version", "TEXT"),
     ("evals", "rubric_version", "TEXT"),
+    ("signals", "run_id", "TEXT"),
 ]
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create all tables if they don't exist, then back-fill any columns added
-    after the table was first created (idempotent)."""
+    """Create all tables if they don't exist, back-fill any columns added after the
+    table was first created, and (idempotently) enforce one grade per
+    (conversation, eval-spec version). All steps are safe to re-run."""
     conn.executescript(SCHEMA)
     for table, col, decl in _ADDED_COLUMNS:
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    # Dedup any pre-existing duplicate grades (keep the newest id) BEFORE adding the
+    # unique index, so the migration never fails on legacy data.
+    conn.execute(
+        "DELETE FROM evals WHERE id NOT IN ("
+        "  SELECT MAX(id) FROM evals GROUP BY conversation_id, rubric_version)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_evals_conv_spec "
+        "ON evals(conversation_id, rubric_version)")
     conn.commit()
 
 

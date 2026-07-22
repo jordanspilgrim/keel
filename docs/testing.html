@@ -164,10 +164,10 @@ open dashboard/index.html   <span class="c"># shows the measured lift</span></pr
   <pre><span class="c"># abridged — a representative run; numbers vary run to run</span>
 ③ LEARN — structured intervention signal (worst lever-compatible segment):
   Price too high  n=20 · loss=… · lever=discount   ← selected, persisted signal #1
-FLYWHEEL RESULT  (treated price-sensitive segment · single committed run)
-  price-sensitive save:  15%  →  <span class="g">50%</span>   (+35 pp)
-  overall (context):     27%  →  43%   (+17 pp)
-  eval pass 100% (coverage 100%) · guardrail catch 100% · compliance 100% · paired cohort: True</pre>
+FLYWHEEL RESULT  (treated price-sensitive segment · single committed run · one run_id)
+  price-sensitive save:  15%  →  <span class="g">60%</span>   (+45 pp)
+  overall (context):     13%  →  47%   (+33 pp)
+  eval pass 92% (coverage 100%) · guardrail catch 100% · compliance 100% · paired cohort: True</pre>
   <p class="proves">Proves the definition of done: on <b>identical seeded customers</b>, acting on the analytics signal (enable discounts for the price-sensitive segment) produced a measured lift <b>on the treated segment</b> — the flywheel visibly turning. The run requires a matched paired cohort and a strictly-positive treated-segment lift, and writes provenance to <code>dashboard/manifest.json</code>.</p>
 
   <h2>What each command proves, at a glance</h2>

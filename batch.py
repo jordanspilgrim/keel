@@ -27,8 +27,12 @@ def _conn_path(conn) -> str | None:
 
 
 def run_batch(conn, scenarios, *, system: str = runtime.SYSTEM, max_workers: int = MAX_WORKERS,
-              progress: bool = True, db_path: str | None = None) -> list[dict]:
+              progress: bool = True, db_path: str | None = None,
+              run_id: str | None = None, phase: str | None = None) -> list[dict]:
     """Simulate all scenarios concurrently, persist sequentially, return records.
+    Each persisted conversation is tagged with `run_id`/`phase` for experiment
+    lineage (a flywheel run keeps its baseline and after conversations distinct
+    under one immutable run_id).
 
     Workers open their own read connection to the SAME database as `conn` (derived
     from it, or overridden via `db_path`) — not the global default — so a batch
@@ -62,6 +66,7 @@ def run_batch(conn, scenarios, *, system: str = runtime.SYSTEM, max_workers: int
                 print(f"    …{i}/{len(scenarios)} simulated ({errors} errors)")
 
     for rec in records:  # centralized writes on the main connection
+        rec["run_id"], rec["phase"] = run_id, phase
         runtime.persist_conversation(conn, rec)
     if errors:
         print(f"    batch: {errors}/{len(scenarios)} conversations errored and were dropped")

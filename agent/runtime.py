@@ -223,17 +223,16 @@ _HANDOFF_FALLBACK = ("Understood — I'm bringing in a teammate who can help wit
 
 
 def _handoff_safe(text: str, rec: dict) -> bool:
-    """A hand-off must make NO offer and invent NO account fact — it just routes to
-    a human. Screen the drafted text with the SAME deterministic checks the output
-    contract uses, so the escalation path isn't weaker than an ordinary reply."""
+    """A hand-off must make NO offer, state NO dollar amount, and claim NO completed
+    action — it just routes to a human. Same fact-free bar as the empathy prose, so
+    the escalation path is not a weaker output channel than an ordinary reply."""
     if not text:
         return False
     if guardrails.extract_discount_pcts(text) or guardrails.extract_pause_months(text):
         return False  # a hand-off must not float an offer
-    if guardrails.check_completion_claim(text):
-        return False
-    ok, _ = _money_grounded(text, rec, None)
-    return ok
+    if _MONEY_IN_TEXT.search(text):
+        return False  # …nor state a dollar figure
+    return not guardrails.check_completion_claim(text)
 
 
 def _handoff_message(input_list: list, system: str, rec: dict | None = None) -> str:
@@ -264,57 +263,72 @@ def _handoff_message(input_list: list, system: str, rec: dict | None = None) -> 
 _OUTPUT_SAFE_REPLY = ("I want to make sure I give you accurate, approved information — "
                       "let me bring in a teammate to help with this.")
 
-# The agent's final customer-facing turn is emitted as a STRUCTURED CONTRACT, not
-# free prose we police with regex after the fact. The model must declare exactly
-# what it is committing to; we then validate those declarations DETERMINISTICALLY
-# against the offer ledger and the grounded tool facts before any text is sent.
+# SERVER-AUTHORITATIVE OUTPUT. The model never writes the customer-facing FACTS.
+# It returns only non-factual empathy prose plus STRUCTURED references (an offer by
+# kind+terms, and account facts by field+source-tool). The server validates those
+# against the offer ledger and the tool results, then RENDERS every factual sentence
+# itself from a fixed template. This removes the whole class of "the prose expressed
+# a bigger number than it declared" bugs: the customer only ever reads facts the
+# server generated from validated data, and the empathy prose is checked to contain
+# no offer terms or dollar amounts at all.
 _CONTRACT_SCHEMA = {
     "type": "object",
     "properties": {
-        "display_text": {"type": "string", "description": "The reply the customer will see."},
-        "commitments": {
+        "empathy_text": {
+            "type": "string",
+            "description": ("Warm, human framing (1-3 sentences). MUST NOT contain any discount percentage, "
+                            "pause length, dollar amount, or account number — the system renders every fact. "
+                            "Acknowledge the customer and set up the offer or the cancellation in feeling, "
+                            "not in numbers."),
+        },
+        "offer": {
+            "type": "object",
+            "description": "The single retention offer to present, or kind='none'.",
+            "properties": {
+                "kind": {"type": "string", "enum": ["discount", "pause", "none"]},
+                "pct": {"type": ["number", "null"], "description": "Discount percent (kind=discount), else null."},
+                "months": {"type": ["integer", "null"], "description": "Pause months (kind=pause), else null."},
+            },
+            "required": ["kind", "pct", "months"],
+            "additionalProperties": False,
+        },
+        "account_facts": {
             "type": "array",
-            "description": "Every retention offer this reply makes. Empty if none.",
+            "description": "Account facts to state, BY REFERENCE — the server renders the value.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "kind": {"type": "string", "enum": ["discount", "pause"]},
-                    "pct": {"type": ["number", "null"], "description": "Discount percent, else null."},
-                    "months": {"type": ["integer", "null"], "description": "Pause months, else null."},
+                    "field": {"type": "string", "description": "The field name, e.g. 'price' or 'plan'."},
+                    "source_tool": {"type": "string", "description": "The tool that returned it."},
                 },
-                "required": ["kind", "pct", "months"],
+                "required": ["field", "source_tool"],
                 "additionalProperties": False,
             },
         },
-        "account_claims": {
-            "type": "array",
-            "description": "Specific account facts (numbers, prices, dates) stated in display_text.",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "value": {"type": "string"},
-                    "source_tool": {"type": "string", "description": "Which tool returned this fact."},
-                },
-                "required": ["value", "source_tool"],
-                "additionalProperties": False,
-            },
+        "process_cancellation": {
+            "type": "boolean",
+            "description": "True if the customer should be told their cancellation will be processed.",
         },
     },
-    "required": ["display_text", "commitments", "account_claims"],
+    "required": ["empathy_text", "offer", "account_facts", "process_cancellation"],
     "additionalProperties": False,
 }
 
 _CONTRACT_INSTRUCTIONS = (
-    "\n\nProduce your customer-facing reply as a structured contract:\n"
-    "- display_text: what the customer reads (2-4 sentences, warm, human).\n"
-    "- commitments: EVERY retention offer the reply makes, with exact terms. Make AT MOST ONE offer. "
-    "Its terms must NOT exceed what the policy layer authorized in the tool results — if a tool authorized "
-    "'up to 20% off', you may commit at most 20, never 40, even if the customer demands more. Leave empty "
-    "if you are making no offer (e.g. a graceful cancellation). Never present an offer that was not authorized.\n"
-    "- account_claims: any specific account number/price/date you state, each tagged with the tool that "
-    "returned it. Do not state account facts no tool returned.\n"
-    "Offer, do not confirm: you PROPOSE terms; you do not operate billing. Never say an offer is already "
-    "applied/active/set up. Do not call tools."
+    "\n\nProduce your reply as a SERVER-RENDERED contract. You write ONLY the feeling; the system writes "
+    "every fact and every action sentence — do not restate them yourself:\n"
+    "- empathy_text: 1-2 warm, human sentences of acknowledgement ONLY. Do NOT state the offer, do NOT say "
+    "you'll process/apply/cancel anything, and do NOT mention any percentage, dollar amount, pause length, "
+    "plan, or account number — the system appends the exact offer and action sentences after your words. "
+    "Just make the customer feel heard.\n"
+    "- offer: the ONE retention offer to present, as kind + exact terms, or kind='none'. Terms must not "
+    "exceed what the tool results authorized (if a tool authorized 'up to 20%', use at most 20 — never more, "
+    "even if the customer demands it). Never reference an offer no tool authorized.\n"
+    "- account_facts: leave EMPTY unless the customer explicitly asked about a specific account fact; then "
+    "reference it by field + the tool that returned it (the system fills in the value). Never volunteer "
+    "account facts.\n"
+    "- process_cancellation: true when you are letting the customer go.\n"
+    "Do not call tools."
 )
 
 
@@ -331,156 +345,126 @@ def _generate_contract(input_list: list, system: str, *, corrective: str = "") -
         reasoning_effort="low", max_output_tokens=900)
 
 
-def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
-    """Deterministically validate the contract against the offer ledger and tool
-    facts. Returns (ok, reason). This is the PRIMARY output control; the regex
-    checks in guardrails are demoted to a supplemental cross-check on display_text."""
-    text = contract.get("display_text") or ""
-    commitments = [c for c in contract.get("commitments", []) if c.get("kind")]
-
-    # 1) At most one offer, and it must be backed by the active authorized ledger
-    #    entry with terms within the ceiling.
-    if len(commitments) > 1:
-        return False, "more than one offer presented; make at most one concrete offer"
-    committed_terms = None
-    if commitments:
-        c = commitments[0]
-        kind = c["kind"]
-        terms = {"pct": c["pct"]} if kind == "discount" else {"months": c["months"]}
-        if (kind == "discount" and c.get("pct") is None) or (kind == "pause" and c.get("months") is None):
-            return False, "offer commitment is missing its terms"
-        # reconcile against any still-live authorized offer OF THE SAME KIND (the
-        # agent may have authorized both a discount and a pause during the chat)
-        match = offers.offer_of_kind(rec["offers"], kind)
-        if match is None:
-            return False, f"commitment offers a {kind} that policy did not authorize"
-        if not offers.terms_within(terms, match.authorized_terms, kind):
-            return False, (f"commitment {terms} exceeds the authorized ceiling "
-                           f"{match.authorized_terms}")
-        committed_terms = terms
-
-    # 2) Bind the PROSE to the committed offer: extract EVERY discount % and pause
-    #    length the display_text expresses (digits, 'percent', spelled, fractions)
-    #    and require each to not exceed the committed terms — so the customer can't
-    #    read a bigger offer than the ledger records. A prose offer with NO matching
-    #    commitment is an unauthorized promise.
-    committed_pct = committed_terms.get("pct") if committed_terms and commitments[0]["kind"] == "discount" else None
-    committed_months = committed_terms.get("months") if committed_terms and commitments[0]["kind"] == "pause" else None
-    for p in guardrails.extract_discount_pcts(text):
-        if committed_pct is None:
-            return False, f"display_text promises a {p:.0f}% discount not in any structured commitment"
-        if p > float(committed_pct) + 0.5:
-            return False, f"display_text promises {p:.0f}% but the commitment is {float(committed_pct):.0f}%"
-    for mo in guardrails.extract_pause_months(text):
-        if committed_months is None:
-            return False, f"display_text promises a {mo}-month pause not in any structured commitment"
-        if mo > int(committed_months):
-            return False, f"display_text promises {mo} months but the commitment is {int(committed_months)}"
-    # completion claims ("already applied") remain caught by the promise check
-    if guardrails.check_completion_claim(text):
-        return False, "display_text claims an action is already applied (tools only propose)"
-
-    # 3) Validate every declared account_claim against the ACTUAL tool facts: the
-    #    cited tool must have run, and the claimed value must appear in that tool's
-    #    result. An unsourced or invented claim is rejected.
-    ok, reason = _claims_grounded(contract.get("account_claims", []), rec)
-    if not ok:
-        return False, reason
-
-    # 4) Grounding: every dollar figure in display_text must be a tool-provided PRICE
-    #    or a price derived by the committed discount — not merely a substring of some
-    #    unrelated tool number (closes the "$12 credit laundered by seats=12" bypass).
-    ok, reason = _money_grounded(text, rec, committed_terms)
-    if not ok:
-        return False, reason
-    return True, ""
-
-
-def _claims_grounded(claims: list, rec: dict) -> tuple[bool, str]:
-    """Each declared account_claim must cite a tool that actually ran, and its value
-    must appear in that tool's result. Rejects fabricated tools and invented values."""
-    facts_by_tool: dict[str, list[str]] = {}
-    for f in rec["tool_facts"]:
-        facts_by_tool.setdefault(f.get("tool"), []).append(json.dumps(f.get("result")).lower())
-    for claim in claims or []:
-        tool = claim.get("source_tool")
-        value = str(claim.get("value", "")).lower()
-        if tool not in facts_by_tool:
-            return False, f"account_claim cites tool '{tool}' that did not run"
-        corpus = " ".join(facts_by_tool[tool])
-        # every numeric token in the claimed value must appear in that tool's result
-        nums = re.findall(r"\d[\d,]*", value)
-        if any(n.replace(",", "") not in corpus.replace(",", "") for n in nums):
-            return False, f"account_claim '{claim.get('value')}' is not supported by {tool}"
-    return True, ""
-
-
 _MONEY_IN_TEXT = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)")
 
 
-def _money_grounded(text: str, rec: dict, committed: dict | None) -> tuple[bool, str]:
-    """Every $ amount stated must equal a tool-provided PRICE, or that price
-    discounted by the committed offer. It must NOT merely be a substring of some
-    unrelated tool number (a seat count, an id) — that laundering is the bug the
-    reviewer found ("$12 credit" grounded only because seats==12)."""
-    amounts = _MONEY_IN_TEXT.findall(text)
-    if not amounts:
-        return True, ""
-    corpus = " ".join(json.dumps(f["result"]) for f in rec["tool_facts"])
-    # Only DOLLAR-typed tool fields (price / amount / balance / credit) are valid
-    # sources for a $ figure — not arbitrary integers like seat counts or ids.
-    dollar_vals = [float(v) for v in re.findall(
-        r'"(?:price|amount|balance|credit|total|fee)":\s*([\d.]+)', corpus)]
-    allowed: set[str] = set()
-    for p in dollar_vals:
-        allowed |= {f"{p:.2f}", f"{p:.0f}"}
-        if committed and committed.get("pct") is not None:
-            d = p * (1 - float(committed["pct"]) / 100)
-            allowed |= {f"{d:.2f}", f"{d:.0f}"}
-    for a in amounts:
-        norm = a.replace(",", "")
-        if norm in allowed or f"{float(norm):.0f}" in allowed or f"{float(norm):.2f}" in allowed:
-            continue
-        return False, f"cites ${a}, which no tool price supports (invented account figure)"
+def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
+    """Validate the SERVER-AUTHORITATIVE contract. The model's empathy prose must be
+    FACT-FREE (the server renders every fact); the offer must be an authorized ledger
+    offer within its ceiling; each account_fact must reference a field a cited tool
+    actually returned. Returns (ok, reason)."""
+    empathy = contract.get("empathy_text") or ""
+    # 1) empathy prose carries NO facts — no offer terms, no dollar amounts — so the
+    #    model cannot smuggle a bigger number than the structured offer records.
+    if guardrails.extract_discount_pcts(empathy) or guardrails.extract_pause_months(empathy):
+        return False, "empathy_text contains offer terms; keep prose fact-free (the system renders the offer)"
+    if _MONEY_IN_TEXT.search(empathy):
+        return False, "empathy_text contains a dollar amount; the system renders account facts"
+    if guardrails.check_completion_claim(empathy):
+        return False, "empathy_text claims an action is already applied (tools only propose)"
+
+    # 2) the offer must be an authorized ledger offer of its kind, within the ceiling
+    offer = contract.get("offer") or {"kind": "none"}
+    kind = offer.get("kind")
+    if kind in ("discount", "pause"):
+        terms = {"pct": offer.get("pct")} if kind == "discount" else {"months": offer.get("months")}
+        if (kind == "discount" and offer.get("pct") is None) or (kind == "pause" and offer.get("months") is None):
+            return False, "offer is missing its terms"
+        match = offers.offer_of_kind(rec["offers"], kind)
+        if match is None:
+            return False, f"offer presents a {kind} that policy did not authorize"
+        if not offers.terms_within(terms, match.authorized_terms, kind):
+            return False, f"offer {terms} exceeds the authorized ceiling {match.authorized_terms}"
+
+    # 3) each account_fact must reference a field a cited tool actually returned
+    for f in contract.get("account_facts", []):
+        if _fact_value(rec, f.get("field"), f.get("source_tool")) is None:
+            return False, (f"account_fact '{f.get('field')}' from '{f.get('source_tool')}' "
+                           f"was not returned by that tool")
     return True, ""
 
 
+def _fact_value(rec: dict, field: str, tool: str):
+    """The value of an account field from a specific tool's result, or None if that
+    tool didn't run or didn't return the field."""
+    for fct in rec["tool_facts"]:
+        if fct.get("tool") == tool and isinstance(fct.get("result"), dict) and field in fct["result"]:
+            return fct["result"][field]
+    return None
+
+
+def _offer_sentence(kind: str, terms: dict) -> str:
+    """The SERVER's rendering of the offer — the ONLY place an offer's exact terms
+    become customer-facing text."""
+    if kind == "discount":
+        return f"I can apply {float(terms['pct']):.0f}% off your subscription going forward."
+    if kind == "pause":
+        return f"I can set up a {int(terms['months'])}-month pause on your plan, so you won't be billed during it."
+    return ""
+
+
+_DOLLAR_FIELDS = ("price", "amount", "balance", "credit", "total", "fee")
+
+
+def _fact_sentence(field: str, value) -> str:
+    label = field.replace("_", " ")
+    if field in _DOLLAR_FIELDS and isinstance(value, (int, float)):
+        return f"Your {label} is ${float(value):.2f}."
+    return f"Your {label} is {value}."
+
+
+def _render_reply(contract: dict, rec: dict) -> str:
+    """Assemble the customer-facing reply: the model's fact-free empathy prose, then
+    every FACTUAL sentence rendered by the SERVER from validated data (account facts,
+    the offer, the cancellation) — the customer never reads a model-authored fact."""
+    parts = [(contract.get("empathy_text") or "").strip()]
+    for f in contract.get("account_facts", []):
+        val = _fact_value(rec, f.get("field"), f.get("source_tool"))
+        if val is not None:
+            parts.append(_fact_sentence(f["field"], val))
+    offer = contract.get("offer") or {"kind": "none"}
+    if offer.get("kind") in ("discount", "pause"):
+        terms = {"pct": offer.get("pct")} if offer["kind"] == "discount" else {"months": offer.get("months")}
+        parts.append(_offer_sentence(offer["kind"], terms))
+        parts.append("Would you like to go ahead with that, or should I process the cancellation?")
+    elif contract.get("process_cancellation"):
+        parts.append("I'll process your cancellation, and you'll keep access through the end of your "
+                     "current billing period.")
+    return " ".join(p for p in parts if p)
+
+
 def _apply_contract(contract: dict, rec: dict) -> None:
-    """Record what was actually PRESENTED: mark the matching authorized offer
-    presented with the exact committed terms (so outcome/economics use presented,
-    not authorized, terms), superseding any other presented offer."""
-    commitments = [c for c in contract.get("commitments", []) if c.get("kind")]
-    if not commitments:
+    """Mark the offered ledger entry presented with the exact offered terms (so
+    outcome/economics use presented, not authorized, terms)."""
+    offer = contract.get("offer") or {"kind": "none"}
+    kind = offer.get("kind")
+    if kind not in ("discount", "pause"):
         return
-    c = commitments[0]
-    terms = {"pct": float(c["pct"])} if c["kind"] == "discount" else {"months": int(c["months"])}
-    match = offers.offer_of_kind(rec["offers"], c["kind"])
+    terms = {"pct": float(offer["pct"])} if kind == "discount" else {"months": int(offer["months"])}
+    match = offers.offer_of_kind(rec["offers"], kind)
     if match is not None:
         offers.present(rec["offers"], match, terms)
 
 
-def _screen_contract(input_list: list, system: str, rec: dict, corrective: str) -> tuple[bool, str, dict | None]:
-    """Generate one contract and validate it (ledger + grounding + tone). Returns
-    (ok, failure_reason, contract). An unavailable moderation service is an
-    explicit degraded result that is bounded, not a silent fail-open."""
+def _screen_contract(input_list: list, system: str, rec: dict, corrective: str) -> tuple[bool, str, dict | None, str]:
+    """Generate → validate → RENDER (server) → tone-check the rendered reply. Returns
+    (ok, reason, contract, rendered_text). Moderation-unavailable is an explicit
+    degraded result that is bounded, not a silent fail-open."""
     try:
         contract = _generate_contract(input_list, system, corrective=corrective)
     except Exception as e:
-        return False, f"contract generation failed: {type(e).__name__}", None
+        return False, f"contract generation failed: {type(e).__name__}", None, ""
     ok, reason = _validate_contract(contract, rec)
     if not ok:
-        return False, reason, contract
-    tone = guardrails.check_tone(contract.get("display_text", ""))
+        return False, reason, contract, ""
+    rendered = _render_reply(contract, rec)
+    tone = guardrails.check_tone(rendered)
     if tone["flagged"]:
-        return False, "tone flagged by moderation", contract
+        return False, "tone flagged by moderation", contract, ""
     if tone.get("degraded"):
-        # BOUND the degraded state (not merely log it): when moderation is
-        # unavailable we cannot verify the tone of this model prose, so we refuse to
-        # deliver it and fall through to the deterministic safe fallback (our own
-        # ceiling template or a human hand-off), which needs no tone check.
         rec["guardrail"].append(("tone", "degraded", "moderation unavailable — output not delivered"))
-        return False, "moderation unavailable — cannot verify output tone", contract
-    return True, "", contract
+        return False, "moderation unavailable — cannot verify output tone", contract, ""
+    return True, "", contract, rendered
 
 
 _CEILING_TEMPLATE = ("I hear you, and I want to be straight with you: the most I'm able to offer is "
@@ -491,18 +475,15 @@ _CEILING_TEMPLATE = ("I hear you, and I want to be straight with you: the most I
 def _intended_kind(contract: dict | None) -> str | None:
     """The offer kind the failed contract was trying to present (so the fallback
     targets THAT offer, not an ambiguous 'latest live' one)."""
-    for c in (contract or {}).get("commitments", []) or []:
-        if c.get("kind"):
-            return c["kind"]
-    return None
+    o = (contract or {}).get("offer") or {}
+    return o.get("kind") if o.get("kind") in ("discount", "pause") else None
 
 
 def _ceiling_fallback(rec: dict, kind: str | None) -> str | None:
     """Deterministic safe fallback when the model keeps trying to OVER-promise: if
     there is an authorized offer of the kind the contract was presenting, present it
     at exactly the authorized ceiling (what policy actually allows) rather than
-    escalating. Only an output failure with NO offer to fall back to (e.g. a
-    hallucinated fact) should reach a human hand-off."""
+    escalating. Only an output failure with NO offer to fall back to should hand off."""
     off = offers.offer_of_kind(rec["offers"], kind) if kind else offers.active(rec["offers"])
     if off is None:
         return None
@@ -511,26 +492,22 @@ def _ceiling_fallback(rec: dict, kind: str | None) -> str | None:
 
 
 def _finalize_output(rec: dict, input_list: list, system: str, on_step) -> str:
-    """Generate the final reply as a structured contract, validate it against the
-    ledger + tool facts, and only then return display_text. On failure, regenerate
-    ONCE against the specific reason. If it still fails: present the authorized
-    ceiling offer deterministically when one exists (hold firm, don't lose the
-    customer to a hand-off over a pricing demand); otherwise FAIL CLOSED (safe reply
-    + escalate). Nothing that fails validation is ever delivered verbatim."""
-    ok, reason, contract = _screen_contract(input_list, system, rec, "")
+    """Generate the reply as a server-authoritative contract, validate it, and return
+    the SERVER-RENDERED text. On failure, regenerate ONCE; if it still fails, hold
+    firm at the authorized ceiling when an offer exists, else FAIL CLOSED (safe reply
+    + escalate). Nothing that fails validation is ever delivered."""
+    ok, reason, contract, rendered = _screen_contract(input_list, system, rec, "")
     if ok:
         _apply_contract(contract, rec)
-        _emit(on_step, "output", "Response contract validated against the offer ledger")
-        return contract["display_text"]
+        _emit(on_step, "output", "Contract validated; reply rendered server-side from the ledger")
+        return rendered
     rec["guardrail"].append(("output", "regenerating", reason))
     _emit(on_step, "output", f"Output contract rejected ({reason}) — regenerating once")
-    ok2, reason2, contract2 = _screen_contract(input_list, system, rec, reason)
+    ok2, reason2, contract2, rendered2 = _screen_contract(input_list, system, rec, reason)
     if ok2:
         _apply_contract(contract2, rec)
-        _emit(on_step, "output", "Response contract validated after one regeneration")
-        return contract2["display_text"]
-    # Still invalid — prefer holding firm at the authorized ceiling over a hand-off,
-    # targeting the specific offer kind the contract was trying to present.
+        _emit(on_step, "output", "Contract validated after one regeneration")
+        return rendered2
     fallback = _ceiling_fallback(rec, _intended_kind(contract2) or _intended_kind(contract))
     if fallback is not None:
         rec["guardrail"].append(("output", "capped_to_ceiling", reason2))
@@ -704,11 +681,12 @@ def persist_conversation(conn, record: dict) -> int:
     ]
     cur = conn.execute(
         "INSERT INTO conversations "
-        "(customer_id, scenario_id, transcript_json, disposition_json, offer_made, evidence_json, outcome, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "(customer_id, scenario_id, transcript_json, disposition_json, offer_made, evidence_json, "
+        "outcome, run_id, phase, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (record["customer_id"], record["scenario_id"], db.dumps(stored_transcript),
          db.dumps(record["disposition"]), record["offer_made"],
-         db.dumps(record.get("evidence") or {}), record["outcome"], _now()),
+         db.dumps(record.get("evidence") or {}), record["outcome"],
+         record.get("run_id"), record.get("phase"), _now()),
     )
     conv_id = cur.lastrowid
     conn.executemany(
@@ -807,29 +785,44 @@ def resolve_session(session: dict, outcome: str, conn) -> dict:
     (so the live path also grades 100%). Raises ValueError on an invalid
     transition (already resolved, or 'saved' without an accepted offer)."""
     rec = session["rec"]
+    # Idempotent: a retry after a successful resolve returns the SAME record rather
+    # than double-persisting or failing (the offer is already accepted/rejected).
     if session.get("resolved"):
-        raise ValueError("this conversation has already been resolved")
+        return session["_record"]
     if session["outcome"] == "escalated":
         outcome = "escalated"
     if outcome not in ("saved", "lost", "escalated"):
         raise ValueError("outcome must be saved, lost, or escalated")
-    if outcome == "saved":
-        # A save must reference a concrete presented offer in the ledger — bind the
-        # acceptance to it, so outcome/economics use the exact presented terms.
-        if offers.mark_accepted(rec["offers"]) is None:
-            raise ValueError("cannot mark 'saved' without a presented retention offer")
-    elif outcome == "lost":  # a presented-but-declined offer transitions to 'rejected'
-        offers.mark_rejected(rec["offers"])
+    # Validate WITHOUT mutating the ledger yet — a save needs a presented offer.
+    if outcome == "saved" and offers.presented(rec["offers"]) is None:
+        raise ValueError("cannot mark 'saved' without a presented retention offer")
     offer_accepted = outcome == "saved"
     scenario = {"id": None, "customer_id": session["customer_id"], "churn_reason": "live session"}
-    disp = _disposition(session["transcript"], scenario, rec, outcome, offer_accepted)
-    record = {"customer_id": session["customer_id"], "scenario_id": None,
-              "transcript": session["transcript"], "disposition": disp, "outcome": outcome,
-              "offer_made": _offer_made(rec), "evidence": _evidence(rec),
-              "guardrail_events": rec["guardrail"], "audit": rec["audit"]}
-    persist_conversation(conn, record)
-    _grade_and_store(conn, record["conversation_id"], record, session["customer_id"])
+    # Snapshot the ledger states so a persistence failure can be rolled back and the
+    # resolve retried cleanly (don't leave the session half-resolved).
+    snapshot = [(o, o.state) for o in rec["offers"]]
+    try:
+        if outcome == "saved":
+            offers.mark_accepted(rec["offers"])
+        elif outcome == "lost":  # a presented-but-declined offer transitions to 'rejected'
+            offers.mark_rejected(rec["offers"])
+        disp = _disposition(session["transcript"], scenario, rec, outcome, offer_accepted)
+        record = {"customer_id": session["customer_id"], "scenario_id": None,
+                  "transcript": session["transcript"], "disposition": disp, "outcome": outcome,
+                  "offer_made": _offer_made(rec), "evidence": _evidence(rec),
+                  "guardrail_events": rec["guardrail"], "audit": rec["audit"]}
+        persist_conversation(conn, record)  # the durable commit — after this, resolved is true
+    except Exception:
+        for o, st in snapshot:  # roll back the in-memory transition so a retry works
+            o.state = st
+        raise
     session["resolved"] = True
+    session["_record"] = record
+    session["conversation_id"] = record["conversation_id"]
+    # Grade AFTER the durable commit. A grading failure records an 'error' eval row
+    # (never raises); a missed live grade is later reconciled by grade_all, which
+    # grades any conversation lacking a current-spec eval. So resolve stays durable.
+    _grade_and_store(conn, record["conversation_id"], record, session["customer_id"])
     return record
 
 
@@ -840,16 +833,19 @@ def _grade_and_store(conn, conv_id: int, record: dict, customer_id: int) -> None
     coverage-miss eval (verdict 'error') rather than silently leaving it ungraded."""
     from evals import judge, run_evals  # local import avoids any load-order cycle
     convo = run_evals.build_judge_input(conn, conv_id)
+    ver = judge.EVAL_SPEC_VERSION  # SAME content-hashed spec id the batch path stamps
+    # idempotent: a retry replaces this conversation's row for the current spec
+    conn.execute("DELETE FROM evals WHERE conversation_id=? AND rubric_version=?", (conv_id, ver))
     try:
         v = judge.judge_conversation(convo)
         verdict = judge.derive_verdict(v["scores"])
         conn.execute(
-            "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, created_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (conv_id, db.dumps(v["scores"]), verdict, v["rationale"], int(v["fairness_flag"]), _now()))
+            "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, rubric_version, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (conv_id, db.dumps(v["scores"]), verdict, v["rationale"], int(v["fairness_flag"]), ver, _now()))
     except Exception as e:
         conn.execute(
-            "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, created_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (conv_id, db.dumps({}), "error", f"grading failed: {type(e).__name__}", 0, _now()))
+            "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, rubric_version, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (conv_id, db.dumps({}), "error", f"grading failed: {type(e).__name__}", 0, ver, _now()))
     conn.commit()
