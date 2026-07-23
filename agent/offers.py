@@ -68,6 +68,27 @@ def offer_of_kind(offers: list[Offer], kind: str) -> Offer | None:
     return None
 
 
+def rejected_of_kind(offers: list[Offer], kind: str) -> Offer | None:
+    """A REJECTED offer of a kind, if the customer has already declined one — so the
+    agent doesn't loop by re-offering the same thing they just turned down."""
+    for o in reversed(offers):
+        if o.kind == kind and o.state == "rejected":
+            return o
+    return None
+
+
+def unpresented_new_authorized(offers: list[Offer]) -> Offer | None:
+    """An authorized offer of a kind the customer has NOT already declined — a genuinely
+    new lever still on the table. Used to enforce 'present your best offer before you
+    abandon to a cancellation'; scoped to un-declined kinds so a re-authorized offer the
+    customer already refused doesn't deadlock against the anti-loop rule."""
+    declined = {o.kind for o in offers if o.state == "rejected"}
+    for o in reversed(offers):
+        if o.state == "authorized" and o.kind not in declined:
+            return o
+    return None
+
+
 def present(offers: list[Offer], offer: Offer, terms: dict) -> None:
     """Mark an authorized offer as presented with the exact committed terms, and
     supersede any OTHER presented offer — so at most one offer is ever presented

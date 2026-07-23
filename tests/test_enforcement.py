@@ -99,6 +99,61 @@ def test_ceiling_fallback_escalates_without_an_intended_kind():
     assert pres.kind == "discount" and pres.presented_terms == {"pct": 20}
 
 
+# --- resolution guards: don't loop, don't abandon with an offer on the table ------
+def test_does_not_reoffer_a_declined_offer():
+    """A conversation that re-presents an offer the customer already declined is a
+    failure to resolve (it loops). Re-offering a rejected kind is rejected."""
+    from agent import offers as offers_mod
+    rec = _rec()
+    o = offers_mod.authorize(rec["offers"], "pause", {"months": 3})
+    o.state, o.presented_terms = "presented", {"months": 3}
+    offers_mod.mark_rejected(rec["offers"])              # customer declined the pause
+    ok, reason = runtime._validate_contract(_contract("price", kind="pause", months=3), rec)
+    assert not ok and "declined" in reason
+
+
+def test_does_not_abandon_while_an_authorized_offer_is_unpresented():
+    """Processing a cancellation while a fresh authorized offer the customer hasn't seen
+    is still on the table is premature — present it first."""
+    from agent import offers as offers_mod
+    rec = _rec()
+    offers_mod.authorize(rec["offers"], "discount", {"pct": 20})   # authorized, never presented
+    ok, reason = runtime._validate_contract(_contract("offer_declined", kind="none", cancel=True), rec)
+    assert not ok and "present it before" in reason
+    # once that offer has been presented AND declined, a graceful close IS allowed
+    off = offers_mod.offer_of_kind(rec["offers"], "discount")
+    off.state, off.presented_terms = "presented", {"pct": 20}
+    offers_mod.mark_rejected(rec["offers"])
+    ok2, _ = runtime._validate_contract(_contract("offer_declined", kind="none", cancel=True), rec)
+    assert ok2
+
+
+def test_present_before_abandon_fallback_presents_not_escalates(monkeypatch):
+    """If the model keeps trying to cancel while an authorized offer is unpresented, the
+    server presents that offer deterministically rather than escalating — the customer
+    always sees the best offer before any cancellation."""
+    from agent import offers as offers_mod
+    monkeypatch.setattr(runtime, "_generate_contract",
+                        lambda *a, **k: {"acknowledgement": "offer_declined", "account_facts": [],
+                                         "process_cancellation": True,
+                                         "offer": {"kind": "none", "pct": None, "months": None}})
+    rec = _rec()
+    offers_mod.authorize(rec["offers"], "discount", {"pct": 20})
+    out = runtime._finalize_output(rec, [], runtime.SYSTEM, None)
+    assert not rec["escalated"]                          # presented instead of escalating
+    assert "20% discount" in out
+    assert any(a == "presented_before_abandon" for (_, a, _) in rec["guardrail"])
+
+
+def test_graceful_decline_close_renders_a_resolution_intent():
+    """The new resolution intents render a clean close so a failed negotiation doesn't
+    dead-end on an opening acknowledgement."""
+    rec = _rec()
+    for ack in ("cant_meet", "offer_declined"):
+        out = runtime._render_reply(_contract(ack, cancel=True), rec)
+        assert runtime._ACK_TEMPLATES[ack] in out and "cancellation" in out.lower()
+
+
 def test_over_promise_holds_at_ceiling_not_escalate(monkeypatch):
     from agent import offers as offers_mod
     # the model keeps returning an over-ceiling 40% offer (never validates)

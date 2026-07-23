@@ -279,9 +279,19 @@ pass's own changes. All closed structurally, not by patching symptoms:
 | L2 | Turn steps were published off-lock; abandoned sessions were never evicted | Steps append under the shared lock; unresolved idle sessions are TTL-evicted · `test_abandoned_sessions_are_ttl_evicted` |
 | L3 | Stale doc numbers (test count, red-team split, "100% eval", "re-seeds", "one active", "empathy prose") | Corrected across README / BUILD / how-it-works / testing to the real values (105 tests; 6/4/4 probes; committed run **91.7%** eval; snapshot-restore; server-authored output) |
 
-The committed money-demo manifest (`run-20260722T180438`: +45pp, 91.7% eval) was produced
-before this pass's output-contract and eval-spec changes — re-run `python run_demo.py` to
-regenerate it under the current code (the number will move; only the committed run is claimed).
+Regenerating the manifest under the R6 code surfaced a real regression the change had
+introduced — and the kill switch caught it. Fully-server-authored output initially dropped
+conversation **resolution** (the acknowledgement enum couldn't express a graceful
+decline-close, so failed price negotiations dead-ended: the agent looped a rejected offer or
+fired a curt cancellation mid-question). That pulled eval pass to **75% — below the 80% floor,
+which correctly tripped the program to safe mode.** The fix (no reopening H1, and without
+touching the judge or the floor): resolution-close acknowledgement intents (`cant_meet` /
+`offer_declined`) so a lost conversation ends cleanly, plus deterministic guards — never
+re-offer a kind the customer already declined, and never abandon to a cancellation while a
+fresh authorized offer is unpresented (present it instead). The committed run
+(`run-20260723T043723`, n=20 treated) then cleared the floor with the program healthy:
+price-sensitive **55% → 75% (+20pp)**, overall **40% → 53% (+13pp)**, **82% eval pass / 100%
+coverage**, fairness gap **0.006**. Only the committed run is claimed; numbers vary run to run.
 
 ## Notes
 

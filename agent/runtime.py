@@ -282,13 +282,17 @@ _OUTPUT_SAFE_REPLY = ("I want to make sure I give you accurate, approved informa
 # it chooses the feeling, the server renders the sentence. Keyed to the churn drivers
 # in the synthetic data plus a generic and a wrap-up ('closing').
 _ACK_TEMPLATES = {
+    # opening acknowledgements — keyed to why the customer is leaving
     "price": "I completely understand — cost has to make sense, and I'd like to find a way to make this work for you.",
     "missing_feature": "That's fair — if something your team relies on isn't supported yet, that's a real gap, and I appreciate you telling us.",
     "competitor": "I understand, and I respect that you're weighing your options — I'd genuinely like the chance to keep you with us.",
     "support": "I'm sorry the support experience let you down — that's on us, and I'd like to make it right.",
     "no_longer_needed": "That's completely fair — if it isn't part of your workflow anymore, I want to respect that.",
     "generic": "I hear you, and I want to make sure we handle this the way that's right for you.",
-    "closing": "Thank you for being straight with me — I've got what I need to take it from here.",
+    # resolution closes — how to end cleanly so a conversation doesn't dead-end
+    "cant_meet": "I want to be straight with you: I've offered the most I'm able to here, and I can't stretch further than that on price.",
+    "offer_declined": "I completely understand — if what I can offer isn't the right fit, I won't keep you here.",
+    "closing": "Thanks — I'm glad we could sort that out, and I appreciate you sticking with us.",
 }
 
 # SERVER-AUTHORITATIVE OUTPUT. The model authors NO customer-facing text at all. It
@@ -306,9 +310,12 @@ _CONTRACT_SCHEMA = {
             "type": "string",
             "enum": list(_ACK_TEMPLATES),
             "description": ("The feeling to acknowledge — the SERVER renders the sentence, you only pick "
-                            "the intent. Choose the one matching why they're leaving (price, "
-                            "missing_feature, competitor, support, no_longer_needed), 'closing' once "
-                            "they've decided and you're wrapping up, or 'generic' if none fit."),
+                            "the intent. While negotiating, match why they're leaving (price, "
+                            "missing_feature, competitor, support, no_longer_needed) or 'generic'. To "
+                            "CLOSE a conversation you can't save, pick a resolution intent so it ends "
+                            "cleanly: 'cant_meet' when they want more than you're authorized to give, "
+                            "'offer_declined' when they've turned down your best offer, 'closing' after a "
+                            "successful save. Never leave a conversation hanging on an opening intent."),
         },
         "offer": {
             "type": "object",
@@ -347,14 +354,22 @@ _CONTRACT_INSTRUCTIONS = (
     "\n\nProduce your reply as a SERVER-RENDERED contract. You do NOT write the customer-facing text at "
     "all — you choose intent and the system renders every word:\n"
     "- acknowledgement: pick the feeling to convey from the allowed set (the server writes the sentence). "
-    "Choose the one matching why they're leaving; use 'closing' when they've decided and you're wrapping up.\n"
+    "While negotiating, match why they're leaving. When you cannot save them, CLOSE cleanly with a "
+    "resolution intent — 'cant_meet' if they demanded more than you're authorized to give, 'offer_declined' "
+    "if they turned down your best offer, 'closing' after a save — so the conversation never dead-ends.\n"
     "- offer: the ONE retention offer to present, as kind + exact terms, or kind='none'. Terms must not "
     "exceed what the tool results authorized (if a tool authorized 'up to 20%', use at most 20 — never more, "
     "even if the customer demands it). Never reference an offer no tool authorized.\n"
+    "  RESOLUTION RULES: (1) if you have an authorized offer the customer hasn't seen yet, PRESENT it — do "
+    "not set process_cancellation while a real offer is still on the table. (2) Never re-offer something the "
+    "customer already declined; if your best offer was refused and you have nothing else authorized, set "
+    "offer.kind='none', pick 'offer_declined' (or 'cant_meet'), and process_cancellation=true to close. "
+    "(3) Make your best offer ONCE, then respect a firm no — looping the same offer is a failure to resolve.\n"
     "- account_facts: leave EMPTY unless the customer explicitly asked about a specific account fact; then "
     "reference it by field + the tool that returned it (the system fills in the value). Never volunteer "
     "account facts.\n"
-    "- process_cancellation: true when you are letting the customer go.\n"
+    "- process_cancellation: true when you are letting the customer go (pair it with 'cant_meet'/"
+    "'offer_declined', never with an offer still being presented).\n"
     "Do not call tools."
 )
 
@@ -393,11 +408,23 @@ def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
         terms = {"pct": offer.get("pct")} if kind == "discount" else {"months": offer.get("months")}
         if (kind == "discount" and offer.get("pct") is None) or (kind == "pause" and offer.get("months") is None):
             return False, "offer is missing its terms"
+        # resolution guard A — don't loop: never re-offer a kind the customer already declined
+        if offers.rejected_of_kind(rec["offers"], kind) is not None:
+            return False, (f"the customer already declined a {kind} — do not re-offer it; make another "
+                           f"authorized offer or close gracefully (offer_declined / cant_meet)")
         match = offers.offer_of_kind(rec["offers"], kind)
         if match is None:
             return False, f"offer presents a {kind} that policy did not authorize"
         if not offers.terms_within(terms, match.authorized_terms, kind):
             return False, f"offer {terms} exceeds the authorized ceiling {match.authorized_terms}"
+
+    # resolution guard B — don't abandon: never process a cancellation while a fresh
+    # authorized offer the customer hasn't seen is still on the table
+    if kind == "none" and contract.get("process_cancellation"):
+        pending = offers.unpresented_new_authorized(rec["offers"])
+        if pending is not None:
+            return False, (f"you have an authorized {pending.kind} the customer hasn't seen — present it "
+                           f"before processing a cancellation")
 
     # 3) each account_fact must reference a field a cited tool actually returned
     for f in contract.get("account_facts", []):
@@ -548,6 +575,15 @@ def _finalize_output(rec: dict, input_list: list, system: str, on_step) -> str:
         rec["guardrail"].append(("output", "capped_to_ceiling", reason2))
         _emit(on_step, "output", "Held firm at the authorized ceiling (no over-promise delivered)")
         return fallback
+    # present-before-abandon: if the model kept trying to cancel while a fresh authorized
+    # offer was still on the table, present that offer deterministically rather than
+    # escalating — the customer sees the best offer before any cancellation.
+    pending = offers.unpresented_new_authorized(rec["offers"])
+    if pending is not None:
+        offers.present(rec["offers"], pending, pending.authorized_terms)
+        rec["guardrail"].append(("output", "presented_before_abandon", reason2))
+        _emit(on_step, "output", "Presented the authorized offer before any cancellation")
+        return _CEILING_TEMPLATE.format(label=offers.human_terms(pending, pending.authorized_terms))
     rec["guardrail"].append(("output", "blocked", reason2))
     rec["escalated"] = True
     _emit(on_step, "output", "Output contract could not be validated — escalating")

@@ -40,6 +40,26 @@ def test_multiple_offers_may_be_authorized_one_presented():
     assert offers.offer_of_kind(led, "pause") is p
 
 
+def test_rejected_and_unpresented_accessors():
+    from agent import offers
+    led = []
+    d = offers.authorize(led, "discount", {"pct": 20})
+    p = offers.authorize(led, "pause", {"months": 3})
+    # both authorized, neither presented → the newest un-declined authorized offer
+    assert offers.unpresented_new_authorized(led) is p
+    assert offers.rejected_of_kind(led, "discount") is None
+    # decline the discount → it's no longer a candidate, and it reads as rejected
+    d.state, d.presented_terms = "presented", {"pct": 20}
+    offers.mark_rejected(led)
+    assert offers.rejected_of_kind(led, "discount") is d
+    # unpresented_new_authorized skips the declined kind, returns the pause
+    assert offers.unpresented_new_authorized(led) is p
+    # decline the pause too → no un-declined authorized offer remains
+    p.state, p.presented_terms = "presented", {"months": 3}
+    offers.mark_rejected(led)
+    assert offers.unpresented_new_authorized(led) is None
+
+
 def test_offer_summary_prefers_presented_then_accepted():
     led: list[offers.Offer] = []
     o = offers.authorize(led, "discount", {"pct": 20})
