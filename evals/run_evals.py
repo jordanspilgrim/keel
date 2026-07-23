@@ -114,11 +114,19 @@ def run_golden() -> dict:
     if not fixtures:
         raise RuntimeError(f"no golden fixtures in {GOLDEN_DIR}")
 
-    agree, details = 0, []
+    agree, details, errored = 0, [], []
     pairs: dict[str, list[dict]] = {}
     abs_errors: list[float] = []  # per-dimension |judge - human| across all fixtures with human_scores
     for fx in fixtures:
-        v = judge.judge_conversation(fx)
+        # One fixture that fails to judge (transient API error, malformed row) must not
+        # abort the whole calibration and silently shrink the set — record it and go on.
+        # But a set we couldn't fully judge cannot PASS the floor (guarded below), so this
+        # never inflates agreement by dropping the denominator (L5).
+        try:
+            v = judge.judge_conversation(fx)
+        except Exception as e:  # noqa: BLE001 — isolate per fixture, surface in the report
+            errored.append({"name": fx.get("name", "?"), "error": str(e)[:200]})
+            continue
         jverdict = judge.derive_verdict(v["scores"])  # mechanical, not the model's advisory field
         match = jverdict == fx["human_verdict"]
         agree += match
@@ -135,7 +143,8 @@ def run_golden() -> dict:
             base = fx["name"].replace("_group_a", "").replace("_group_b", "")
             pairs.setdefault(base, []).append(
                 {"verdict": jverdict, "scores": v["scores"], "fairness_flag": bool(v["fairness_flag"])})
-    agreement = round(agree / len(fixtures), 3)
+    judged = len(fixtures) - len(errored)
+    agreement = round(agree / judged, 3) if judged else 0.0
     # A symmetric pair (same conversation, only the demographic attribute differs)
     # must get the same verdict AND per-dimension scores within a documented
     # tolerance of 1 point (strict equality across two independent LLM judge calls
@@ -159,7 +168,10 @@ def run_golden() -> dict:
     # and the human labels. A binary verdict match can hide a 5-vs-3 gap; this catches
     # it. Documented tolerance: mean per-dimension MAE ≤ 1.0 point.
     mae = round(sum(abs_errors) / len(abs_errors), 3) if abs_errors else 0.0
-    return {"agreement": agreement, "n": len(fixtures), "details": details,
-            "passes_floor": agreement >= AGREEMENT_FLOOR,
+    return {"agreement": agreement, "n": len(fixtures), "n_judged": judged, "details": details,
+            # A set we could not fully judge cannot clear the floor — any errored fixture
+            # fails the gate, so partial coverage is never reported as a pass.
+            "passes_floor": (not errored) and judged > 0 and agreement >= AGREEMENT_FLOOR,
+            "errored": errored,
             "per_dimension_mae": mae, "mae_within_tolerance": mae <= CALIBRATION_MAE_FLOOR,
             "fairness_consistent": fairness_consistent, "fairness_pairs": pair_report}

@@ -176,6 +176,57 @@ def test_resolve_is_idempotent(conn, monkeypatch):
                         (r1["conversation_id"],)).fetchone()[0] == 1
 
 
+def test_live_escalation_is_durable_before_resolve(conn):
+    """M2: a live escalation records a durable hand-off work item at turn time (parallel
+    to the cancellation fix), so the promised human hand-off survives if /resolve never
+    comes — the exact hole H4 closed for cancellations, now closed for escalations."""
+    s = runtime.new_session(1, conn)
+    s["_session_id"] = "sess-ESC"
+    s["safe_mode"] = True  # kill switch forces an escalation with no LLM call
+    res = runtime.live_turn(s, "please help", conn)
+    assert res["escalated"] and s["outcome"] == "escalated"
+    row = conn.execute("SELECT status, conversation_id FROM escalation_requests WHERE session_key=?",
+                       ("sess-ESC",)).fetchone()
+    assert row is not None and row["status"] == "pending_human" and row["conversation_id"] is None
+
+
+def test_cancellation_self_heals_on_retry_after_write_failure(conn, monkeypatch):
+    """L1: if the durable cancellation write fails, the session is not left terminal with
+    an obligation in no table — a retry hits the terminal re-entry and idempotently
+    self-heals the queue row."""
+    def _cancel_agent(input_list, cid, sub, conn, rec, system=runtime.SYSTEM, on_step=None):
+        runtime._route_cancellation(rec)
+        reply = "I'll pass your cancellation to our team."
+        input_list.append({"role": "assistant", "content": reply})
+        return reply
+    monkeypatch.setattr(runtime, "_agent_turn", _cancel_agent)
+    s = runtime.new_session(1, conn)
+    s["_session_id"] = "sess-FAIL"
+    real = runtime._queue_cancellation_live
+    monkeypatch.setattr(runtime, "_queue_cancellation_live",
+                        lambda c, k: (_ for _ in ()).throw(RuntimeError("db down")))
+    with pytest.raises(RuntimeError):
+        runtime.live_turn(s, "cancel me", conn)
+    assert conn.execute("SELECT count(*) FROM cancellation_requests WHERE session_key=?",
+                        ("sess-FAIL",)).fetchone()[0] == 0
+    monkeypatch.setattr(runtime, "_queue_cancellation_live", real)   # DB healthy again
+    runtime.live_turn(s, "are you there?", conn)                     # retry → terminal re-entry self-heals
+    assert conn.execute("SELECT count(*) FROM cancellation_requests WHERE session_key=?",
+                        ("sess-FAIL",)).fetchone()[0] == 1
+
+
+def test_cannot_assert_escalated_without_a_real_handoff(conn, monkeypatch):
+    """M1: 'escalated' is a terminal that must be EARNED (rec['escalated']), not merely
+    asserted by the caller — otherwise a fabricated hand-off with no audit/queue backing
+    could deflate save_rate and inflate the escalation safety KPI."""
+    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(reply="How about a 1-month pause?"))
+    s = runtime.new_session(1, conn)
+    runtime.live_turn(s, "too pricey", conn)          # a normal turn — nothing escalated
+    assert not s["rec"]["escalated"]
+    with pytest.raises(ValueError):
+        runtime.resolve_session(s, "escalated", conn, resolution_key="sid-fake-esc")
+
+
 def test_live_cancellation_is_durable_before_resolve(conn, monkeypatch):
     """H4: when a live turn routes a cancellation, the mock work-queue row is durable
     IMMEDIATELY (keyed by session id), before any /resolve — so a browser close, restart,

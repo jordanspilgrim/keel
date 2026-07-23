@@ -159,17 +159,30 @@ def _deidentify_tool_fact(fct: dict) -> dict:
     return {"tool": fct.get("tool"), "call_id": fct.get("call_id"), "result": result}
 
 
+def _deidentify_policy_decision(p: dict) -> dict:
+    """De-identify one policy decision for the persisted envelope. The judge needs the
+    tool, the action, and the ADJUSTED numeric terms (pct/months) — but a model-authored
+    free-text arg (deny_refund.reason, downgrade_plan.new_plan) can carry customer PII
+    that no regex reliably catches, so those string args are DROPPED structurally rather
+    than trusted to redaction. The policy-generated `reason` (safe) is kept, redacted."""
+    args = p.get("args")
+    numeric_args = ({k: v for k, v in args.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+                    if isinstance(args, dict) else {})
+    return {"tool": p.get("tool"), "action": p.get("action"),
+            "args": numeric_args, "reason": _redact_evidence_value(p.get("reason"))}
+
+
 def _evidence(rec: dict) -> dict:
     """The canonical eval envelope, DE-IDENTIFIED for persistence. It keeps everything
     the batch and live judge need to grade identically — the full offer ledger (exact
     authorized + presented terms), the read-tool facts (for grounding), and the policy
-    decisions with adjusted args — but strips customer identity BEFORE it is stored:
-    per-tool safe-field allowlisting drops names, and every free-form string in tool
-    results and policy arguments is recursively redacted. Raw tool data stays in the
-    in-memory `rec` for the live turn; only this de-identified view is persisted."""
+    decisions with adjusted NUMERIC args — but strips customer identity BEFORE it is
+    stored: per-tool safe-field allowlisting drops names, model-authored free-text policy
+    args are dropped, and every remaining free-form string is recursively redacted. Raw
+    tool data stays in the in-memory `rec` for the live turn; only this view is persisted."""
     return {"offers": [o.to_dict() for o in rec["offers"]],
             "tool_facts": [_deidentify_tool_fact(f) for f in rec["tool_facts"]],
-            "policy_decisions": [_redact_evidence_value(p) for p in rec["policy_decisions"]]}
+            "policy_decisions": [_deidentify_policy_decision(p) for p in rec["policy_decisions"]]}
 
 
 _JAILBREAK_REPLY = ("I can't do that. I'm the retention assistant, so I can only help with your "
@@ -346,7 +359,6 @@ _ACK_TEMPLATES = {
     # is only VALID in a matching ledger state (see _validate_contract), so the server
     # can't author a "we sorted it out" that never happened.
     "cant_meet": "I want to be straight with you: I've offered the most I'm able to here, and I can't stretch further than that on price.",
-    "offer_declined": "I completely understand — if what I can offer isn't the right fit, I won't keep you here.",
     "letting_go": "I completely understand, and I won't stand in your way here.",
     "closing": "Thanks — I'm glad we could sort that out, and I appreciate you sticking with us.",
 }
@@ -354,8 +366,11 @@ _ACK_TEMPLATES = {
 # Acknowledgements that CLOSE a cancellation (state a wind-down, not a save). A
 # process_cancellation contract must use one of these — never an opening/negotiation
 # intent (which would leave the close ungrounded) and never 'closing' (which claims a
-# save).
-_CANCELLATION_ACKS = frozenset({"cant_meet", "offer_declined", "letting_go"})
+# save). ('cant_meet' requires an offer was actually presented; 'letting_go' is the
+# neutral close. An earlier 'offer_declined' intent was removed: it required a ledger
+# 'rejected' state that only ever exists at a terminal point, so it was unreachable
+# during an agent turn and merely forced wasted regenerations.)
+_CANCELLATION_ACKS = frozenset({"cant_meet", "letting_go"})
 
 # SERVER-AUTHORITATIVE OUTPUT. The model authors NO customer-facing text at all. It
 # returns only STRUCTURED intent — an acknowledgement to convey (chosen from a fixed
@@ -375,9 +390,9 @@ _CONTRACT_SCHEMA = {
                             "the intent. While negotiating, match why they're leaving (price, "
                             "missing_feature, competitor, support, no_longer_needed) or 'generic'. To "
                             "CLOSE a conversation you can't save, pick a resolution intent so it ends "
-                            "cleanly: 'cant_meet' when they want more than you're authorized to give, "
-                            "'offer_declined' when they've turned down your best offer, 'closing' after a "
-                            "successful save. Never leave a conversation hanging on an opening intent."),
+                            "cleanly: 'cant_meet' when you've made an offer and can't go further, "
+                            "'letting_go' to let them go neutrally, 'closing' after a successful save. "
+                            "Never leave a conversation hanging on an opening intent."),
         },
         "offer": {
             "type": "object",
@@ -417,15 +432,15 @@ _CONTRACT_INSTRUCTIONS = (
     "all — you choose intent and the system renders every word:\n"
     "- acknowledgement: pick the feeling to convey from the allowed set (the server writes the sentence). "
     "While negotiating, match why they're leaving. When you cannot save them, CLOSE cleanly with a "
-    "resolution intent — 'cant_meet' if they demanded more than you're authorized to give, 'offer_declined' "
-    "if they turned down your best offer, 'closing' after a save — so the conversation never dead-ends.\n"
+    "resolution intent — 'cant_meet' if you made an offer and can't go further, 'letting_go' to let them go "
+    "neutrally, 'closing' after a save — so the conversation never dead-ends.\n"
     "- offer: the ONE retention offer to present, as kind + exact terms, or kind='none'. Terms must not "
     "exceed what the tool results authorized (if a tool authorized 'up to 20%', use at most 20 — never more, "
     "even if the customer demands it). Never reference an offer no tool authorized.\n"
     "  RESOLUTION RULES: (1) if you have an authorized offer the customer hasn't seen yet, PRESENT it — do "
     "not set process_cancellation while a real offer is still on the table. (2) Never re-offer something the "
     "customer already declined; if your best offer was refused and you have nothing else authorized, set "
-    "offer.kind='none', pick 'offer_declined' (or 'cant_meet'), and process_cancellation=true to close. "
+    "offer.kind='none', pick 'cant_meet' (or 'letting_go'), and process_cancellation=true to close. "
     "(3) Make your best offer ONCE, then respect a firm no — looping the same offer is a failure to resolve.\n"
     "- account_facts: leave EMPTY unless the customer explicitly asked about a specific account fact; then "
     "reference it by field + the tool that returned it (the system fills in the value). ONLY these "
@@ -433,7 +448,7 @@ _CONTRACT_INSTRUCTIONS = (
     "licensed_seats, logins_last_30d, feature_adoption_pct (get_usage). NEVER reference the customer's name "
     "or any internal field — those are not customer-facing. Never volunteer account facts.\n"
     "- process_cancellation: true when you are letting the customer go (pair it with 'cant_meet'/"
-    "'offer_declined', never with an offer still being presented).\n"
+    "'letting_go', never with an offer still being presented).\n"
     "Do not call tools."
 )
 
@@ -473,8 +488,6 @@ def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
     extended = states & {"presented", "accepted", "rejected"}  # an offer was actually made
     if ack == "closing" and "accepted" not in states:
         return False, "acknowledgement 'closing' claims a save, but no offer was accepted"
-    if ack == "offer_declined" and "rejected" not in states:
-        return False, "acknowledgement 'offer_declined' claims a declined offer, but none was rejected"
     if ack == "cant_meet" and not extended:
         return False, "acknowledgement 'cant_meet' claims an offer was made, but none was presented"
 
@@ -504,7 +517,7 @@ def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
         # resolution guard A — don't loop: never re-offer a kind the customer already declined
         if offers.rejected_of_kind(rec["offers"], kind) is not None:
             return False, (f"the customer already declined a {kind} — do not re-offer it; make another "
-                           f"authorized offer or close gracefully (offer_declined / cant_meet)")
+                           f"authorized offer or close gracefully (cant_meet / letting_go)")
         match = offers.offer_of_kind(rec["offers"], kind)
         if match is None:
             return False, f"offer presents a {kind} that policy did not authorize"
@@ -614,6 +627,19 @@ def _queue_cancellation_live(conn, session_key: str | None) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO cancellation_requests (session_key, status, channel, created_at) "
         "VALUES (?,?,?,?)", (session_key, "pending_human", "email", _now()))
+    conn.commit()
+
+
+def _queue_escalation_live(conn, session_key: str | None, reason: str | None) -> None:
+    """Durably enqueue a human hand-off keyed by SESSION id at turn time — the same
+    durability the cancellation path has (H4): the promise 'a teammate will take it from
+    here' survives a browser close, restart, or TTL eviction even if /resolve never
+    comes. Idempotent on the session key; linked to its conversation at persist."""
+    if not session_key:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO escalation_requests (session_key, reason, status, created_at) "
+        "VALUES (?,?,?,?)", (session_key, (reason or "")[:200], "pending_human", _now()))
     conn.commit()
 
 
@@ -916,6 +942,12 @@ def persist_conversation(conn, record: dict) -> int:
         {"role": t["role"], "content": guardrails.redact_pii(t["content"])[0]}
         for t in record["transcript"]
     ]
+    # disposition_json is a THIRD durable store of free text: intent/churn_reason are
+    # MINI_MODEL output that can echo customer PII — scrub them like the transcript.
+    stored_disposition = dict(record["disposition"])
+    for _k in ("intent", "churn_reason"):
+        if isinstance(stored_disposition.get(_k), str):
+            stored_disposition[_k] = guardrails.redact_pii(stored_disposition[_k])[0]
     # ONE transaction for the whole conversation + its audit/guardrail rows + cooldown
     # update. If any write fails, roll the WHOLE thing back so the connection is never
     # left holding a partial conversation that a later commit could silently flush.
@@ -934,7 +966,7 @@ def persist_conversation(conn, record: dict) -> int:
             "outcome, run_id, phase, resolution_key, price_at_conversation, created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (record["customer_id"], record["scenario_id"], db.dumps(stored_transcript),
-             db.dumps(record["disposition"]), record["offer_made"],
+             db.dumps(stored_disposition), record["offer_made"],
              db.dumps(record.get("evidence") or {}), record["outcome"],
              record.get("run_id"), record.get("phase"), record.get("resolution_key"), price_at_conv, _now()),
         )
@@ -959,6 +991,17 @@ def persist_conversation(conn, record: dict) -> int:
                 conn.execute(
                     "INSERT INTO cancellation_requests (conversation_id, status, channel, created_at) "
                     "VALUES (?,?,?,?)", (conv_id, "pending_human", "email", _now()))
+        # An escalation hand-off likewise has a durable mock queue item — link the
+        # session-keyed row enqueued live, or insert one for the batch path.
+        if record.get("outcome") == "escalated":
+            skey = record.get("resolution_key")
+            linked = conn.execute(
+                "UPDATE escalation_requests SET conversation_id=? WHERE session_key=? AND conversation_id IS NULL",
+                (conv_id, skey)).rowcount if skey else 0
+            if not linked:
+                conn.execute(
+                    "INSERT INTO escalation_requests (conversation_id, reason, status, created_at) "
+                    "VALUES (?,?,?,?)", (conv_id, record.get("escalate_reason"), "pending_human", _now()))
         # Persist cooldown state: extending a save offer starts the 90-day clock, so a
         # later conversation for the same customer won't immediately offer again.
         if record.get("offer_made"):
@@ -1020,7 +1063,9 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
     # Escalation is a TERMINAL state: once the conversation has been handed to a
     # human, the autonomous agent does not run again on this session (mirrors the
     # batch path, which stops on escalation). No more model turns after hand-off.
+    skey = session.get("_session_id")
     if session.get("outcome") == "escalated" or rec.get("escalated"):
+        _queue_escalation_live(conn, skey, session.get("escalate_reason"))  # self-heal a failed prior write
         session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
         session["transcript"].append({"role": "assistant", "content": _ESCALATED_REPLY})
         _emit(on_step, "guardrail", "Session already escalated — not running the agent", gtype="escalated")
@@ -1028,6 +1073,7 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
     # A routed cancellation is TERMINAL too — the agent has recorded the action, so a
     # later message does NOT silently re-enter the autonomous agent.
     if session.get("outcome") == "cancelled" or rec.get("cancellation_routed"):
+        _queue_cancellation_live(conn, skey)  # idempotent self-heal (a prior write may have failed)
         session["outcome"] = "cancelled"
         session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
         session["transcript"].append({"role": "assistant", "content": _CANCELLED_REPLY})
@@ -1044,6 +1090,8 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
         ev = ("safe_mode", "engaged", "; ".join(session.get("safety_reasons", [])) or "kill switch")
         rec["guardrail"].append(ev)
         rec["escalated"] = True
+        # Durably record the hand-off obligation NOW, before returning the promise.
+        _queue_escalation_live(conn, skey, ev[2])
         session["outcome"] = "escalated"
         _emit(on_step, "reply", reply)
         return _turn_result(session, reply, [ev])
@@ -1051,12 +1099,15 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
     reply = _advance(user_text, session["transcript"], session["input_list"],
                      session["customer_id"], session["sub"], conn, rec, on_step=on_step)
     if rec["escalated"]:
+        # Durably enqueue the hand-off NOW (keyed by session id), before the customer
+        # receives the promise — parallel to the cancellation path; survives no /resolve.
+        _queue_escalation_live(conn, skey, rec.get("escalate_reason"))
         session["outcome"] = "escalated"
     elif rec.get("cancellation_routed"):
+        # Durably enqueue the work item BEFORE marking the session terminal, so a commit
+        # failure can't leave a terminal session promising an obligation in no table.
+        _queue_cancellation_live(conn, skey)
         session["outcome"] = "cancelled"  # terminal — the agent recorded the cancellation
-        # Durably enqueue the work item NOW (keyed by session id), before the customer
-        # receives the routing promise — not at a later /resolve that may never come.
-        _queue_cancellation_live(conn, session.get("_session_id"))
     return _turn_result(session, reply, rec["guardrail"][before:])
 
 
@@ -1095,9 +1146,14 @@ def resolve_session(session: dict, outcome: str, conn, *, resolution_key: str | 
         outcome = "lost"  # a routed cancellation resolves as a lost customer
     if outcome not in ("saved", "lost", "escalated"):
         raise ValueError("outcome must be saved, lost, or escalated")
-    # Validate WITHOUT mutating the ledger yet — a save needs a presented offer.
+    # Validate WITHOUT mutating the ledger yet. Each terminal must be EARNED, not merely
+    # asserted by the caller — the loop is the source of truth, mirroring the batch path:
+    # a save needs a presented offer, and an escalation needs an actual hand-off in the
+    # record (so a stray outcome='escalated' can't fabricate a compliance/safety KPI).
     if outcome == "saved" and offers.presented(rec["offers"]) is None:
         raise ValueError("cannot mark 'saved' without a presented retention offer")
+    if outcome == "escalated" and not (rec.get("escalated") or session.get("outcome") == "escalated"):
+        raise ValueError("cannot mark 'escalated' without an actual hand-off (rec['escalated'] is not set)")
     offer_accepted = outcome == "saved"
     scenario = {"id": None, "customer_id": session["customer_id"], "churn_reason": "live session"}
     # Snapshot the ledger states so a persistence failure can be rolled back and the

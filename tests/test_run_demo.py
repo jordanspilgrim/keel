@@ -102,6 +102,101 @@ def test_reset_db_clears_cancellation_requests(conn):
     assert conn.execute("SELECT count(*) FROM conversations").fetchone()[0] == 0
 
 
+# --- M5: analytics readers use the frozen conversation-time price ----------
+def _persist_saved(conn, scenario_id, run="run-M5", phase="baseline"):
+    from agent import runtime
+    runtime.persist_conversation(conn, {
+        "customer_id": 1, "scenario_id": scenario_id,
+        "transcript": [{"role": "user", "content": "too expensive"}, {"role": "assistant", "content": "hi"}],
+        "disposition": {"outcome": "saved", "offer_made": "20% discount", "churn_reason": "Price too high"},
+        "outcome": "saved", "offer_made": "20% discount", "evidence": {},
+        "guardrail_events": [], "audit": [], "run_id": run, "phase": phase})
+
+
+def test_segment_metrics_use_frozen_conversation_price(conn):
+    """M5: margin-adjusted segment lift is computed on the price the customer was on at
+    conversation time, so a later subscription price change cannot rewrite the demo's
+    reported number. (Scenario 1 is customer 1 / 'Price too high' / $499.)"""
+    _persist_saved(conn, scenario_id=1)
+    before = run_demo._segment_metrics(conn, "Price too high", run_id="run-M5", phase="baseline")
+    assert before["n"] == 1 and before["madj_save_rate"] == pytest.approx(1 - 0.20, abs=1e-6)
+    conn.execute("UPDATE subscriptions SET price = 50 WHERE customer_id = 1")
+    conn.commit()
+    after = run_demo._segment_metrics(conn, "Price too high", run_id="run-M5", phase="baseline")
+    assert after["madj_save_rate"] == before["madj_save_rate"]  # history did not move
+
+
+def test_conversation_views_use_frozen_conversation_price(conn):
+    """M5: the VoC view's realized margin_cost is likewise anchored to the frozen price,
+    not the current subscription price."""
+    _persist_saved(conn, scenario_id=1)
+    v0 = next(v for v in themes.build_conversation_views(conn))
+    assert v0["price"] == 499.0 and v0["margin_cost"] == pytest.approx(499.0 * 0.20, abs=1e-6)
+    conn.execute("UPDATE subscriptions SET price = 50 WHERE customer_id = 1")
+    conn.commit()
+    v1 = next(v for v in themes.build_conversation_views(conn))
+    assert v1["price"] == 499.0 and v1["margin_cost"] == v0["margin_cost"]  # frozen
+
+
+# --- pre-registered median-of-k is an honest estimator, not cherry-picking -
+def test_run_median_reports_median_not_max_and_keeps_low_draws(monkeypatch, tmp_path):
+    """The median-of-k estimator must report the MEDIAN (not the max) and must include
+    every draw — the low/zero/NEGATIVE ones too. Dropping unfavorable draws or reporting
+    the best run would be exactly the metric-rigging the demo forbids. No network: run_once
+    is stubbed with a fixed spread."""
+    import json
+    (tmp_path / "dashboard").mkdir()
+    monkeypatch.chdir(tmp_path)
+    draws = [-4.0, 2.0, 7.0, 20.0, 33.0]          # median 7.0 — NOT the 33.0 max; incl a negative
+    seq = iter(draws)
+
+    def fake_run_once(conn, run_id=None):
+        v = next(seq)
+        return {"run_id": f"run-{v}", "treated_cohort_n": 60,
+                "baseline": {"segment_save_rate": 0.27, "overall_save_rate": 0.26},
+                "after": {"segment_save_rate": round(0.27 + v / 100, 4), "overall_save_rate": 0.29,
+                          "eval_pass_rate": 0.85},
+                "lift": {"segment_save_pp": v, "segment_madj_pp": round(v * 0.8, 1), "overall_save_pp": 2.0},
+                "fairness_gap": 0.02}
+
+    _real_connect = db.connect
+    monkeypatch.setattr(run_demo, "run_once", fake_run_once)
+    monkeypatch.setattr(run_demo.db, "connect", lambda *a, **k: _real_connect(str(tmp_path / "m.db")))
+    assert run_demo.run_median(k=5) == 0
+
+    agg = json.loads((tmp_path / "dashboard" / "demo_aggregate.json").read_text())
+    assert agg["segment_save_pp"]["median"] == 7.0                       # median, not the max
+    assert agg["segment_save_pp"]["min"] == -4.0 and agg["segment_save_pp"]["max"] == 33.0
+    assert agg["segment_save_pp"]["values"] == draws                     # every draw kept (incl negative)
+    assert agg["committed_run_id"] == "run-7.0" and agg["k"] == 5
+    man = json.loads((tmp_path / "dashboard" / "manifest.json").read_text())
+    assert man["lift"]["segment_save_pp"] == 7.0                         # committed manifest IS the median run
+
+
+def test_run_median_aborts_if_any_run_bails(monkeypatch, tmp_path):
+    """A structural bail in any run aborts the whole estimate — no partial median over
+    fewer than k runs (which would silently change the denominator)."""
+    import pytest as _pytest
+    (tmp_path / "dashboard").mkdir()
+    monkeypatch.chdir(tmp_path)
+    calls = {"n": 0}
+
+    def fake_run_once(conn, run_id=None):
+        calls["n"] += 1
+        return None if calls["n"] == 3 else {"run_id": "r", "treated_cohort_n": 60,
+                "baseline": {"segment_save_rate": 0.27, "overall_save_rate": 0.26},
+                "after": {"segment_save_rate": 0.30, "overall_save_rate": 0.29, "eval_pass_rate": 0.85},
+                "lift": {"segment_save_pp": 3.0, "segment_madj_pp": 2.0, "overall_save_pp": 2.0},
+                "fairness_gap": 0.02}
+
+    _real_connect = db.connect
+    monkeypatch.setattr(run_demo, "run_once", fake_run_once)
+    monkeypatch.setattr(run_demo.db, "connect", lambda *a, **k: _real_connect(str(tmp_path / "m.db")))
+    with _pytest.raises(SystemExit):
+        run_demo.run_median(k=5)
+    assert not (tmp_path / "dashboard" / "demo_aggregate.json").exists()  # no partial artifact written
+
+
 # --- M2: cited experiment signal survives a post-run re-cluster ------------
 def test_experiment_signal_survives_reclustering(conn):
     signal = {"segment": "Price too high", "recommended_lever": "discount", "evidence": {"loss": 4.2}}

@@ -121,12 +121,27 @@ def test_does_not_abandon_while_an_authorized_offer_is_unpresented():
     offers_mod.authorize(rec["offers"], "discount", {"pct": 20})   # authorized, never presented
     ok, reason = runtime._validate_contract(_contract("letting_go", kind="none", cancel=True), rec)
     assert not ok and "present it before" in reason
-    # once that offer has been presented AND declined, a graceful close IS allowed
+    # once that offer has been presented (and declined), a graceful close IS allowed
     off = offers_mod.offer_of_kind(rec["offers"], "discount")
     off.state, off.presented_terms = "presented", {"pct": 20}
     offers_mod.mark_rejected(rec["offers"])
-    ok2, _ = runtime._validate_contract(_contract("offer_declined", kind="none", cancel=True), rec)
-    assert ok2  # offer_declined is now TRUE (a presented offer was rejected)
+    ok2, _ = runtime._validate_contract(_contract("cant_meet", kind="none", cancel=True), rec)
+    assert ok2  # cant_meet is TRUE (an offer was actually presented)
+
+
+def test_guard_b_ignores_a_redundant_same_kind_authorization():
+    """M3: a second, redundant same-kind authorization (the customer has already SEEN an
+    offer of that kind) is NOT an 'unseen offer' — a clean cancellation-close validates
+    and the fallback won't present a weaker second same-kind offer that corrupts the
+    ledger's single source of truth."""
+    from agent import offers as offers_mod
+    rec = _rec()
+    offers_mod.authorize(rec["offers"], "discount", {"pct": 10})           # off_1 (redundant)
+    off2 = offers_mod.authorize(rec["offers"], "discount", {"pct": 20})
+    off2.state, off2.presented_terms = "presented", {"pct": 20}            # 20% actually shown
+    assert offers_mod.unpresented_candidates(rec["offers"]) == []          # off_1 is not "unseen"
+    ok, _ = runtime._validate_contract(_contract("cant_meet", kind="none", cancel=True), rec)
+    assert ok                                                              # clean close, not blocked
 
 
 def test_present_before_abandon_presents_only_a_single_candidate(monkeypatch):
@@ -176,20 +191,20 @@ def test_malformed_tool_call_fails_closed():
 # --- state-grounded acknowledgements + real cancellation action (H2) --------
 def test_acknowledgement_must_be_true_for_the_ledger_state():
     """The server can't author a claim that never happened: 'closing' needs an accepted
-    offer, 'offer_declined' a rejected one, 'cant_meet' an offer actually presented."""
+    offer, 'cant_meet' an offer actually presented; 'letting_go' is the neutral close."""
     from agent import offers as offers_mod
     rec = _rec()
     # fresh conversation — every state-claiming close is false → rejected
     assert not runtime._validate_contract(_contract("closing"), rec)[0]
-    assert not runtime._validate_contract(_contract("offer_declined", cancel=True), rec)[0]
     assert not runtime._validate_contract(_contract("cant_meet", cancel=True), rec)[0]
+    # 'letting_go' has no state precondition, but still needs an offer ATTEMPT (guard C)
+    rec["policy_decisions"].append({"tool": "offer_discount", "action": "rejected", "reason": "cooldown"})
+    assert runtime._validate_contract(_contract("letting_go", kind="none", cancel=True), rec)[0]
     # present an offer → 'cant_meet' becomes true
     o = offers_mod.authorize(rec["offers"], "discount", {"pct": 20})
     o.state, o.presented_terms = "presented", {"pct": 20}
     assert runtime._validate_contract(_contract("cant_meet", cancel=True), rec)[0]
-    # decline it → 'offer_declined' true; accept a different one → 'closing' true
-    offers_mod.mark_rejected(rec["offers"])
-    assert runtime._validate_contract(_contract("offer_declined", cancel=True), rec)[0]
+    # accept a presented offer → 'closing' true
     p = offers_mod.authorize(rec["offers"], "pause", {"months": 3})
     p.state, p.presented_terms = "presented", {"months": 3}
     offers_mod.mark_accepted(rec["offers"])
@@ -249,7 +264,7 @@ def test_graceful_decline_close_renders_a_resolution_intent():
     """The new resolution intents render a clean close so a failed negotiation doesn't
     dead-end on an opening acknowledgement."""
     rec = _rec()
-    for ack in ("cant_meet", "offer_declined"):
+    for ack in ("cant_meet", "letting_go"):
         out = runtime._render_reply(_contract(ack, cancel=True), rec)
         assert runtime._ACK_TEMPLATES[ack] in out and "cancellation" in out.lower()
 

@@ -285,17 +285,25 @@ def test_persisted_evidence_is_deidentified(conn):
     rec["tool_facts"] = [
         {"tool": "get_customer", "call_id": "c1", "result": {"name": "Emma Nguyen", "segment": "SMB", "arpu": 99.0}},
         {"tool": "get_subscription", "call_id": "c2", "result": {"plan": "Pro", "price": 99.0}}]
-    rec["policy_decisions"] = [{"tool": "offer_discount", "action": "ok",
-                                "args": {"pct": 20, "reason": "email me at jane@example.com"}, "reason": "ok"}]
+    # a consequential-tool decision with a model-authored free-text arg containing a name
+    rec["policy_decisions"] = [
+        {"tool": "offer_discount", "action": "ok", "args": {"pct": 20}, "reason": "Within policy."},
+        {"tool": "deny_refund", "action": "needs_human",
+         "args": {"reason": "Refund for account holder Robert Johnson, email bob@x.com"}, "reason": "needs human"}]
     record = {"customer_id": 1, "scenario_id": None, "transcript": [{"role": "user", "content": "hi"}],
-              "disposition": {"outcome": "lost", "offer_made": None}, "outcome": "lost",
-              "offer_made": None, "evidence": runtime._evidence(rec), "guardrail_events": [], "audit": []}
+              "disposition": {"outcome": "lost", "offer_made": None, "churn_reason": "It's Maria Garcia, too pricey"},
+              "outcome": "lost", "offer_made": None, "evidence": runtime._evidence(rec),
+              "guardrail_events": [], "audit": []}
     cid = runtime.persist_conversation(conn, record)
-    stored = conn.execute("SELECT evidence_json FROM conversations WHERE id=?", (cid,)).fetchone()[0]
-    assert "Emma Nguyen" not in stored        # name dropped by the per-tool allowlist
-    assert "jane@example.com" not in stored    # PII in a policy arg recursively redacted
+    row = conn.execute("SELECT evidence_json, disposition_json FROM conversations WHERE id=?", (cid,)).fetchone()
+    stored, disp = row["evidence_json"], row["disposition_json"]
+    assert "Emma Nguyen" not in stored          # name dropped by the per-tool allowlist
+    assert "Robert Johnson" not in stored and "bob@x.com" not in stored  # model free-text policy arg dropped
+    assert "Maria Garcia" not in disp           # disposition churn_reason redacted (L2)
     ev = json.loads(stored)
     assert ev["tool_facts"][1]["result"]["price"] == 99.0   # grounding field survives
+    assert ev["policy_decisions"][0]["args"] == {"pct": 20}  # numeric arg kept
+    assert ev["policy_decisions"][1]["args"] == {}           # free-text arg structurally dropped
     assert "name" not in ev["tool_facts"][0]["result"]
 
 

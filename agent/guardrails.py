@@ -33,10 +33,22 @@ _PII_PATTERNS = [
     (re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"), "[REDACTED_DOB]", "dob"),
     (re.compile(r"\b(?:\+?1[ -.]?)?\(?\d{3}\)?[ -.]?\d{3}[ -.]?\d{4}\b"), "[REDACTED_PHONE]", "phone"),
     (re.compile(_STREET), "[REDACTED_ADDRESS]", "address"),
-    # Self-identified name ("my name is Jane Doe", "I'm John Smith") — heuristic, so it
-    # only fires on the explicit-introduction shape, not any capitalized words. The
-    # intro is kept; only the name is redacted.
-    (re.compile(r"\b(?i:(my name is|i am|i'm|this is))\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b"),
+    # Self-identified name — PATTERN-BASED best-effort (not full NER): catches the common
+    # phrasings a customer uses to give a name. Titlecase is required, so lowercase or
+    # all-caps names can still slip through; honestly scoped as such (the deterministic
+    # action layer and the customer-facing fact allowlist are the real backstops).
+    #  (a) intro cue + Titlecase name: "my name is Jane Doe", "I'm John Smith", "call me Bob Lee"
+    (re.compile(r"\b(?i:(my name is|name's|name is|i am|i'm called|i'm|call me|this is|they call me))"
+                r"\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b"),
+     r"\1 [REDACTED_NAME]", "name"),
+    #  (b) "it's/it is <First Last>" — require a two-word name so "it's Friday" isn't caught
+    (re.compile(r"\b(?i:(it's|it is))\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b"),
+     r"\1 [REDACTED_NAME]", "name"),
+    #  (c) "<First Last> here/speaking" (name-first introduction)
+    (re.compile(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+(?=\s+(?:here|speaking)\b)"),
+     "[REDACTED_NAME]", "name"),
+    #  (d) a sign-off "- First Last" at the end of a line
+    (re.compile(r"(?m)([-–—])\s*[A-Z][a-z]+\s+[A-Z][a-z]+\s*$"),
      r"\1 [REDACTED_NAME]", "name"),
 ]
 _SENSITIVE_TERMS = re.compile(

@@ -80,15 +80,19 @@ def rejected_of_kind(offers: list[Offer], kind: str) -> Offer | None:
 
 
 def unpresented_candidates(offers: list[Offer]) -> list[Offer]:
-    """All authorized offers of a kind the customer has NOT already declined — genuinely
-    new levers still on the table. Scoped to un-declined kinds so a re-authorized offer
-    the customer already refused doesn't deadlock against the anti-loop rule. At most one
-    per kind (the latest authorized)."""
-    declined = {o.kind for o in offers if o.state == "rejected"}
+    """Authorized offers of a kind the customer has NOT already SEEN — genuinely new
+    levers still on the table. A kind is excluded once ANY offer of that kind has left
+    the 'authorized' state (presented / superseded / accepted / rejected): the customer
+    has been shown a discount, so a second, redundant authorized discount is not an
+    'unseen offer'. (Previously only 'rejected' kinds were excluded, so a redundant
+    same-kind authorization was wrongly treated as unseen — blocking a clean close and
+    making the fallback present a weaker second offer that corrupted the ledger.) At most
+    one per kind (the latest authorized)."""
+    already_shown = {o.kind for o in offers if o.state != "authorized"}
     seen: set[str] = set()
     out: list[Offer] = []
     for o in reversed(offers):
-        if o.state == "authorized" and o.kind not in declined and o.kind not in seen:
+        if o.state == "authorized" and o.kind not in already_shown and o.kind not in seen:
             seen.add(o.kind)
             out.append(o)
     return out

@@ -1,11 +1,11 @@
 window.KEEL_DATA = {
   "kpis": {
-    "madj_save_rate": 0.3713,
-    "madj_delta_pp": 25.3,
-    "save_rate": 0.4667,
-    "save_delta_pp": 31.7,
-    "eval_pass_rate": 0.85,
-    "eval_coverage": 1.0,
+    "madj_save_rate": 0.3067,
+    "madj_delta_pp": 18.8,
+    "save_rate": 0.3833,
+    "save_delta_pp": 23.3,
+    "eval_pass_rate": 0.8,
+    "eval_coverage": 0.9938,
     "guardrail_catch_rate": 1.0,
     "compliance_coverage": 1.0
   },
@@ -16,51 +16,51 @@ window.KEEL_DATA = {
     ],
     "save": [
       0.15,
-      0.4667
+      0.3833
     ],
     "madj": [
       0.1185,
-      0.3713
+      0.3067
     ]
   },
   "drivers": [
     {
       "label": "Price sensitivity",
-      "share": 38,
-      "save_rate": 0.475
-    },
-    {
-      "label": "Price-sensitive / competitor pricing",
-      "share": 23,
-      "save_rate": 0.27
+      "share": 34,
+      "save_rate": 0.418
     },
     {
       "label": "Price sensitivity",
+      "share": 25,
+      "save_rate": 0.25
+    },
+    {
+      "label": "Price-related cancellation",
       "share": 18,
       "save_rate": 0.0
     },
     {
       "label": "No longer using",
       "share": 11,
-      "save_rate": 0.389
+      "save_rate": 0.278
     },
     {
       "label": "Switching to competitor",
-      "share": 10,
-      "save_rate": 0.125
+      "share": 11,
+      "save_rate": 0.056
     }
   ],
   "offers": [
     {
       "label": "discount",
-      "save_rate": 0.556,
-      "margin_cost": 22.0,
-      "rel_cost": 1.32
+      "save_rate": 0.474,
+      "margin_cost": 29.69,
+      "rel_cost": 2.76
     },
     {
       "label": "pause",
-      "save_rate": 0.352,
-      "margin_cost": 16.69,
+      "save_rate": 0.288,
+      "margin_cost": 10.76,
       "rel_cost": 1.0
     }
   ],
@@ -75,8 +75,8 @@ window.KEEL_DATA = {
   "meta": {
     "conversations": 160,
     "provenance": {
-      "generated_at": "2026-07-23T19:14:33.721255+00:00",
-      "run_id": "run-20260723T190123",
+      "generated_at": "2026-07-23T22:32:20.565340+00:00",
+      "run_id": "run-20260723T222003",
       "cohort_size": 80,
       "cohort_scenario_ids": [
         1,
@@ -161,6 +161,7 @@ window.KEEL_DATA = {
         335
       ],
       "paired_cohort": true,
+      "treated_cohort_n": 60,
       "treated_segment": "Price too high",
       "segment_selection": "data-driven (structured intervention signal consumed by Act)",
       "intervention_signal_id": 6,
@@ -194,14 +195,14 @@ window.KEEL_DATA = {
         "lever_compatible": true,
         "offer_effectiveness": [
           {
-            "avg_margin_cost": 13.67,
-            "n": 56,
+            "avg_margin_cost": 13.89,
+            "n": 53,
             "offer": "pause",
-            "save_rate": 0.25
+            "save_rate": 0.264
           },
           {
             "avg_margin_cost": 0.0,
-            "n": 24,
+            "n": 27,
             "offer": "none",
             "save_rate": 0.0
           }
@@ -241,17 +242,18 @@ window.KEEL_DATA = {
         "playbook_sha": "a68e48936007",
         "conversations": 80,
         "starting_state_sha": "world-cc0b6f6f6e67",
-        "segment_save_rate": 0.4667,
-        "overall_save_rate": 0.425,
-        "eval_pass_rate": 0.85,
-        "eval_coverage": 1.0
+        "segment_save_rate": 0.3833,
+        "overall_save_rate": 0.3125,
+        "eval_pass_rate": 0.8,
+        "eval_coverage": 0.994
       },
       "lift": {
-        "segment_save_pp": 31.7,
-        "segment_madj_pp": 25.3,
-        "overall_save_pp": 25.0
+        "segment_save_pp": 23.3,
+        "segment_madj_pp": 18.8,
+        "overall_save_pp": 13.8
       },
       "guardrail_catch_rate": 1.0,
+      "fairness_gap": 0.055,
       "note": "Paired before/after on identical seeded customers run from a byte-identical starting subscription state (same starting_state_sha in both arms \u2192 eligibility held constant). TWO variables changed together (discount policy + agent playbook), so this is a synthetic PAIRED demonstration of the flywheel on the treated (price-sensitive) segment \u2014 not an isolated causal estimate. Numbers vary run to run."
     }
   }

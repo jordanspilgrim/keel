@@ -45,6 +45,20 @@ def test_name_pattern_does_not_over_redact():
     # a lowercase 'i am ...' sentence with no proper name must not be redacted
     out, types = guardrails.redact_pii("I am frustrated with the price and want to cancel.")
     assert "name" not in types and out.endswith("cancel.")
+    # and common non-name Titlecase phrases must survive
+    for keep in ("It's Friday and I want to cancel", "I love the Pro Plan"):
+        assert "REDACTED_NAME" not in guardrails.redact_pii(keep)[0]
+
+
+def test_name_redaction_catches_realistic_phrasings():
+    """M4: the name arm covers the common ways a customer gives a name, not only
+    'my name is' — intro cues, name-first, and a sign-off."""
+    for text in ["Hi, it's Maria Garcia and I want to cancel.",
+                 "call me Robert Johnson",
+                 "Sarah Connor here, cancel please.",
+                 "Please cancel.\n- Michael Brown"]:
+        out, types = guardrails.redact_pii(text)
+        assert "REDACTED_NAME" in out and "name" in types, text
 
 
 # --- jailbreak detection ---------------------------------------------------

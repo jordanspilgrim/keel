@@ -51,14 +51,47 @@ def test_compliance_metric_not_described_as_audit_coverage():
         assert "present and an audit record" not in text, f"{rel} overclaims audit coverage"
 
 
-def test_readme_matches_the_committed_run_manifest():
-    """The README's committed-run numbers must match dashboard/manifest.json exactly."""
-    m = json.loads(_read("dashboard/manifest.json"))
+def test_committed_manifest_is_the_pre_registered_median_run():
+    """The demo headline is a pre-registered median-of-k, so dashboard/manifest.json must be
+    the MEDIAN-lift run drawn from the same k-run set recorded in demo_aggregate.json — not
+    a hand-picked or stray run. Pure JSON↔JSON provenance, independent of any doc prose."""
+    agg = json.loads(_read("dashboard/demo_aggregate.json"))
+    man = json.loads(_read("dashboard/manifest.json"))
+    assert man["run_id"] == agg["committed_run_id"], "manifest is not the aggregate's committed run"
+    assert man["run_id"] in agg["run_ids"] and len(agg["run_ids"]) == agg["k"]
+    sp = agg["segment_save_pp"]
+    assert man["lift"]["segment_save_pp"] == sp["median"], "committed manifest's lift is not the median"
+    assert sp["min"] == min(sp["values"]) and sp["max"] == max(sp["values"])
+    assert len(sp["values"]) == agg["k"], "the aggregate must retain every one of the k draws"
+
+
+def test_readme_cites_the_pre_registered_median_and_range():
+    """README must cite the median lift, the range endpoints, the method, and the committed
+    median run — all extracted from demo_aggregate.json / manifest.json so they stay true
+    across re-runs (no hand-typed numbers to drift)."""
+    agg = json.loads(_read("dashboard/demo_aggregate.json"))
+    man = json.loads(_read("dashboard/manifest.json"))
     readme = _read("README.md")
-    assert m["run_id"] in readme, "README does not cite the committed run_id"
-    seg_before = round(m["baseline"]["segment_save_rate"] * 100)
-    seg_after = round(m["after"]["segment_save_rate"] * 100)
-    assert f"{seg_before}%" in readme and f"{seg_after}%" in readme, \
-        f"README must cite the committed segment lift {seg_before}% -> {seg_after}%"
-    eval_pct = round(m["after"]["eval_pass_rate"] * 100)
-    assert f"{eval_pct}%" in readme, f"README must cite the committed eval pass rate {eval_pct}%"
+    sp = agg["segment_save_pp"]
+    assert man["run_id"] in readme, "README does not cite the committed run_id"
+    assert str(sp["median"]) in readme, f"README must cite the median lift {sp['median']}"
+    assert str(sp["max"]) in readme, f"README must cite the range max {sp['max']}"
+    assert ("median of k=5" in readme.lower() or "median-of-5" in readme.lower()
+            or "median of 5" in readme.lower()), "README must name the median-of-k method"
+    # the concrete committed median run's before/after is also cited
+    sb, sa = round(man["baseline"]["segment_save_rate"] * 100), round(man["after"]["segment_save_rate"] * 100)
+    assert f"{sb}%" in readme and f"{sa}%" in readme, f"README must cite the median run's {sb}% -> {sa}%"
+
+
+def test_html_demo_docs_cite_the_pre_registered_median():
+    """M6: the marketing HTML must cite the SAME pre-registered median + range as
+    README/aggregate — no stale cross-run mixing (the sixth-review defect was an old n=20
+    cohort beside a freshly-updated lift in one sentence). Extracted from the aggregate."""
+    agg = json.loads(_read("dashboard/demo_aggregate.json"))
+    sp = agg["segment_save_pp"]
+    treated_n = agg["treated_cohort_n"]
+    for rel in ("docs/index.html", "docs/how-it-works.html"):
+        text = _read(rel)
+        assert str(sp["median"]) in text, f"{rel} must cite the median lift {sp['median']}"
+        assert str(sp["max"]) in text, f"{rel} must cite the range max {sp['max']}"
+        assert f"n={treated_n}" in text, f"{rel} must cite the treated cohort n={treated_n}"

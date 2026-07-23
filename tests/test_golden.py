@@ -52,6 +52,29 @@ def test_positive_golden_fixtures_have_no_obsolete_unsupported_claims():
     assert not offenders, f"pass fixtures contain claims the runtime forbids: {offenders}"
 
 
+def test_run_golden_isolates_a_failing_fixture_and_cannot_pass():
+    """L5: a single fixture that fails to judge is recorded and skipped instead of
+    aborting the whole calibration — but a set that could not be fully judged must NOT
+    clear the floor (no inflating agreement by shrinking the denominator). No network:
+    the judge call is stubbed."""
+    from unittest import mock
+    from evals import run_evals, judge
+
+    calls = {"n": 0}
+
+    def fake_judge(fx):
+        calls["n"] += 1
+        if calls["n"] == 1:                       # first fixture blows up
+            raise RuntimeError("transient judge failure")
+        return {"scores": {d: 5 for d in judge.RUBRIC}, "fairness_flag": False}
+
+    with mock.patch.object(run_evals.judge, "judge_conversation", side_effect=fake_judge):
+        r = run_evals.run_golden()
+    assert len(r["errored"]) == 1 and r["errored"][0]["error"]     # the failure is surfaced
+    assert r["n_judged"] == r["n"] - 1                             # the rest still ran
+    assert r["passes_floor"] is False                             # partial coverage never passes
+
+
 def test_there_is_at_least_one_negative_golden_fixture():
     # calibration needs boundary cases, not only perfect passes
     fails = [n for n, d in ((os.path.basename(p), json.loads(open(p).read()))

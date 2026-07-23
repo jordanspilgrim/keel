@@ -45,7 +45,10 @@ def build_conversation_views(conn) -> list[dict]:
     (already PII-redacted) words — we cluster on language, not on the label."""
     rows = conn.execute(
         "SELECT c.id, c.transcript_json, c.disposition_json, c.outcome, c.offer_made, "
-        "s.price FROM conversations c JOIN subscriptions s ON s.customer_id = c.customer_id"
+        # the price the customer was actually on at conversation time — immutable; the
+        # live subscription price is only a fallback for pre-snapshot historical rows.
+        "COALESCE(c.price_at_conversation, s.price) AS price "
+        "FROM conversations c JOIN subscriptions s ON s.customer_id = c.customer_id"
     ).fetchall()
     views = []
     for r in rows:

@@ -107,6 +107,15 @@ CREATE TABLE IF NOT EXISTS cancellation_requests (
     created_at        TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS escalation_requests (
+    id                INTEGER PRIMARY KEY,
+    conversation_id   INTEGER REFERENCES conversations(id),  -- linked at persist; NULL when queued live
+    session_key       TEXT,                    -- durable idempotency key when escalated live, before persist
+    reason            TEXT,                    -- why the hand-off happened
+    status            TEXT NOT NULL,           -- pending_human (mock hand-off queue)
+    created_at        TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS themes (
     id                INTEGER PRIMARY KEY,
     label             TEXT NOT NULL,
@@ -145,7 +154,7 @@ CREATE TABLE IF NOT EXISTS program_health (
 # Tables cleared by reset_db(), in FK-safe order (children first).
 _TABLES = [
     "program_health", "signals", "themes", "audit_log", "guardrail_events", "evals",
-    "cancellation_requests", "conversations", "scenarios", "subscriptions", "customers",
+    "cancellation_requests", "escalation_requests", "conversations", "scenarios", "subscriptions", "customers",
 ]
 
 
@@ -226,6 +235,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_cancel_session_key "
         "ON cancellation_requests(session_key) WHERE session_key IS NOT NULL")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_escalation_session_key "
+        "ON escalation_requests(session_key) WHERE session_key IS NOT NULL")
     conn.commit()
 
 

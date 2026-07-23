@@ -68,7 +68,11 @@ def _segment_metrics(conn, reason: str, run_id: str | None = None, phase: str | 
     if phase is not None:
         where.append("c.phase = ?"); params.append(phase)
     rows = conn.execute(
-        "SELECT c.outcome, c.offer_made, s.price FROM conversations c "
+        # the immutable conversation-time price, not the (possibly later-changed) live
+        # subscription price — margin-adjusted lift must be computed on what the customer
+        # was actually paying when they were saved.
+        "SELECT c.outcome, c.offer_made, COALESCE(c.price_at_conversation, s.price) AS price "
+        "FROM conversations c "
         "JOIN scenarios sc ON sc.id = c.scenario_id "
         "JOIN subscriptions s ON s.customer_id = c.customer_id "
         "WHERE " + " AND ".join(where), params).fetchall()
@@ -155,9 +159,12 @@ def _world_hash(snapshot: list[dict]) -> str:
     return "world-" + hashlib.sha256(blob.encode()).hexdigest()[:12]
 
 
-def main() -> int:
-    conn = db.connect()
-    run_id = "run-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+def run_once(conn, run_id: str | None = None) -> dict | None:
+    """Run the full flywheel ONCE and return its manifest — or None on a *structural*
+    bail (a lever-incompatible signal, or a non-identical starting state). A completed
+    paired run is returned REGARDLESS of the lift's sign: the median-of-k estimator must
+    include the low, zero, and negative draws, or it would be cherry-picking."""
+    run_id = run_id or ("run-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S"))
     print(f"① generate — seeded synthetic customers  (run {run_id})")
     synth.generate(conn, n=DEMO_SYNTH_N)  # larger world so the treated cohort can be n=60
     cohort = _cohort(conn)
@@ -190,8 +197,7 @@ def main() -> int:
     if not signal["lever_compatible"]:
         print(f"\n   ⚠ no available policy lever fits '{signal['segment']}' — the honest move is a "
               f"different intervention. Demo bails rather than misattribute.")
-        conn.close()
-        return 1
+        return None
     target = signal["segment"]
     before_seg = _segment_metrics(conn, target, run_id, "baseline")
     # Persist the signal under this run_id and load it back by id, so Act consumes
@@ -215,8 +221,7 @@ def main() -> int:
     if not identical_start:
         print(f"   ⚠ starting-state mismatch ({world_after_sha} != {world_sha}) — the comparison would "
               f"not be apples-to-apples. Demo bails rather than report a confounded lift.")
-        conn.close()
-        return 1
+        return None
     print(f"   restored starting-state {world_after_sha} (identical to baseline) — eligibility held constant")
     cohort2 = _cohort(conn)  # SAME scenarios (not re-seeded) → paired by construction
     cohort2_ids = sorted(s["id"] for s in cohort2)
@@ -247,6 +252,9 @@ def main() -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "run_id": run_id,
         "cohort_size": len(cohort), "cohort_scenario_ids": cohort_ids, "paired_cohort": paired,
+        # The TREATED segment's n (== both arms; the paired demo runs the same customers),
+        # so every doc that cites "treated cohort n=…" is backed by this artifact (M6).
+        "treated_cohort_n": before_seg["n"],
         "treated_segment": target,
         "segment_selection": "data-driven (structured intervention signal consumed by Act)",
         "intervention_signal_id": signal_id,
@@ -267,6 +275,9 @@ def main() -> int:
         "lift": {"segment_save_pp": round(seg_lift, 1), "segment_madj_pp": round(seg_madj, 1),
                  "overall_save_pp": round(overall_lift, 1)},
         "guardrail_catch_rate": round(catch_rate, 3),
+        # Persist the fairness gap the docs cite, so its number is backed by this run's
+        # artifact rather than living only in prose (L4).
+        "fairness_gap": m["fairness_gap"],
         "note": ("Paired before/after on identical seeded customers run from a byte-identical starting "
                  "subscription state (same starting_state_sha in both arms → eligibility held constant). "
                  "TWO variables changed together (discount policy + agent playbook), so this is a synthetic "
@@ -300,9 +311,104 @@ def main() -> int:
     ok = paired and seg_lift > 0 and data["meta"]["conversations"] > 0
     print("\nDEMO:", "the flywheel turned — treated-segment lift positive, paired cohort, provenance recorded." if ok
           else "did NOT meet the bar (needs a matched paired cohort AND a strictly positive treated-segment lift).")
-    conn.close()
-    return 0 if ok else 1
+    # NOTE: a non-positive lift is still a valid draw and is RETURNED (only the single-run
+    # main() translates it to a nonzero exit code). The median-of-k estimator must see it.
+    return manifest
+
+
+def main() -> int:
+    """Single honest run (kept for `python run_demo.py`)."""
+    conn = db.connect()
+    try:
+        manifest = run_once(conn)
+    finally:
+        conn.close()
+    if manifest is None:
+        return 1
+    return 0 if (manifest["paired_cohort"] and manifest["lift"]["segment_save_pp"] > 0) else 1
+
+
+def _median(xs: list[float]) -> float:
+    s = sorted(xs)
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else round((s[mid - 1] + s[mid]) / 2, 3)
+
+
+def run_median(k: int = 5) -> int:
+    """PRE-REGISTERED median-of-k: run the flywheel k times (fixed seed → same world, so
+    the only thing that varies is the LLM draw — exactly the run-to-run variance a user
+    re-running the demo sees), then report the MEDIAN treated-segment lift and the FULL
+    range. k is fixed in advance; every run is included (no dropping low/negative draws);
+    the committed headline is the median run, never the max. This is the honest fix for a
+    high-variance single-run estimator — not cherry-picking. If any run bails structurally
+    the whole estimate aborts (no partial median over fewer than k)."""
+    conn = db.connect()
+    runs: list[dict] = []
+    try:
+        for i in range(k):
+            print(f"\n{'#' * 20} PRE-REGISTERED RUN {i + 1}/{k} {'#' * 20}")
+            m = run_once(conn)
+            if m is None:
+                raise SystemExit(f"run {i + 1}/{k} bailed structurally — aborting the median "
+                                 f"(an honest estimate cannot be computed over fewer than k runs)")
+            runs.append(m)
+    finally:
+        conn.close()
+
+    def _dist(path_a: str, path_b: str) -> dict:
+        vals = [r[path_a][path_b] for r in runs]
+        return {"median": _median(vals), "min": min(vals), "max": max(vals), "values": vals}
+
+    seg_vals = [r["lift"]["segment_save_pp"] for r in runs]
+    median_seg = _median(seg_vals)
+    # The committed run is a REAL run whose segment lift equals the median (odd k → exists),
+    # so dashboard/manifest.json stays a single self-consistent artifact that IS the median.
+    committed = min(runs, key=lambda r: abs(r["lift"]["segment_save_pp"] - median_seg))
+    aggregate = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "method": ("pre-registered median of k paired runs; fixed seed (identical world), so the "
+                   "variance measured is the LLM-draw variance a re-run actually sees; every run "
+                   "included; committed headline is the median run, not the max"),
+        "k": k, "seed": config.SYNTH_SEED, "treated_cohort_n": committed["treated_cohort_n"],
+        "run_ids": [r["run_id"] for r in runs],
+        "committed_run_id": committed["run_id"],
+        "segment_save_pp": _dist("lift", "segment_save_pp"),
+        "segment_madj_pp": _dist("lift", "segment_madj_pp"),
+        "overall_save_pp": _dist("lift", "overall_save_pp"),
+        "eval_pass_rate": {"median": _median([r["after"]["eval_pass_rate"] for r in runs]),
+                           "min": min(r["after"]["eval_pass_rate"] for r in runs),
+                           "max": max(r["after"]["eval_pass_rate"] for r in runs)},
+        "fairness_gap": {"median": _median([r["fairness_gap"] for r in runs]),
+                         "min": min(r["fairness_gap"] for r in runs),
+                         "max": max(r["fairness_gap"] for r in runs)},
+    }
+    with open("dashboard/demo_aggregate.json", "w") as f:
+        json.dump(aggregate, f, indent=2)
+    # Make dashboard/manifest.json the committed (median) run — a real, self-consistent
+    # artifact equal to the reported median headline.
+    with open("dashboard/manifest.json", "w") as f:
+        json.dump(committed, f, indent=2)
+
+    sp = aggregate["segment_save_pp"]
+    print("\n" + "=" * 72)
+    print(f"PRE-REGISTERED MEDIAN-OF-{k}  (treated price-sensitive segment)")
+    print(f"  segment save lift:   median {sp['median']:+.1f} pp   range [{sp['min']:+.1f}, {sp['max']:+.1f}] pp   "
+          f"values {[round(v, 1) for v in sp['values']]}")
+    print(f"  committed run:       {committed['run_id']}  "
+          f"({round(committed['baseline']['segment_save_rate']*100)}% → "
+          f"{round(committed['after']['segment_save_rate']*100)}%)")
+    print(f"  eval pass (median):  {aggregate['eval_pass_rate']['median']*100:.0f}%   ·   "
+          f"fairness gap (median): {aggregate['fairness_gap']['median']}")
+    print(f"  aggregate: dashboard/demo_aggregate.json   ·   committed manifest: dashboard/manifest.json")
+    print("=" * 72)
+    return 0
 
 
 if __name__ == "__main__":
+    if "--median" in sys.argv:
+        n = 5
+        for a in sys.argv:
+            if a.startswith("--k="):
+                n = int(a.split("=", 1)[1])
+        sys.exit(run_median(n))
     sys.exit(main())
