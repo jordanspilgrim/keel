@@ -118,14 +118,38 @@ def _redteam(conn) -> tuple[dict, float]:
     return counts, rate
 
 
-def _reset_cohort_cooldown(conn, cohort_ids: list[int]) -> None:
-    """Clear the save-offer cooldown for the cohort so the AFTER batch measures fresh
-    state — WITHOUT wiping the database. This preserves the baseline conversations,
-    the signal, and the after conversations as one immutable run lineage."""
-    marks = ",".join("?" for _ in cohort_ids)
-    conn.execute(f"UPDATE subscriptions SET last_save_offer_days = NULL WHERE customer_id IN ({marks})",
-                 cohort_ids)
+_SNAPSHOT_COLS = ("customer_id", "plan", "price", "status", "last_save_offer_days")
+
+
+def _snapshot_world(conn, customer_ids: list[int]) -> list[dict]:
+    """Capture the EXACT starting subscription state for the cohort's customers. Both
+    arms of the paired comparison run from this same snapshot, so eligibility (and every
+    other subscription field) is held identical across arms — the ONLY things that
+    differ between baseline and after are the policy and the playbook."""
+    marks = ",".join("?" for _ in customer_ids)
+    rows = conn.execute(
+        f"SELECT {', '.join(_SNAPSHOT_COLS)} FROM subscriptions WHERE customer_id IN ({marks}) "
+        f"ORDER BY customer_id", customer_ids).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _restore_world(conn, snapshot: list[dict]) -> None:
+    """Restore subscriptions to a snapshot exactly — undoing any mutation the baseline
+    arm made (e.g. an accepted save sets the cooldown to 0). After this, the after arm
+    starts from a world byte-identical to the one the baseline arm started from."""
+    for row in snapshot:
+        conn.execute(
+            "UPDATE subscriptions SET plan=?, price=?, status=?, last_save_offer_days=? WHERE customer_id=?",
+            (row["plan"], row["price"], row["status"], row["last_save_offer_days"], row["customer_id"]))
     conn.commit()
+
+
+def _world_hash(snapshot: list[dict]) -> str:
+    """A content hash of the cohort's starting subscription state. Recorded for BOTH
+    arms in the manifest; identical hashes are the proof the comparison started from the
+    same world, so a reader can verify eligibility wasn't changed between arms."""
+    blob = json.dumps([[r[c] for c in _SNAPSHOT_COLS] for r in snapshot], sort_keys=True)
+    return "world-" + hashlib.sha256(blob.encode()).hexdigest()[:12]
 
 
 def main() -> int:
@@ -136,7 +160,12 @@ def main() -> int:
     cohort = _cohort(conn)
     cohort_ids = sorted(s["id"] for s in cohort)
     customer_ids = [s["customer_id"] for s in cohort]
-    print(f"   cohort: {len(cohort)} customers ({COHORT_PRICE} price-sensitive + {COHORT_OTHER} other)\n")
+    # Capture the EXACT starting world. Both arms run from this snapshot, so eligibility
+    # is held constant — the only things that differ are the policy and the playbook.
+    world0 = _snapshot_world(conn, customer_ids)
+    world_sha = _world_hash(world0)
+    print(f"   cohort: {len(cohort)} customers ({COHORT_PRICE} price-sensitive + {COHORT_OTHER} other)  ·  "
+          f"starting-state {world_sha}\n")
 
     # ---- BEFORE: conservative policy, discounts disabled --------------------
     print("② BASELINE — discounts DISABLED (conservative launch policy)")
@@ -169,13 +198,23 @@ def main() -> int:
     target = signal["segment"]
 
     # ---- ACT: enable discounts + improved playbook (TWO variables) ----------
-    # Reset ONLY the cohort's cooldown (not the whole DB) so the AFTER batch measures
-    # fresh state while baseline conversations + the signal survive under one run_id.
+    # RESTORE the exact starting world so the after arm begins byte-identical to the
+    # baseline arm — undoing any subscription mutation baseline made (e.g. an accepted
+    # save sets the cooldown to 0). This is what makes eligibility a held constant
+    # rather than a hidden confound: the only variables that change are policy + playbook.
     improved_system = _improved_system(target)
     print(f"④ ACT — consuming persisted signal #{signal_id}: enable discounts + lead-with-discount "
           f"playbook for the '{target}' segment")
     policy.DISCOUNTS_ENABLED = True
-    _reset_cohort_cooldown(conn, customer_ids)
+    _restore_world(conn, world0)
+    world_after_sha = _world_hash(_snapshot_world(conn, customer_ids))
+    identical_start = world_after_sha == world_sha  # proof the after arm starts from the same world
+    if not identical_start:
+        print(f"   ⚠ starting-state mismatch ({world_after_sha} != {world_sha}) — the comparison would "
+              f"not be apples-to-apples. Demo bails rather than report a confounded lift.")
+        conn.close()
+        return 1
+    print(f"   restored starting-state {world_after_sha} (identical to baseline) — eligibility held constant")
     cohort2 = _cohort(conn)  # SAME scenarios (not re-seeded) → paired by construction
     cohort2_ids = sorted(s["id"] for s in cohort2)
 
@@ -198,7 +237,8 @@ def main() -> int:
     seg_lift = (after_seg["save_rate"] - before_seg["save_rate"]) * 100
     seg_madj = (after_seg["madj_save_rate"] - before_seg["madj_save_rate"]) * 100
     overall_lift = (after["save_rate"] - before["save_rate"]) * 100
-    paired = cohort_ids == cohort2_ids and len(recs_a) == len(cohort) and len(recs_b) == len(cohort2)
+    paired = (cohort_ids == cohort2_ids and len(recs_a) == len(cohort)
+              and len(recs_b) == len(cohort2) and identical_start)
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -210,19 +250,25 @@ def main() -> int:
         "intervention_signal": signal,
         "guardrail_version": config.GUARDRAIL_VERSION,
         "variables_changed": ["discount_policy", "agent_playbook"],
+        "held_constant": ["cohort_scenarios", "starting_subscription_state", "eligibility"],
+        "identical_starting_state": identical_start,
+        "starting_state_sha": world_sha,
         "models": {"flagship": config.FLAGSHIP_MODEL, "mini": config.MINI_MODEL, "embedding": config.EMBEDDING_MODEL},
         "baseline": {"policy": "discounts_disabled", "playbook_sha": _sha(runtime.SYSTEM), "conversations": len(recs_a),
+                     "starting_state_sha": world_sha,
                      "segment_save_rate": before_seg["save_rate"], "overall_save_rate": before["save_rate"]},
         "after": {"policy": "discounts_enabled", "playbook_sha": _sha(improved_system), "conversations": len(recs_b),
+                  "starting_state_sha": world_after_sha,
                   "segment_save_rate": after_seg["save_rate"], "overall_save_rate": after["save_rate"],
                   "eval_pass_rate": m["eval_pass_rate"], "eval_coverage": m["coverage"]},
         "lift": {"segment_save_pp": round(seg_lift, 1), "segment_madj_pp": round(seg_madj, 1),
                  "overall_save_pp": round(overall_lift, 1)},
         "guardrail_catch_rate": round(catch_rate, 3),
-        "note": ("Paired before/after on identical seeded customers. TWO variables changed together "
-                 "(discount policy + agent playbook), so this is a synthetic PAIRED demonstration of the "
-                 "flywheel on the treated (price-sensitive) segment — not an isolated causal estimate. "
-                 "Numbers vary run to run."),
+        "note": ("Paired before/after on identical seeded customers run from a byte-identical starting "
+                 "subscription state (same starting_state_sha in both arms → eligibility held constant). "
+                 "TWO variables changed together (discount policy + agent playbook), so this is a synthetic "
+                 "PAIRED demonstration of the flywheel on the treated (price-sensitive) segment — not an "
+                 "isolated causal estimate. Numbers vary run to run."),
     }
     with open("dashboard/manifest.json", "w") as f:
         json.dump(manifest, f, indent=2)

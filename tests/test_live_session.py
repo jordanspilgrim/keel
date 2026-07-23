@@ -176,6 +176,28 @@ def test_resolve_is_idempotent(conn, monkeypatch):
                         (r1["conversation_id"],)).fetchone()[0] == 1
 
 
+def test_resolve_is_durably_idempotent_across_sessions(conn, monkeypatch):
+    """M1: idempotency survives a FRESH session object (e.g. a server restart), not just
+    the in-memory flag. A second resolve under the same resolution_key returns the
+    already-persisted record and never inserts a second conversation row."""
+    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(offer="1-month pause"))
+    monkeypatch.setattr(runtime, "_disposition",
+                        lambda *a: {"intent": "cancel", "churn_reason": "x", "offer_made": "1-month pause",
+                                    "offer_accepted": True, "outcome": "saved", "confidence": 0.8})
+    s = runtime.new_session(1, conn)
+    runtime.live_turn(s, "Too expensive.", conn)
+    r1 = runtime.resolve_session(s, "saved", conn, resolution_key="sess-XYZ")
+
+    # a brand-new session object (no in-memory 'resolved') retries with the SAME key
+    s2 = runtime.new_session(1, conn)
+    runtime.live_turn(s2, "Too expensive.", conn)
+    r2 = runtime.resolve_session(s2, "saved", conn, resolution_key="sess-XYZ")
+    assert r2["conversation_id"] == r1["conversation_id"]  # same durable record
+    # exactly ONE conversation carries that resolution key — no double-persist
+    assert conn.execute("SELECT count(*) FROM conversations WHERE resolution_key=?",
+                        ("sess-XYZ",)).fetchone()[0] == 1
+
+
 def test_resolve_rolls_back_on_persist_failure(conn, monkeypatch):
     from agent import offers
     monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(offer="1-month pause"))

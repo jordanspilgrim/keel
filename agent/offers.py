@@ -78,14 +78,6 @@ def present(offers: list[Offer], offer: Offer, terms: dict) -> None:
     offer.state, offer.presented_terms = "presented", dict(terms)
 
 
-def active(offers: list[Offer]) -> Offer | None:
-    """The current live offer (latest authorized or presented), or None."""
-    for o in reversed(offers):
-        if o.state in _LIVE_STATES:
-            return o
-    return None
-
-
 def presented(offers: list[Offer]) -> Offer | None:
     for o in reversed(offers):
         if o.state == "presented":

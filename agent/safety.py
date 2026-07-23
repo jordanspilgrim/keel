@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 import config
 import db
+from evals import judge
 
 _MIN_SAMPLE = 10          # don't judge health until there's a sample
 _COVERAGE_FLOOR = 0.90    # evals must cover ≥ this share of conversations
@@ -42,8 +43,9 @@ def program_state(conn) -> dict:
     advisories: list[str] = []
     metrics: dict = {"conversations": total}
     if total >= _MIN_SAMPLE:
-        passes = conn.execute("SELECT count(*) FROM evals WHERE verdict='pass'").fetchone()[0]
-        graded = conn.execute("SELECT count(*) FROM evals WHERE verdict IN ('pass','fail')").fetchone()[0]
+        # count ONLY current-spec grades, one per conversation (see judge helper) — the
+        # kill switch must never read a >100% pass rate off a multi-version history.
+        passes, graded = judge.current_spec_eval_counts(conn)
         pass_rate = passes / total
         coverage = graded / total
         metrics.update({"eval_pass_rate": round(pass_rate, 3), "eval_coverage": round(coverage, 3)})

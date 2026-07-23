@@ -107,16 +107,16 @@ python economics.py
   <p class="proves">Proves: <b>Phase 0</b> — reproducible synthetic data (identical SHA across runs) and the unit-economics model reproducing the plan’s headline.</p>
 
   <div class="step"><div class="num">3</div><h2>Run the unit tests <span class="badge free">no API</span></h2></div>
-  <p>69 fast, deterministic tests over the policy layer, guardrails, the response-contract/offer-ledger, enforcement, the live-session state machine, and the server — no network, ~1s.</p>
+  <p>105 fast, deterministic tests over the policy layer, guardrails, the response-contract/offer-ledger, enforcement, the live-session state machine, the money-demo integrity properties, and the server — no network, ~1s.</p>
   <pre>python -m pytest tests/ -q
-<span class="g"># .....................................................................  91 passed in ~1s</span></pre>
+<span class="g"># .....................................................................  105 passed in ~1s</span></pre>
   <table>
     <tr><th>File</th><th>Covers</th></tr>
     <tr><td class="s">test_policy.py</td><td>discount cap, save-offer cooldown, pause cap, margin floor, consequential → human, refund → human</td></tr>
     <tr><td class="s">test_guardrails.py</td><td>PII redaction (card / SSN / email / health), jailbreak patterns, promise + grounding checks</td></tr>
     <tr><td class="s">test_disclosure.py</td><td>the AI-disclosure turn and its enforced presence check</td></tr>
     <tr><td class="s">test_enforcement.py</td><td>shared batch/live input decision, the response-contract validation against the ledger, spelled/future promise bypasses, grounding rejects invented money</td></tr>
-    <tr><td class="s">test_offer_ledger.py</td><td>offer supersession (one active), exact terms survive persistence, the safety gate's version/freshness, batch DB isolation</td></tr>
+    <tr><td class="s">test_offer_ledger.py</td><td>multiple offers authorized, one presented, exact terms survive persistence, the safety gate's version/freshness, batch DB isolation</td></tr>
     <tr><td class="s">test_live_session.py · test_server.py</td><td>the live-session state machine and FastAPI plumbing — busy/resolve guards, connection-failure cleanup, save-invariant</td></tr>
   </table>
 
@@ -133,7 +133,7 @@ INELIGIBLE → <span class="g">lost</span>   (save offer rejected — 90-day coo
   <p>Screens the 14 seeded adversarial probes and exercises the compliance paths.</p>
   <pre>python -m scripts.phase2_accept</pre>
   <pre><span class="c"># abridged</span>
-jailbreak  caught 4/4     off_scope caught 4/4     pii_leak caught 3/3
+jailbreak  caught 6/6     off_scope caught 4/4     pii_leak caught 4/4
 over-limit 40% discount → capped 20%       deny_refund → needs_human
 <span class="g">GUARDRAIL CATCH RATE: 14/14 = 100%</span>
 <span class="g">PHASE 2 ACCEPTANCE: PASS</span></pre>
@@ -176,7 +176,7 @@ FLYWHEEL RESULT  (treated price-sensitive segment · single committed run · one
     <tr><th>Command</th><th>Phase</th><th>API</th><th>Proves</th></tr>
     <tr><td class="s">python synth.py</td><td>0</td><td>no</td><td>reproducible synthetic data</td></tr>
     <tr><td class="s">python economics.py</td><td>0</td><td>no</td><td>the cost-to-serve model</td></tr>
-    <tr><td class="s">pytest tests/</td><td>1–2</td><td>no</td><td>policy, guardrails, response-contract/ledger, enforcement, live session, server (91 tests)</td></tr>
+    <tr><td class="s">pytest tests/</td><td>1–2</td><td>no</td><td>policy, guardrails, response-contract/ledger, enforcement, live session, money-demo, server (105 tests)</td></tr>
     <tr><td class="s">-m scripts.phase1_accept</td><td>1</td><td>yes</td><td>save / let-churn behavior end-to-end</td></tr>
     <tr><td class="s">-m scripts.phase2_accept</td><td>2</td><td>yes</td><td>100% guardrail catch rate + compliance paths</td></tr>
     <tr><td class="s">-m scripts.phase3_accept</td><td>3</td><td>yes</td><td>grade 100% + judge calibration + known-bad conversation caught</td></tr>

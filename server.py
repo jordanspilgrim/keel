@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 
 from fastapi import Body, FastAPI, HTTPException
@@ -36,6 +37,7 @@ from pydantic import BaseModel
 import db
 from agent import runtime, safety
 from dashboard import export
+from evals import judge
 
 app = FastAPI(title="Keel Console")
 
@@ -46,6 +48,7 @@ _CONSOLE = os.path.join(_HERE, "console", "index.html")
 SESSIONS: dict[str, dict] = {}
 TURNS: dict[str, dict] = {}
 _LOCK = threading.Lock()
+_SESSION_TTL_S = 3600  # abandoned (unresolved, idle) sessions are evicted after this
 
 
 class StartReq(BaseModel):
@@ -98,18 +101,27 @@ def chat_start(req: StartReq):
         conn.close()
     sid = uuid.uuid4().hex
     with _LOCK:
+        session["_last_active"] = time.time()
         SESSIONS[sid] = session
     return {"session_id": sid, "disclosure": session["disclosure"], "customer": session["customer"]}
 
 
 def _evict() -> None:
-    """Bound memory: keep only the most recent completed turns / resolved
-    sessions. Called under _LOCK."""
+    """Bound memory. Called under _LOCK. Three sweeps: cap completed turn states, cap
+    resolved sessions, and TTL-evict ABANDONED sessions — unresolved conversations a
+    user walked away from mid-flow, which otherwise accumulate forever. A busy session
+    (a turn in progress) is never evicted."""
     done = [t for t, s in TURNS.items() if s["done"]]
     for t in done[:-100]:
         TURNS.pop(t, None)
     resolved = [sid for sid, s in SESSIONS.items() if s.get("resolved")]
     for sid in resolved[:-50]:
+        SESSIONS.pop(sid, None)
+    now = time.time()
+    stale = [sid for sid, s in SESSIONS.items()
+             if not s.get("resolved") and not s.get("_busy")
+             and now - s.get("_last_active", now) > _SESSION_TTL_S]
+    for sid in stale:
         SESSIONS.pop(sid, None)
 
 
@@ -130,18 +142,24 @@ def chat_turn(req: TurnReq):
         if session.get("_busy"):
             raise HTTPException(409, "a turn is already in progress")
         session["_busy"] = True
+        session["_last_active"] = time.time()  # keep an active conversation out of the TTL sweep
         tid = uuid.uuid4().hex
         turn_state = {"steps": [], "done": False, "result": None, "error": None}
         TURNS[tid] = turn_state
         _evict()
+
+    def _publish_step(s):
+        # Append under the SAME lock turn_status reads with, so a concurrent poll never
+        # observes the steps list mid-mutation.
+        with _LOCK:
+            turn_state["steps"].append(s)
 
     def worker():
         conn = None
         result, error = None, None
         try:
             conn = db.connect()  # inside try — a connect failure surfaces, never hangs
-            result = runtime.live_turn(session, req.message, conn,
-                                       on_step=lambda s: turn_state["steps"].append(s))
+            result = runtime.live_turn(session, req.message, conn, on_step=_publish_step)
         except Exception as e:  # never hang — surface the error
             error = f"{type(e).__name__}: {e}"
         finally:
@@ -179,8 +197,12 @@ def chat_resolve(req: ResolveReq):
             raise HTTPException(404, "session not found")
         if session.get("_busy"):
             raise HTTPException(409, "a turn is still in progress")
+        # Idempotent retry: an already-resolved session returns its existing record
+        # rather than a 409 — resolving is safe to repeat (same outcome, same row).
         if session.get("resolved"):
-            raise HTTPException(409, "this conversation has already been resolved")
+            rec = session.get("_record") or {}
+            return {"conversation_id": rec.get("conversation_id"), "outcome": rec.get("outcome"),
+                    "disposition": rec.get("disposition")}
         if session.get("_resolving"):
             raise HTTPException(409, "this conversation is already being resolved")
         # Claim the resolve under the lock so a second concurrent request can't
@@ -189,7 +211,9 @@ def chat_resolve(req: ResolveReq):
     conn = None
     try:
         conn = db.connect()  # inside try — a connect failure clears the claim, never sticks
-        record = runtime.resolve_session(session, req.outcome, conn)
+        # Pass the session id as the durable resolution key: a retry (even after a
+        # restart, on a fresh session object) returns the DB-persisted record.
+        record = runtime.resolve_session(session, req.outcome, conn, resolution_key=req.session_id)
     except ValueError as e:  # invalid transition (e.g. 'saved' with no accepted offer)
         raise HTTPException(422, str(e))
     finally:
@@ -238,7 +262,9 @@ def conversations():
         out = []
         for r in rows:
             disp = json.loads(r["disposition_json"])
-            verdict = conn.execute("SELECT verdict FROM evals WHERE conversation_id=?", (r["id"],)).fetchone()
+            verdict = conn.execute(
+                "SELECT verdict FROM evals WHERE conversation_id=? AND rubric_version=?",
+                (r["id"], judge.EVAL_SPEC_VERSION)).fetchone()
             gcount = conn.execute("SELECT count(*) FROM guardrail_events WHERE conversation_id=?", (r["id"],)).fetchone()[0]
             out.append({"id": r["id"], "outcome": r["outcome"], "offer_made": r["offer_made"],
                         "reason": disp.get("churn_reason"), "eval": verdict["verdict"] if verdict else None,
@@ -255,7 +281,9 @@ def conversation(cid: int):
         c = conn.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         if c is None:
             raise HTTPException(404, "conversation not found")
-        e = conn.execute("SELECT scores_json, verdict, rationale, fairness_flag FROM evals WHERE conversation_id=?", (cid,)).fetchone()
+        e = conn.execute(
+            "SELECT scores_json, verdict, rationale, fairness_flag FROM evals WHERE conversation_id=? AND rubric_version=?",
+            (cid, judge.EVAL_SPEC_VERSION)).fetchone()
         g = conn.execute("SELECT type, action, detail FROM guardrail_events WHERE conversation_id=? ORDER BY id", (cid,)).fetchall()
         a = conn.execute("SELECT actor, decision, reason FROM audit_log WHERE conversation_id=? ORDER BY id", (cid,)).fetchall()
         eval_obj = None

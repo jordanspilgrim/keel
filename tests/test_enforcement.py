@@ -83,11 +83,27 @@ def test_output_contract_fails_closed(conn, monkeypatch):
 
 
 # --- over-promise holds firm at the ceiling instead of escalating -----------
+def test_ceiling_fallback_escalates_without_an_intended_kind():
+    """M4: multiple offers may be AUTHORIZED as candidates; with no intended kind the
+    fallback must NOT pick one by recency — it returns None so the caller escalates.
+    With an intended kind it presents exactly THAT kind at its authorized ceiling."""
+    from agent import offers as offers_mod
+    rec = _rec()
+    offers_mod.authorize(rec["offers"], "discount", {"pct": 20})
+    offers_mod.authorize(rec["offers"], "pause", {"months": 3})
+    assert runtime._ceiling_fallback(rec, None) is None        # escalate, never guess by recency
+    assert offers_mod.presented(rec["offers"]) is None          # nothing presented arbitrarily
+    out = runtime._ceiling_fallback(rec, "discount")            # a specific kind IS a valid target
+    assert out is not None and "20% discount" in out
+    pres = offers_mod.presented(rec["offers"])
+    assert pres.kind == "discount" and pres.presented_terms == {"pct": 20}
+
+
 def test_over_promise_holds_at_ceiling_not_escalate(monkeypatch):
     from agent import offers as offers_mod
     # the model keeps returning an over-ceiling 40% offer (never validates)
     monkeypatch.setattr(runtime, "_generate_contract",
-                        lambda *a, **k: {"empathy_text": "I hear you.", "account_facts": [],
+                        lambda *a, **k: {"acknowledgement": "price", "account_facts": [],
                                          "process_cancellation": False,
                                          "offer": {"kind": "discount", "pct": 40, "months": None}})
     rec = _rec()
@@ -108,24 +124,39 @@ def _rec_facts():
     return r
 
 
-def _contract(empathy="I understand.", kind="none", pct=None, months=None, facts=None, cancel=False):
-    return {"empathy_text": empathy, "process_cancellation": cancel, "account_facts": facts or [],
+def _contract(ack="generic", kind="none", pct=None, months=None, facts=None, cancel=False):
+    return {"acknowledgement": ack, "process_cancellation": cancel, "account_facts": facts or [],
             "offer": {"kind": kind, "pct": pct, "months": months}}
 
 
-def test_empathy_text_must_be_fact_free():
+def test_acknowledgement_must_be_a_known_intent():
+    """The model picks an acknowledgement INTENT, not prose. An intent the server
+    can't render is rejected — the customer never sees a sentence the server didn't
+    author."""
     rec = _rec_facts()
     from agent import offers as offers_mod
     offers_mod.authorize(rec["offers"], "discount", {"pct": 20})
-    # the model tries to state the number ITSELF in the prose → rejected (server renders it)
-    assert not runtime._validate_contract(
-        _contract("I can give you 15 percent off right now.", kind="discount", pct=15), rec)[0]
-    assert not runtime._validate_contract(
-        _contract("You'll only pay $50 a month.", kind="discount", pct=20), rec)[0]
-    # fact-free empathy + a structured 20% offer → valid
-    ok, _ = runtime._validate_contract(
-        _contract("I really don't want to see you go.", kind="discount", pct=20), rec)
-    assert ok
+    # an off-enum acknowledgement (e.g. the model tried to smuggle prose) → rejected
+    assert not runtime._validate_contract(_contract("I can give you 15% off!", kind="discount", pct=20), rec)[0]
+    assert not runtime._validate_contract(_contract("", kind="discount", pct=20), rec)[0]
+    # a real intent + a structured 20% offer → valid
+    assert runtime._validate_contract(_contract("price", kind="discount", pct=20), rec)[0]
+
+
+def test_no_freeform_channel_can_carry_a_fact():
+    """Structural proof of the H1 fix: the contract has NO free-form customer text. The
+    ONLY ways a fact reaches the reply are the (ledger-validated) offer and the
+    (tool-validated) account_facts. A fabricated fact has nowhere to live: the rendered
+    reply for a bare acknowledgement is exactly the server's template, nothing else."""
+    rec = _rec_facts()
+    for ack, template in runtime._ACK_TEMPLATES.items():
+        rendered = runtime._render_reply(_contract(ack), rec)
+        assert rendered == template  # no offer, no facts asked → pure server template
+    # an account_fact the tool never returned is silently dropped from the render, not
+    # surfaced as a model claim
+    rendered = runtime._render_reply(
+        _contract("price", facts=[{"field": "made_up", "source_tool": "get_subscription"}]), rec)
+    assert rendered == runtime._ACK_TEMPLATES["price"]  # the unbacked fact produced no sentence
 
 
 def test_offer_validated_against_ledger():
@@ -160,9 +191,9 @@ def test_server_renders_offer_and_facts_not_the_model():
     rec = _rec_facts()
     offers_mod.authorize(rec["offers"], "discount", {"pct": 20})
     rendered = runtime._render_reply(
-        _contract("I'd love to keep you.", kind="discount", pct=20,
+        _contract("competitor", kind="discount", pct=20,
                   facts=[{"field": "price", "source_tool": "get_subscription"}]), rec)
-    assert "I'd love to keep you." in rendered          # the model's empathy
+    assert runtime._ACK_TEMPLATES["competitor"] in rendered  # the SERVER's acknowledgement sentence
     assert "20% off" in rendered                         # the SERVER's offer sentence
     assert "$99.00" in rendered                          # the SERVER's fact sentence (from the tool value)
 
@@ -178,26 +209,36 @@ def test_non_positive_committed_terms_rejected():
 def test_moderation_outage_does_not_deliver_model_prose(monkeypatch):
     from agent import offers as offers_mod
     monkeypatch.setattr(runtime, "_generate_contract",
-                        lambda *a, **k: {"empathy_text": "Here to help.", "account_facts": [],
+                        lambda *a, **k: {"acknowledgement": "generic", "account_facts": [],
                                          "process_cancellation": False,
                                          "offer": {"kind": "discount", "pct": 10, "months": None}})
     monkeypatch.setattr(guardrails, "check_tone", lambda r: {"flagged": False, "degraded": True, "reason": "down"})
     rec = _rec()
     offers_mod.authorize(rec["offers"], "discount", {"pct": 20})
     out = runtime._finalize_output(rec, [], runtime.SYSTEM, None)
-    assert "Here to help." not in out                    # tone-unverified reply withheld
+    assert runtime._ACK_TEMPLATES["generic"] not in out  # tone-unverified reply withheld
     assert "20% discount" in out                         # fell back to our safe ceiling text
 
 
-# --- the hand-off path is screened like any other reply (H2) ----------------
-def test_handoff_message_is_output_screened():
+# --- the hand-off path is SERVER-TEMPLATED and safe by construction (H1/H2) --
+def test_every_handoff_template_is_offer_and_fact_free():
     rec = _rec()
-    rec["tool_facts"] = [{"tool": "get_subscription", "call_id": "c1", "result": {"price": 99.0}}]
-    # a clean routing message is safe
-    assert runtime._handoff_safe("A teammate has the full conversation and will follow up shortly.", rec)
-    # a hand-off that floats an offer or invents a credit is NOT safe → fixed fallback used
+    # every server template satisfies the hand-off invariant: no offer, no money, no
+    # completed-action claim — proved for the whole set, not screened per model output
+    for text in runtime._HANDOFF_TEMPLATES.values():
+        assert runtime._handoff_safe(text, rec)
+    # the invariant itself still rejects an offer / credit / completed action
     assert not runtime._handoff_safe("A teammate will apply your 50% discount and $500 credit.", rec)
     assert not runtime._handoff_safe("I've applied the discount; a teammate will confirm.", rec)
+
+
+def test_handoff_message_matches_escalation_reason():
+    rec = _rec()
+    rec["escalate_reason"] = "refund requires human approval"
+    assert runtime._handoff_message([], runtime.SYSTEM, rec) == runtime._HANDOFF_TEMPLATES["refund"]
+    rec2 = _rec()
+    rec2["escalate_reason"] = "customer asked for a person"
+    assert runtime._handoff_message([], runtime.SYSTEM, rec2) == runtime._HANDOFF_TEMPLATES["human"]
 
 
 # --- malformed offers rejected ---------------------------------------------

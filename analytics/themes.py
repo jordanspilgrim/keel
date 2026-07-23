@@ -218,7 +218,12 @@ def rank_signals(cards: list[dict]) -> list[dict]:
 
 
 def persist(conn, cards: list[dict], signals: list[dict]) -> None:
-    conn.execute("DELETE FROM signals")
+    # Two kinds of rows live in `signals`: EPHEMERAL dashboard rankings (theme-linked,
+    # run_id NULL) that this re-cluster regenerates, and IMMUTABLE experiment signals
+    # (run_id set, persisted by persist_signal) that a run's manifest cites by id. Only
+    # the ephemeral rows are cleared here — deleting the experiment signals would dangle
+    # the manifest's intervention_signal_id after a post-run re-cluster (M2).
+    conn.execute("DELETE FROM signals WHERE run_id IS NULL")
     conn.execute("DELETE FROM themes")
     for c in cards:
         cur = conn.execute(

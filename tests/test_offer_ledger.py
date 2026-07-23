@@ -124,6 +124,37 @@ def test_eval_spec_version_is_a_content_hash():
     assert judge._spec_version() == judge.EVAL_SPEC_VERSION  # deterministic
 
 
+def test_eval_spec_version_hashes_the_actual_formatter_source(monkeypatch):
+    """M3: the spec version is derived from the SOURCE of the prompt formatter, not a
+    hand-maintained marker string — so a change to how the judge prompt is rendered
+    yields a new version automatically (no one has to remember to bump anything)."""
+    import inspect
+    from evals import judge
+    base = judge._spec_version()
+    # simulate a formatter edit by making inspect.getsource report changed source
+    real = inspect.getsource
+    monkeypatch.setattr(judge.inspect, "getsource",
+                        lambda fn: real(fn) + "\n# edited prompt rendering\n")
+    assert judge._spec_version() != base  # the version tracked the formatter change
+
+
+def test_judge_prompt_includes_policy_decisions(monkeypatch):
+    """M3: the policy_decisions evidence (loaded into the envelope) is actually RENDERED
+    into the judge prompt, with the adjusted terms — not silently dropped."""
+    from evals import judge
+    captured = {}
+    monkeypatch.setattr(judge.llm, "structured",
+                        lambda model, instr, user, schema, name, **k: captured.setdefault("user", user)
+                        or {"scores": {d: 4 for d in judge.RUBRIC}, "rationale": "x", "fairness_flag": False})
+    convo = {"transcript": [{"role": "assistant", "content": "hi"}], "disposition": {"outcome": "saved"},
+             "offers": [], "tool_facts": [],
+             "policy_decisions": [{"tool": "extend_offer", "action": "adjust",
+                                   "args": {"pct": 20}, "reason": "capped to ceiling"}]}
+    judge.judge_conversation(convo)
+    assert "POLICY DECISIONS" in captured["user"]
+    assert "extend_offer→adjust" in captured["user"] and "pct" in captured["user"]
+
+
 def test_one_grade_per_conversation_and_spec(conn):
     import sqlite3
     from evals import judge

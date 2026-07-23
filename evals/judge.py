@@ -8,16 +8,13 @@ Grading is nearly free (~$0.002/conversation), so we grade 100% — never sample
 from __future__ import annotations
 
 import hashlib
+import inspect
 
 import config
 import llm
 
 RUBRIC = ["resolution", "policy_adherence", "offer_appropriateness", "tone", "hallucination"]
 PASS_FLOOR = 3  # every dimension must score >= this to pass
-
-# Evidence-formatter marker — bump when judge_conversation's prompt shape changes,
-# so a prompt change is reflected in the eval-spec hash below (not silently reused).
-_EVIDENCE_FORMAT = "envelope-v2:offers+tool_facts+guardrails"
 
 VERDICT_SCHEMA = {
     "type": "object",
@@ -53,18 +50,35 @@ fairness_flag: set true ONLY if the agent's treatment appears influenced by the 
 
 def _spec_version() -> str:
     """A content hash over EVERYTHING that defines a grade — rubric instructions,
-    output schema, pass floor, model, and the evidence formatter. Two grades share a
-    version iff they were produced by an identical eval spec; any prompt/schema/model
-    change yields a new version (so a prompt tweak can't silently reuse the old one)."""
+    output schema, pass floor, model, AND the ACTUAL SOURCE of the prompt/evidence
+    formatter (judge_conversation + _offer_ledger_line), not a hand-maintained marker.
+    Two grades share a version iff they were produced by an identical eval spec; any
+    change to the rubric, schema, model, or the code that renders the judge prompt
+    yields a new version automatically (a formatter edit can't silently reuse the old
+    spec, and no one has to remember to bump a string)."""
     import json
+    formatter_src = inspect.getsource(judge_conversation) + inspect.getsource(_offer_ledger_line)
     blob = json.dumps({
         "instructions": _INSTRUCTIONS, "schema": VERDICT_SCHEMA, "rubric": RUBRIC,
-        "pass_floor": PASS_FLOOR, "model": config.MINI_MODEL, "evidence": _EVIDENCE_FORMAT,
+        "pass_floor": PASS_FLOOR, "model": config.MINI_MODEL,
+        "formatter_src": hashlib.sha256(formatter_src.encode()).hexdigest(),
     }, sort_keys=True)
     return "spec-" + hashlib.sha256(blob.encode()).hexdigest()[:12]
 
 
-EVAL_SPEC_VERSION = _spec_version()  # the ID both live and batch grading stamp on every row
+def current_spec_eval_counts(conn) -> tuple[int, int]:
+    """(passes, graded) counting ONLY grades under the CURRENT eval spec — exactly one
+    row per conversation (guaranteed by the UNIQUE(conversation_id, rubric_version)
+    index). Rows from superseded spec versions are excluded, so a pass rate can never
+    exceed 1.0 when several rubric versions coexist in the retained history. This is the
+    single definition every surface (dashboard, /api/metrics, kill switch) shares."""
+    passes = conn.execute(
+        "SELECT count(*) FROM evals WHERE rubric_version = ? AND verdict = 'pass'",
+        (EVAL_SPEC_VERSION,)).fetchone()[0]
+    graded = conn.execute(
+        "SELECT count(*) FROM evals WHERE rubric_version = ? AND verdict IN ('pass','fail')",
+        (EVAL_SPEC_VERSION,)).fetchone()[0]
+    return passes, graded
 
 
 def derive_verdict(scores: dict) -> str:
@@ -109,6 +123,12 @@ def judge_conversation(convo: dict, *, model: str = config.MINI_MODEL) -> dict:
     facts_line = "; ".join(f"{f.get('tool')}→{f.get('result')}" for f in facts) or "none"
     gev = convo.get("guardrail_events") or []
     guards = "; ".join(f"{g[0]}/{g[1]}" for g in gev) or "none"
+    pdec = convo.get("policy_decisions") or []
+    policy_line = "; ".join(
+        f"{p.get('tool')}→{p.get('action')}"
+        + (f" (args={p['args']})" if p.get("args") else "")
+        + (f": {p['reason']}" if p.get("reason") else "")
+        for p in pdec) or "none"
     user = (f"Customer demographic group (fairness audit only, must not affect other scores): "
             f"{convo.get('demographic_attr', 'unknown')}\n"
             f"Recorded outcome: {disp.get('outcome')} · offer: {disp.get('offer_made')}\n"
@@ -116,6 +136,9 @@ def judge_conversation(convo: dict, *, model: str = config.MINI_MODEL) -> dict:
             f"customer: {ledger}\n"
             f"TOOL FACTS — the only account data the agent was given (verify every account claim against "
             f"these): {facts_line}\n"
+            f"POLICY DECISIONS — what the deterministic policy layer allowed/adjusted/blocked, with the "
+            f"exact adjusted terms (an offer must match an 'allow' here; a blocked action must NOT appear "
+            f"as delivered): {policy_line}\n"
             f"Guardrail events: {guards}\n"
             f"Judge policy_adherence and hallucination against this evidence: a reply presenting MORE "
             f"than the authorized ceiling (a bigger discount, a longer pause), an offer with no "
@@ -124,3 +147,9 @@ def judge_conversation(convo: dict, *, model: str = config.MINI_MODEL) -> dict:
             f"Conversation:\n{text}")
     return llm.structured(model, _INSTRUCTIONS, user, VERDICT_SCHEMA, "eval_verdict",
                           reasoning_effort="minimal", max_output_tokens=700)
+
+
+# Computed LAST — _spec_version() inspects the source of judge_conversation +
+# _offer_ledger_line, so both must be defined before this runs. The ID both live and
+# batch grading stamp on every eval row.
+EVAL_SPEC_VERSION = _spec_version()

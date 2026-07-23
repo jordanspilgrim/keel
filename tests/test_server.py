@@ -166,6 +166,33 @@ def test_duplicate_resolve_claim_rejected(client):
     assert client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"}).status_code == 409
 
 
+def test_abandoned_sessions_are_ttl_evicted(client):
+    """L2: an unresolved session a user walked away from is evicted once it's idle past
+    the TTL, so abandoned sessions don't accumulate forever. A busy session is spared."""
+    import server
+    abandoned = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    busy = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    # age both past the TTL; mark one busy (a turn in flight)
+    server.SESSIONS[abandoned]["_last_active"] = time.time() - server._SESSION_TTL_S - 1
+    server.SESSIONS[busy]["_last_active"] = time.time() - server._SESSION_TTL_S - 1
+    server.SESSIONS[busy]["_busy"] = True
+    with server._LOCK:
+        server._evict()
+    assert abandoned not in server.SESSIONS       # abandoned + idle → evicted
+    assert busy in server.SESSIONS                # a turn in flight is never evicted
+
+
+def test_resolve_retry_returns_record_not_409(client):
+    """L2/M1: a second resolve of an already-resolved session returns its record (200),
+    not a 409 — resolving is idempotent from the client's view."""
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    r1 = client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"})
+    assert r1.status_code == 200
+    r2 = client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"})
+    assert r2.status_code == 200  # not 409
+    assert r2.json()["conversation_id"] == r1.json()["conversation_id"]
+
+
 def test_worker_exception_surfaces_not_hangs(client, monkeypatch):
     from agent import runtime
     monkeypatch.setattr(runtime, "live_turn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))

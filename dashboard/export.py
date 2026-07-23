@@ -19,6 +19,7 @@ import db
 import economics
 from agent import disclosure
 from analytics import themes as themes_mod
+from evals import judge
 
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -51,11 +52,12 @@ def conversation_metrics(conn, *, run_id: str | None = None, phase: str | None =
 # --- CANONICAL metric definitions (server + dashboard MUST share these) -----
 # One source of truth so /api/metrics and the exported dashboard never diverge.
 def eval_metrics(conn) -> dict:
-    """Eval pass rate over ALL conversations (an ungraded conversation cannot
-    'pass') and coverage = share with a real (non-error) grade."""
+    """Eval pass rate over ALL conversations (an ungraded conversation cannot 'pass')
+    and coverage = share with a real (non-error) grade. Counts ONLY grades under the
+    CURRENT eval spec, one per conversation — so a retained history of superseded
+    rubric versions can never push the rate above 1.0."""
     total = conn.execute("SELECT count(*) FROM conversations").fetchone()[0] or 1
-    passes = conn.execute("SELECT count(*) FROM evals WHERE verdict='pass'").fetchone()[0]
-    graded = conn.execute("SELECT count(*) FROM evals WHERE verdict IN ('pass','fail')").fetchone()[0]
+    passes, graded = judge.current_spec_eval_counts(conn)
     return {"eval_pass_rate": round(passes / total, 4), "eval_coverage": round(graded / total, 4)}
 
 

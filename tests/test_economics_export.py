@@ -38,6 +38,23 @@ def test_economics_zero_save_rate_is_safe():
     assert r["vendor_pnl"]["revenue"] == 0
 
 
+def test_economics_cost_per_save_scales_inversely_with_save_rate():
+    # cost/save = cost/conversation ÷ save_rate (both reported to 4 decimals)
+    r = economics.compute(economics.Levers(save_rate=0.5))
+    assert r["cost_per_conversation"] == pytest.approx(1.2835, abs=5e-4)
+    assert r["cost_per_save"] == pytest.approx(1.2835 / 0.5, abs=5e-4)
+    # a lower save rate makes each save strictly more expensive (2× at half the rate)
+    worse = economics.compute(economics.Levers(save_rate=0.25))
+    assert worse["cost_per_save"] == pytest.approx(2 * r["cost_per_save"], abs=1e-3)
+
+
+def test_pause_margin_cost_is_a_fixed_goodwill_fraction():
+    # 1-month pause on a $100 plan concedes exactly $7 of goodwill margin when accepted
+    assert economics.margin_cost("1-month pause", 100.0, accepted=True) == 7.0
+    assert economics.margin_cost("2-month pause", 100.0, accepted=True) == 14.0
+    assert economics.margin_cost("1-month pause", 100.0, accepted=False) == 0.0
+
+
 def test_margin_cost_by_offer_and_acceptance():
     # discount concedes the % of price monthly; only when ACCEPTED
     assert economics.margin_cost("20% discount", 100.0, accepted=True) == 20.0
@@ -67,9 +84,10 @@ def test_conversation_metrics_and_margin(conn):
     _persist(conn, "lost", None)
     m = export.conversation_metrics(conn, run_id="run-A", phase="baseline")
     assert m["n"] == 2 and m["save_rate"] == 0.5
-    # one save, discounted 20% → margin-adjusted contribution is (1 - 0.20) for that save
-    assert m["madj_save_rate"] == pytest.approx((1 - 0.20) / 2, abs=1e-6) or m["madj_save_rate"] > 0
-    assert price > 0
+    # one save, discounted 20% → margin-adjusted contribution is (1 - 0.20) for that
+    # save, averaged over 2 conversations → 0.40 exactly
+    assert m["madj_save_rate"] == pytest.approx((1 - 0.20) / 2, abs=1e-6)
+    assert price == 499.0  # customer 1 is on the Enterprise plan (deterministic synth)
 
 
 def test_eval_metrics_and_compliance_zero_safe(conn):
@@ -77,3 +95,24 @@ def test_eval_metrics_and_compliance_zero_safe(conn):
     em = export.eval_metrics(conn)
     assert em["eval_pass_rate"] == 0.0 and em["eval_coverage"] == 0.0
     assert export.compliance_coverage(conn) == 0.0
+
+
+def test_eval_metrics_never_exceed_one_across_spec_versions(conn):
+    """H2 regression: a retained history of grades under SUPERSEDED eval specs must not
+    inflate the pass rate. With one conversation graded 'pass' under both an old spec
+    and the current spec, the rate is 1.0 (current spec only), never 2.0."""
+    from evals import judge
+    _persist(conn, "saved", "20% discount")
+    cid = conn.execute("SELECT id FROM conversations").fetchone()["id"]
+    # a stale grade under a superseded spec + the current-spec grade (unique index
+    # allows one row per (conversation, version), so both coexist)
+    for ver in ("spec-OLDVERSION0", judge.EVAL_SPEC_VERSION):
+        conn.execute("INSERT INTO evals (conversation_id, scores_json, verdict, rubric_version, created_at) "
+                     "VALUES (?,?,?,?,?)", (cid, "{}", "pass", ver, "t"))
+    conn.commit()
+    em = export.eval_metrics(conn)
+    assert em["eval_pass_rate"] == 1.0    # current-spec only — not 2.0
+    assert em["eval_coverage"] == 1.0
+    # the kill switch reads the same current-spec counts
+    passes, graded = judge.current_spec_eval_counts(conn)
+    assert passes == 1 and graded == 1

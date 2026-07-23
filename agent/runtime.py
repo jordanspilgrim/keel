@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from datetime import datetime, timezone
 
 import config
@@ -218,14 +219,31 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, *
     return {"status": "rejected", "reason": verdict["reason"]}
 
 
-_HANDOFF_FALLBACK = ("Understood — I'm bringing in a teammate who can help with this. "
-                     "They'll have our full conversation, so you won't need to repeat anything.")
+# Hand-off messages are SERVER-TEMPLATED, keyed by WHY we're escalating. A hand-off
+# is a routing message, so — like the rest of the customer-facing reply — no model
+# authors its words: it states only that a teammate is taking over, never an offer,
+# an account fact, or a completed action. (Previously the model wrote the hand-off
+# and a regex screened it; a regex can't prove free text carries no fabricated claim,
+# so the free text is gone.)
+_HANDOFF_TEMPLATES = {
+    "refund": ("I understand you're looking for a refund. That needs a teammate with the right "
+               "authority, so I'm bringing one in now — they'll have our full conversation, so you "
+               "won't need to repeat anything."),
+    "human": ("Of course — I'm connecting you with a teammate now. They'll have everything we've "
+              "discussed, so you can pick up right where we left off."),
+    "consequential": ("This one needs a teammate who can make that change for you. I'm handing it to "
+                      "them now with our full conversation, so nothing gets lost."),
+    "generic": ("Understood — I'm bringing in a teammate who can help with this. They'll have our full "
+                "conversation, so you won't need to repeat anything."),
+}
+_HANDOFF_FALLBACK = _HANDOFF_TEMPLATES["generic"]
 
 
-def _handoff_safe(text: str, rec: dict) -> bool:
-    """A hand-off must make NO offer, state NO dollar amount, and claim NO completed
-    action — it just routes to a human. Same fact-free bar as the empathy prose, so
-    the escalation path is not a weaker output channel than an ordinary reply."""
+def _handoff_safe(text: str, rec: dict | None = None) -> bool:
+    """Invariant every hand-off message must satisfy: NO offer, NO dollar amount, NO
+    completed-action claim — it only routes to a human. The server templates satisfy
+    this by construction (a test asserts it); the helper stays as the checkable
+    property, not as a screen over model-authored text."""
     if not text:
         return False
     if guardrails.extract_discount_pcts(text) or guardrails.extract_pause_months(text):
@@ -235,51 +253,62 @@ def _handoff_safe(text: str, rec: dict) -> bool:
     return not guardrails.check_completion_claim(text)
 
 
+def _handoff_reason_key(rec: dict) -> str:
+    """Choose the hand-off template matching the escalation reason: an explicit refund
+    request, an explicit ask for a person, another consequential change, or generic."""
+    blob = (str(rec.get("escalate_reason", "")) + " "
+            + " ".join(str(e) for e in rec.get("guardrail", []))).lower()
+    if "refund" in blob:
+        return "refund"
+    if any(w in blob for w in ("human", "person", "representative", "someone", "manager")):
+        return "human"
+    if any(w in blob for w in ("consequential", "contract", "cancel_contract", "legal")):
+        return "consequential"
+    return "generic"
+
+
 def _handoff_message(input_list: list, system: str, rec: dict | None = None) -> str:
-    """A warm, contextual closing message when the agent must escalate. The model
-    writes it, but it is SCREENED with the same deterministic output checks as a
-    normal reply (no offer, no invented account fact); anything that fails those
-    checks falls back to a fixed safe message — the hand-off path is not a weaker
-    output channel than an ordinary turn."""
+    """The closing message when the agent must escalate — SERVER-TEMPLATED (no model
+    call), keyed by the escalation reason. A hand-off never carries an offer, an
+    account fact, or a completed action; it only routes to a human."""
     rec = rec if rec is not None else _new_rec()
-    try:
-        resp = llm.client().responses.create(
-            model=config.FLAGSHIP_MODEL,
-            instructions=system + (
-                "\n\nThis request needs a human teammate. Write ONLY a brief, warm closing message "
-                "(1-2 sentences) to the customer: acknowledge their specific request, say a teammate "
-                "will take it from here and already has the full conversation, and reassure them. "
-                "Make NO offer and state NO specific account numbers/prices; do not call tools."),
-            input=input_list,
-            reasoning={"effort": "low"},
-            max_output_tokens=400,
-        )
-        text = (resp.output_text or "").strip()
-        return text if _handoff_safe(text, rec) else _HANDOFF_FALLBACK
-    except Exception:
-        return _HANDOFF_FALLBACK
+    return _HANDOFF_TEMPLATES.get(_handoff_reason_key(rec), _HANDOFF_FALLBACK)
 
 
 _OUTPUT_SAFE_REPLY = ("I want to make sure I give you accurate, approved information — "
                       "let me bring in a teammate to help with this.")
 
-# SERVER-AUTHORITATIVE OUTPUT. The model never writes the customer-facing FACTS.
-# It returns only non-factual empathy prose plus STRUCTURED references (an offer by
-# kind+terms, and account facts by field+source-tool). The server validates those
-# against the offer ledger and the tool results, then RENDERS every factual sentence
-# itself from a fixed template. This removes the whole class of "the prose expressed
-# a bigger number than it declared" bugs: the customer only ever reads facts the
-# server generated from validated data, and the empathy prose is checked to contain
-# no offer terms or dollar amounts at all.
+# The set of acknowledgement INTENTS the model may pick. It never writes the words —
+# it chooses the feeling, the server renders the sentence. Keyed to the churn drivers
+# in the synthetic data plus a generic and a wrap-up ('closing').
+_ACK_TEMPLATES = {
+    "price": "I completely understand — cost has to make sense, and I'd like to find a way to make this work for you.",
+    "missing_feature": "That's fair — if something your team relies on isn't supported yet, that's a real gap, and I appreciate you telling us.",
+    "competitor": "I understand, and I respect that you're weighing your options — I'd genuinely like the chance to keep you with us.",
+    "support": "I'm sorry the support experience let you down — that's on us, and I'd like to make it right.",
+    "no_longer_needed": "That's completely fair — if it isn't part of your workflow anymore, I want to respect that.",
+    "generic": "I hear you, and I want to make sure we handle this the way that's right for you.",
+    "closing": "Thank you for being straight with me — I've got what I need to take it from here.",
+}
+
+# SERVER-AUTHORITATIVE OUTPUT. The model authors NO customer-facing text at all. It
+# returns only STRUCTURED intent — an acknowledgement to convey (chosen from a fixed
+# set), an offer by kind+terms, and account facts by field+source-tool — and the
+# server renders every sentence itself from validated data. There is no free-form
+# channel in which the model could state an account fact, a capability, a refund, or a
+# cancellation it isn't entitled to. (Earlier the model wrote 'fact-free' empathy prose
+# that a regex tried to police; a growing regex can't prove prose is fact-free — so the
+# prose is gone, replaced by an enum.)
 _CONTRACT_SCHEMA = {
     "type": "object",
     "properties": {
-        "empathy_text": {
+        "acknowledgement": {
             "type": "string",
-            "description": ("Warm, human framing (1-3 sentences). MUST NOT contain any discount percentage, "
-                            "pause length, dollar amount, or account number — the system renders every fact. "
-                            "Acknowledge the customer and set up the offer or the cancellation in feeling, "
-                            "not in numbers."),
+            "enum": list(_ACK_TEMPLATES),
+            "description": ("The feeling to acknowledge — the SERVER renders the sentence, you only pick "
+                            "the intent. Choose the one matching why they're leaving (price, "
+                            "missing_feature, competitor, support, no_longer_needed), 'closing' once "
+                            "they've decided and you're wrapping up, or 'generic' if none fit."),
         },
         "offer": {
             "type": "object",
@@ -310,17 +339,15 @@ _CONTRACT_SCHEMA = {
             "description": "True if the customer should be told their cancellation will be processed.",
         },
     },
-    "required": ["empathy_text", "offer", "account_facts", "process_cancellation"],
+    "required": ["acknowledgement", "offer", "account_facts", "process_cancellation"],
     "additionalProperties": False,
 }
 
 _CONTRACT_INSTRUCTIONS = (
-    "\n\nProduce your reply as a SERVER-RENDERED contract. You write ONLY the feeling; the system writes "
-    "every fact and every action sentence — do not restate them yourself:\n"
-    "- empathy_text: 1-2 warm, human sentences of acknowledgement ONLY. Do NOT state the offer, do NOT say "
-    "you'll process/apply/cancel anything, and do NOT mention any percentage, dollar amount, pause length, "
-    "plan, or account number — the system appends the exact offer and action sentences after your words. "
-    "Just make the customer feel heard.\n"
+    "\n\nProduce your reply as a SERVER-RENDERED contract. You do NOT write the customer-facing text at "
+    "all — you choose intent and the system renders every word:\n"
+    "- acknowledgement: pick the feeling to convey from the allowed set (the server writes the sentence). "
+    "Choose the one matching why they're leaving; use 'closing' when they've decided and you're wrapping up.\n"
     "- offer: the ONE retention offer to present, as kind + exact terms, or kind='none'. Terms must not "
     "exceed what the tool results authorized (if a tool authorized 'up to 20%', use at most 20 — never more, "
     "even if the customer demands it). Never reference an offer no tool authorized.\n"
@@ -349,19 +376,15 @@ _MONEY_IN_TEXT = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)")
 
 
 def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
-    """Validate the SERVER-AUTHORITATIVE contract. The model's empathy prose must be
-    FACT-FREE (the server renders every fact); the offer must be an authorized ledger
-    offer within its ceiling; each account_fact must reference a field a cited tool
+    """Validate the SERVER-AUTHORITATIVE contract. The model authors NO customer-facing
+    text — only structured intent — so there is no prose to police for smuggled facts.
+    We check: the acknowledgement is a known intent, the offer is an authorized ledger
+    offer within its ceiling, and each account_fact references a field a cited tool
     actually returned. Returns (ok, reason)."""
-    empathy = contract.get("empathy_text") or ""
-    # 1) empathy prose carries NO facts — no offer terms, no dollar amounts — so the
-    #    model cannot smuggle a bigger number than the structured offer records.
-    if guardrails.extract_discount_pcts(empathy) or guardrails.extract_pause_months(empathy):
-        return False, "empathy_text contains offer terms; keep prose fact-free (the system renders the offer)"
-    if _MONEY_IN_TEXT.search(empathy):
-        return False, "empathy_text contains a dollar amount; the system renders account facts"
-    if guardrails.check_completion_claim(empathy):
-        return False, "empathy_text claims an action is already applied (tools only propose)"
+    # 1) the acknowledgement must be one the SERVER knows how to render (the enum is
+    #    already enforced by structured output; this is the defensive backstop).
+    if contract.get("acknowledgement") not in _ACK_TEMPLATES:
+        return False, f"unknown acknowledgement intent {contract.get('acknowledgement')!r}"
 
     # 2) the offer must be an authorized ledger offer of its kind, within the ceiling
     offer = contract.get("offer") or {"kind": "none"}
@@ -413,11 +436,19 @@ def _fact_sentence(field: str, value) -> str:
     return f"Your {label} is {value}."
 
 
+# Cancellation is routed to a human, stated honestly: this POC has no billing backend,
+# so the reply does NOT assert the cancellation is done or claim a billing-period fact
+# it can't back — it says a teammate will process it and confirm.
+_CANCELLATION_SENTENCE = ("I'll pass your cancellation to our team to process, and we'll email you a "
+                          "confirmation once it's complete.")
+
+
 def _render_reply(contract: dict, rec: dict) -> str:
-    """Assemble the customer-facing reply: the model's fact-free empathy prose, then
-    every FACTUAL sentence rendered by the SERVER from validated data (account facts,
-    the offer, the cancellation) — the customer never reads a model-authored fact."""
-    parts = [(contract.get("empathy_text") or "").strip()]
+    """Assemble the customer-facing reply ENTIRELY from server text: the acknowledgement
+    sentence (rendered from the chosen intent), then every factual sentence the server
+    renders from validated data (account facts, the offer, the cancellation). No part
+    of this string is authored by the model."""
+    parts = [_ACK_TEMPLATES.get(contract.get("acknowledgement"), _ACK_TEMPLATES["generic"])]
     for f in contract.get("account_facts", []):
         val = _fact_value(rec, f.get("field"), f.get("source_tool"))
         if val is not None:
@@ -428,8 +459,7 @@ def _render_reply(contract: dict, rec: dict) -> str:
         parts.append(_offer_sentence(offer["kind"], terms))
         parts.append("Would you like to go ahead with that, or should I process the cancellation?")
     elif contract.get("process_cancellation"):
-        parts.append("I'll process your cancellation, and you'll keep access through the end of your "
-                     "current billing period.")
+        parts.append(_CANCELLATION_SENTENCE)
     return " ".join(p for p in parts if p)
 
 
@@ -480,11 +510,16 @@ def _intended_kind(contract: dict | None) -> str | None:
 
 
 def _ceiling_fallback(rec: dict, kind: str | None) -> str | None:
-    """Deterministic safe fallback when the model keeps trying to OVER-promise: if
-    there is an authorized offer of the kind the contract was presenting, present it
-    at exactly the authorized ceiling (what policy actually allows) rather than
-    escalating. Only an output failure with NO offer to fall back to should hand off."""
-    off = offers.offer_of_kind(rec["offers"], kind) if kind else offers.active(rec["offers"])
+    """Deterministic safe fallback when the model keeps trying to OVER-promise: if the
+    failed contract was presenting a SPECIFIC kind and policy authorized that kind,
+    present it at exactly the authorized ceiling rather than escalating. With NO
+    intended kind there is no principled way to choose among multiple authorized
+    candidates — picking by recency would be arbitrary — so we return None and let the
+    caller escalate. Multiple offers may be AUTHORIZED; exactly one is ever PRESENTED,
+    and only a kind the model actually tried to present is a valid fallback target."""
+    if kind is None:
+        return None
+    off = offers.offer_of_kind(rec["offers"], kind)
     if off is None:
         return None
     offers.present(rec["offers"], off, off.authorized_terms)
@@ -679,30 +714,37 @@ def persist_conversation(conn, record: dict) -> int:
         {"role": t["role"], "content": guardrails.redact_pii(t["content"])[0]}
         for t in record["transcript"]
     ]
-    cur = conn.execute(
-        "INSERT INTO conversations "
-        "(customer_id, scenario_id, transcript_json, disposition_json, offer_made, evidence_json, "
-        "outcome, run_id, phase, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (record["customer_id"], record["scenario_id"], db.dumps(stored_transcript),
-         db.dumps(record["disposition"]), record["offer_made"],
-         db.dumps(record.get("evidence") or {}), record["outcome"],
-         record.get("run_id"), record.get("phase"), _now()),
-    )
-    conv_id = cur.lastrowid
-    conn.executemany(
-        "INSERT INTO audit_log (conversation_id, actor, decision, reason, created_at) VALUES (?,?,?,?,?)",
-        [(conv_id, a, d, r, _now()) for (a, d, r) in record["audit"]],
-    )
-    conn.executemany(
-        "INSERT INTO guardrail_events (conversation_id, type, action, detail, created_at) VALUES (?,?,?,?,?)",
-        [(conv_id, t, a, d, _now()) for (t, a, d) in record["guardrail_events"]],
-    )
-    # Persist cooldown state: extending a save offer starts the 90-day clock, so a
-    # later conversation for the same customer won't immediately offer again.
-    if record.get("offer_made"):
-        conn.execute("UPDATE subscriptions SET last_save_offer_days = 0 WHERE customer_id = ?",
-                     (record["customer_id"],))
-    conn.commit()
+    # ONE transaction for the whole conversation + its audit/guardrail rows + cooldown
+    # update. If any write fails, roll the WHOLE thing back so the connection is never
+    # left holding a partial conversation that a later commit could silently flush.
+    try:
+        cur = conn.execute(
+            "INSERT INTO conversations "
+            "(customer_id, scenario_id, transcript_json, disposition_json, offer_made, evidence_json, "
+            "outcome, run_id, phase, resolution_key, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (record["customer_id"], record["scenario_id"], db.dumps(stored_transcript),
+             db.dumps(record["disposition"]), record["offer_made"],
+             db.dumps(record.get("evidence") or {}), record["outcome"],
+             record.get("run_id"), record.get("phase"), record.get("resolution_key"), _now()),
+        )
+        conv_id = cur.lastrowid
+        conn.executemany(
+            "INSERT INTO audit_log (conversation_id, actor, decision, reason, created_at) VALUES (?,?,?,?,?)",
+            [(conv_id, a, d, r, _now()) for (a, d, r) in record["audit"]],
+        )
+        conn.executemany(
+            "INSERT INTO guardrail_events (conversation_id, type, action, detail, created_at) VALUES (?,?,?,?,?)",
+            [(conv_id, t, a, d, _now()) for (t, a, d) in record["guardrail_events"]],
+        )
+        # Persist cooldown state: extending a save offer starts the 90-day clock, so a
+        # later conversation for the same customer won't immediately offer again.
+        if record.get("offer_made"):
+            conn.execute("UPDATE subscriptions SET last_save_offer_days = 0 WHERE customer_id = ?",
+                         (record["customer_id"],))
+        conn.commit()
+    except Exception:
+        conn.rollback()  # discard the partial write — never leave it open on the connection
+        raise
     record["conversation_id"] = conv_id
     return conv_id
 
@@ -780,15 +822,35 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
     return _turn_result(session, reply, rec["guardrail"][before:])
 
 
-def resolve_session(session: dict, outcome: str, conn) -> dict:
-    """End a live conversation: VALIDATE the outcome, persist it, and GRADE it
-    (so the live path also grades 100%). Raises ValueError on an invalid
-    transition (already resolved, or 'saved' without an accepted offer)."""
+def _load_resolved_record(conn, resolution_key: str | None) -> dict | None:
+    """Load the durably-persisted record for a resolution key, or None. This is the
+    DB-level idempotency source of truth: it survives a fresh session object or a
+    server restart, unlike the in-memory 'resolved' flag."""
+    if resolution_key is None:
+        return None
+    row = conn.execute(
+        "SELECT id, outcome, disposition_json FROM conversations WHERE resolution_key=?",
+        (resolution_key,)).fetchone()
+    if row is None:
+        return None
+    return {"conversation_id": row["id"], "outcome": row["outcome"],
+            "disposition": json.loads(row["disposition_json"])}
+
+
+def resolve_session(session: dict, outcome: str, conn, *, resolution_key: str | None = None) -> dict:
+    """End a live conversation: VALIDATE the outcome, persist it, and GRADE it (so the
+    live path also grades 100%). Idempotent at TWO levels: the in-memory 'resolved'
+    flag AND a durable `resolution_key` uniquely indexed in the DB — a retry (even from
+    a fresh session object after a restart) returns the already-persisted record instead
+    of double-committing. Raises ValueError only on a genuinely invalid transition."""
     rec = session["rec"]
-    # Idempotent: a retry after a successful resolve returns the SAME record rather
-    # than double-persisting or failing (the offer is already accepted/rejected).
     if session.get("resolved"):
         return session["_record"]
+    # Durable idempotency: if this key already produced a conversation, return it.
+    existing = _load_resolved_record(conn, resolution_key)
+    if existing is not None:
+        session.update(resolved=True, _record=existing, conversation_id=existing["conversation_id"])
+        return existing
     if session["outcome"] == "escalated":
         outcome = "escalated"
     if outcome not in ("saved", "lost", "escalated"):
@@ -810,8 +872,19 @@ def resolve_session(session: dict, outcome: str, conn) -> dict:
         record = {"customer_id": session["customer_id"], "scenario_id": None,
                   "transcript": session["transcript"], "disposition": disp, "outcome": outcome,
                   "offer_made": _offer_made(rec), "evidence": _evidence(rec),
-                  "guardrail_events": rec["guardrail"], "audit": rec["audit"]}
-        persist_conversation(conn, record)  # the durable commit — after this, resolved is true
+                  "guardrail_events": rec["guardrail"], "audit": rec["audit"],
+                  "resolution_key": resolution_key}
+        persist_conversation(conn, record)  # transactional durable commit (rolls back on failure)
+    except sqlite3.IntegrityError:
+        # Lost a race — another resolve for this SAME key committed first. Roll back our
+        # in-memory transition and return the durably-persisted winner (idempotent).
+        for o, st in snapshot:
+            o.state = st
+        winner = _load_resolved_record(conn, resolution_key)
+        if winner is not None:
+            session.update(resolved=True, _record=winner, conversation_id=winner["conversation_id"])
+            return winner
+        raise
     except Exception:
         for o, st in snapshot:  # roll back the in-memory transition so a retry works
             o.state = st
@@ -832,11 +905,14 @@ def _grade_and_store(conn, conv_id: int, record: dict, customer_id: int) -> None
     envelope the batch path uses (identical evidence). A judge failure writes a
     coverage-miss eval (verdict 'error') rather than silently leaving it ungraded."""
     from evals import judge, run_evals  # local import avoids any load-order cycle
-    convo = run_evals.build_judge_input(conn, conv_id)
     ver = judge.EVAL_SPEC_VERSION  # SAME content-hashed spec id the batch path stamps
     # idempotent: a retry replaces this conversation's row for the current spec
     conn.execute("DELETE FROM evals WHERE conversation_id=? AND rubric_version=?", (conv_id, ver))
     try:
+        # build_judge_input is INSIDE the grading boundary: an envelope/format failure
+        # records a coverage-miss 'error' row like any judge failure, rather than raising
+        # out of resolve_session after the conversation is already durably committed.
+        convo = run_evals.build_judge_input(conn, conv_id)
         v = judge.judge_conversation(convo)
         verdict = judge.derive_verdict(v["scores"])
         conn.execute(

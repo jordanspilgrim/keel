@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     outcome           TEXT,                    -- saved / lost / escalated
     run_id            TEXT,                    -- experiment run this belongs to (flywheel lineage)
     phase             TEXT,                    -- baseline / after (within a run)
+    resolution_key    TEXT,                    -- durable idempotency key for a live resolve (NULL for batch)
     created_at        TEXT NOT NULL
 );
 
@@ -182,6 +183,7 @@ _ADDED_COLUMNS = [
     ("program_health", "version", "TEXT"),
     ("evals", "rubric_version", "TEXT"),
     ("signals", "run_id", "TEXT"),
+    ("conversations", "resolution_key", "TEXT"),
 ]
 
 
@@ -202,6 +204,12 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_evals_conv_spec "
         "ON evals(conversation_id, rubric_version)")
+    # Durable idempotency for a live resolve: at most one conversation per resolution
+    # key. Partial index so batch conversations (NULL key) are unconstrained. A double
+    # resolve of the same session hits this at the DB level even across a restart.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_resolution_key "
+        "ON conversations(resolution_key) WHERE resolution_key IS NOT NULL")
     conn.commit()
 
 
