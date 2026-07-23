@@ -37,7 +37,15 @@ def grade_all(conn, *, max_workers: int = 8) -> dict:
     row for EACH one — a judge failure records verdict='error' so coverage stays
     honest, never a silent drop. Verdicts are derived mechanically from the scores."""
     ids = [r["id"] for r in conn.execute("SELECT id FROM conversations").fetchall()]
-    convos = [build_judge_input(conn, cid) for cid in ids]
+    # Build each judge input on the MAIN thread (SQLite is not thread-safe), but wrap
+    # EACH build so a single malformed legacy row records a coverage-miss for THAT
+    # conversation rather than aborting the whole batch before any error row is written.
+    built: list[tuple] = []  # (id, convo_or_None, build_err_or_None)
+    for cid in ids:
+        try:
+            built.append((cid, build_judge_input(conn, cid), None))
+        except Exception as e:
+            built.append((cid, None, f"build_judge_input: {type(e).__name__}: {e}"))
 
     def work(cv):
         try:
@@ -45,34 +53,37 @@ def grade_all(conn, *, max_workers: int = 8) -> dict:
         except Exception as e:
             return cv["id"], None, f"{type(e).__name__}: {e}"
 
-    results: dict[int, tuple] = {}
+    results: dict[int, tuple] = {}  # id -> (verdict_or_None, err)
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for cid, v, err in ex.map(work, convos):
+        for cid, v, err in ex.map(work, [cv for (_, cv, be) in built if cv is not None]):
             results[cid] = (v, err)
+    for cid, cv, be in built:  # a build failure is a coverage miss too
+        if be is not None:
+            results[cid] = (None, be)
 
     # Re-grade per conversation (replace only THAT conversation's prior eval for the
     # CURRENT spec version), so there is never a global zero-coverage window and
     # grades from other spec versions survive as history. Rows are tagged with the
     # content-hashed eval-spec version — identical for live and batch.
     ver = judge.EVAL_SPEC_VERSION
-    for cv in convos:
-        v, err = results[cv["id"]]
-        conn.execute("DELETE FROM evals WHERE conversation_id=? AND rubric_version=?", (cv["id"], ver))
+    for cid, cv, be in built:
+        v, err = results.get(cid, (None, "not graded"))
+        conn.execute("DELETE FROM evals WHERE conversation_id=? AND rubric_version=?", (cid, ver))
         if v:
             conn.execute(
                 "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, rubric_version, created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (cv["id"], db.dumps(v["scores"]), judge.derive_verdict(v["scores"]),
+                (cid, db.dumps(v["scores"]), judge.derive_verdict(v["scores"]),
                  v["rationale"], int(v["fairness_flag"]), ver, _now()))
-        else:  # coverage miss — recorded, not dropped
+        else:  # coverage miss (build OR judge failure) — recorded, not dropped
             conn.execute(
                 "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, rubric_version, created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (cv["id"], db.dumps({}), "error", err or "grading failed", 0, ver, _now()))
+                (cid, db.dumps({}), "error", err or "grading failed", 0, ver, _now()))
     conn.commit()
 
-    total = len(convos) or 1
-    ok = [(cv, results[cv["id"]][0]) for cv in convos if results[cv["id"]][0]]
+    total = len(built) or 1
+    ok = [(cv, results[cid][0]) for (cid, cv, be) in built if cv is not None and results[cid][0]]
     passes = sum(1 for _, v in ok if judge.derive_verdict(v["scores"]) == "pass")
     halluc = sum(1 for _, v in ok if v["scores"]["hallucination"] <= 2)
     fairness_flags = sum(1 for _, v in ok if v["fairness_flag"])
@@ -89,7 +100,7 @@ def grade_all(conn, *, max_workers: int = 8) -> dict:
     fairness_gap = round(max(pass_rates) - min(pass_rates), 3) if pass_rates else 0.0
 
     # pass rate is over ALL conversations — a conversation we couldn't grade cannot "pass"
-    return {"total": len(convos), "graded": len(ok),
+    return {"total": len(built), "graded": len(ok),
             "coverage": round(len(ok) / total, 3),
             "eval_pass_rate": round(passes / total, 3),
             "hallucination_rate": round(halluc / total, 3), "fairness_flags": fairness_flags,

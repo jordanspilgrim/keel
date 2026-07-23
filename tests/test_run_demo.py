@@ -55,6 +55,39 @@ def test_world_hash_is_order_independent_and_reproducible(conn):
         == run_demo._world_hash(run_demo._snapshot_world(conn, list(reversed(ids))))
 
 
+def test_persist_refuses_saved_plus_cancelled(conn):
+    """H1 invariant: a conversation cannot be both saved and cancellation-routed."""
+    import pytest
+    from agent import runtime
+    with pytest.raises(ValueError):
+        runtime.persist_conversation(conn, {
+            "customer_id": 1, "scenario_id": None, "transcript": [{"role": "user", "content": "x"}],
+            "disposition": {"outcome": "saved"}, "outcome": "saved", "offer_made": "20% discount",
+            "evidence": {}, "guardrail_events": [], "audit": [], "cancellation_routed": True})
+
+
+def test_batch_is_terminal_after_routed_cancellation(conn, monkeypatch):
+    """H1: once the batch agent routes a cancellation it does NOT run again and the
+    simulator is not re-asked — the same terminal semantics as the live path, so no
+    saved-after-cancellation record can arise."""
+    import sim
+    from agent import runtime
+    calls = {"sim": 0}
+
+    def fake_advance(pending, transcript, input_list, cid, sub, conn, rec, system=runtime.SYSTEM, on_step=None):
+        rec["cancellation_routed"] = True
+        transcript.append({"role": "assistant", "content": "I'll pass your cancellation to our team."})
+        return "…"
+    monkeypatch.setattr(runtime, "_advance", fake_advance)
+    monkeypatch.setattr(sim, "respond",
+                        lambda *a, **k: (calls.__setitem__("sim", calls["sim"] + 1), {"decision": "continue", "reply": "x"})[1])
+    monkeypatch.setattr(runtime, "_disposition", lambda *a: {"outcome": "lost", "offer_made": None})
+    rec = runtime.simulate_conversation(
+        {"id": None, "customer_id": 1, "opening_message": "cancel me", "churn_reason": "price"}, conn)
+    assert rec["outcome"] == "lost" and rec["cancellation_routed"] is True
+    assert calls["sim"] == 0  # simulator never re-asked → terminal, no re-entry
+
+
 def test_reset_db_clears_cancellation_requests(conn):
     """A cancellation_requests row (FK → conversations) must not block reset_db's
     FK-ordered deletes — the demo re-seeds a DB that already holds routed cancellations."""

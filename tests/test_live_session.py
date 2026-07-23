@@ -176,6 +176,31 @@ def test_resolve_is_idempotent(conn, monkeypatch):
                         (r1["conversation_id"],)).fetchone()[0] == 1
 
 
+def test_live_cancellation_is_durable_before_resolve(conn, monkeypatch):
+    """H4: when a live turn routes a cancellation, the mock work-queue row is durable
+    IMMEDIATELY (keyed by session id), before any /resolve — so a browser close, restart,
+    or TTL eviction can't lose the promised obligation."""
+    def _cancel_agent(input_list, cid, sub, conn, rec, system=runtime.SYSTEM, on_step=None):
+        runtime._route_cancellation(rec)  # the agent conceded a cancellation this turn
+        reply = "I'll pass your cancellation to our team to process."
+        input_list.append({"role": "assistant", "content": reply})
+        return reply
+    monkeypatch.setattr(runtime, "_agent_turn", _cancel_agent)
+    s = runtime.new_session(1, conn)
+    s["_session_id"] = "sess-DUR"
+    res = runtime.live_turn(s, "just cancel me", conn)
+    assert res["outcome"] == "cancelled"
+    # the work item is durable NOW — before any resolve — keyed by the session
+    row = conn.execute("SELECT status, channel, conversation_id FROM cancellation_requests "
+                       "WHERE session_key=?", ("sess-DUR",)).fetchone()
+    assert row is not None and row["status"] == "pending_human" and row["conversation_id"] is None
+    # a later resolve LINKS that row to the conversation instead of double-inserting
+    runtime.resolve_session(s, "lost", conn, resolution_key="sess-DUR")
+    rows = conn.execute("SELECT conversation_id FROM cancellation_requests WHERE session_key=?",
+                        ("sess-DUR",)).fetchall()
+    assert len(rows) == 1 and rows[0]["conversation_id"] is not None  # linked, not duplicated
+
+
 def test_resolve_is_durably_idempotent_across_sessions(conn, monkeypatch):
     """M1: idempotency survives a FRESH session object (e.g. a server restart), not just
     the in-memory flag. A second resolve under the same resolution_key returns the

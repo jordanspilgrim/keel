@@ -39,6 +39,18 @@ def test_docs_state_the_actual_test_count():
         assert claims == {actual}, f"{rel} claims {claims}, actual is {actual}"
 
 
+def test_compliance_metric_not_described_as_audit_coverage():
+    """M2: the canonical compliance_coverage checks TRANSCRIPT disclosure only — no
+    public surface may describe it as covering audit records (which it never queries)."""
+    for rel in ("console/index.html", "docs/keel-dashboard.html", "dashboard/index.html", "BUILD.md"):
+        try:
+            text = _read(rel).lower()
+        except FileNotFoundError:
+            continue
+        assert "disclosure + audit" not in text, f"{rel} overclaims audit coverage"
+        assert "present and an audit record" not in text, f"{rel} overclaims audit coverage"
+
+
 def test_readme_matches_the_committed_run_manifest():
     """The README's committed-run numbers must match dashboard/manifest.json exactly."""
     m = json.loads(_read("dashboard/manifest.json"))

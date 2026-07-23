@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE TABLE IF NOT EXISTS cancellation_requests (
     id                INTEGER PRIMARY KEY,
-    conversation_id   INTEGER REFERENCES conversations(id),
+    conversation_id   INTEGER REFERENCES conversations(id),  -- linked at persist; NULL when queued live
+    session_key       TEXT,                    -- durable idempotency key when routed live, before persist
     status            TEXT NOT NULL,           -- pending_human (mock work queue)
     channel           TEXT,                    -- follow-up channel the reply promised, e.g. email
     created_at        TEXT NOT NULL
@@ -194,6 +195,7 @@ _ADDED_COLUMNS = [
     ("signals", "run_id", "TEXT"),
     ("conversations", "resolution_key", "TEXT"),
     ("conversations", "price_at_conversation", "REAL"),
+    ("cancellation_requests", "session_key", "TEXT"),
 ]
 
 
@@ -220,6 +222,10 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_resolution_key "
         "ON conversations(resolution_key) WHERE resolution_key IS NOT NULL")
+    # At most one live-queued cancellation per session (idempotent turn-time routing).
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_cancel_session_key "
+        "ON cancellation_requests(session_key) WHERE session_key IS NOT NULL")
     conn.commit()
 
 

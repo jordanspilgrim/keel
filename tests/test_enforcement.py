@@ -328,6 +328,27 @@ def test_offer_validated_against_ledger():
     assert runtime._validate_contract(_contract(kind="discount", pct=10), rec)[0]
 
 
+def test_customer_name_can_never_be_stated_as_an_account_fact():
+    """H2: identity/PII fields are not customer-visible — a contract referencing
+    get_customer.name is rejected, so a name can never reach the reply or the stored
+    transcript by being cited as an account fact."""
+    rec = _rec()
+    rec["tool_facts"] = [{"tool": "get_customer", "call_id": "c1",
+                          "result": {"name": "Alice Smith", "segment": "SMB"}}]
+    ok, reason = runtime._validate_contract(
+        _contract("price", facts=[{"field": "name", "source_tool": "get_customer"}]), rec)
+    assert not ok and "customer-visible" in reason
+    # an internal field (the cooldown counter) is likewise not customer-facing
+    rec["tool_facts"].append({"tool": "get_subscription", "call_id": "c2",
+                              "result": {"price": 99.0, "last_save_offer_days": 3}})
+    assert not runtime._validate_contract(
+        _contract("price", facts=[{"field": "last_save_offer_days", "source_tool": "get_subscription"}]), rec)[0]
+    # a rendered reply for such a (rejected) contract would never contain the name
+    rendered = runtime._render_reply(
+        _contract("price", facts=[{"field": "name", "source_tool": "get_customer"}]), rec)
+    assert "Alice Smith" not in rendered
+
+
 def test_account_fact_must_reference_a_real_tool_field():
     rec = _rec_facts()
     # a field the cited tool never returned → rejected

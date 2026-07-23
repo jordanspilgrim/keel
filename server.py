@@ -101,6 +101,7 @@ def chat_start(req: StartReq):
         conn.close()
     sid = uuid.uuid4().hex
     with _LOCK:
+        session["_session_id"] = sid  # so live_turn can durably key a routed cancellation
         session["_last_active"] = time.time()
         SESSIONS[sid] = session
         _evict()  # sweep abandoned sessions on EVERY start, not only on a later turn (M6)

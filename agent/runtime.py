@@ -120,6 +120,17 @@ _EVIDENCE_TOOL_FIELDS = {
     "get_usage": ("logins_last_30d", "active_seats", "licensed_seats", "feature_adoption_pct"),
 }
 
+# Fields the agent may state TO THE CUSTOMER (and therefore render into a durable
+# transcript). Deliberately narrower than the eval allowlist above: it excludes
+# customer identity (get_customer.name — PII) and internal fields (segment, arpu, the
+# cooldown counter) the customer has no business being told. A contract that references
+# a (tool, field) not listed here is rejected, so a name can never reach the reply or
+# the stored transcript by being cited as an "account fact".
+_CUSTOMER_FACT_FIELDS = {
+    "get_subscription": ("plan", "price", "status"),
+    "get_usage": ("active_seats", "licensed_seats", "logins_last_30d", "feature_adoption_pct"),
+}
+
 
 def _redact_evidence_value(v):
     """Recursively redact free-form strings anywhere in a persisted-evidence value —
@@ -139,9 +150,11 @@ def _deidentify_tool_fact(fct: dict) -> dict:
     field), then recursively redact any free-form string that remains."""
     result = fct.get("result")
     if isinstance(result, dict):
-        allow = _EVIDENCE_TOOL_FIELDS.get(fct.get("tool"))
-        if allow is not None:
-            result = {k: result[k] for k in allow if k in result}
+        # Fail CLOSED: an unregistered tool keeps NO fields (default ()), so adding a
+        # read tool without updating the evidence map can't silently switch the privacy
+        # posture from allowlist to allow-all.
+        allow = _EVIDENCE_TOOL_FIELDS.get(fct.get("tool"), ())
+        result = {k: result[k] for k in allow if k in result}
         result = _redact_evidence_value(result)
     return {"tool": fct.get("tool"), "call_id": fct.get("call_id"), "result": result}
 
@@ -415,8 +428,10 @@ _CONTRACT_INSTRUCTIONS = (
     "offer.kind='none', pick 'offer_declined' (or 'cant_meet'), and process_cancellation=true to close. "
     "(3) Make your best offer ONCE, then respect a firm no — looping the same offer is a failure to resolve.\n"
     "- account_facts: leave EMPTY unless the customer explicitly asked about a specific account fact; then "
-    "reference it by field + the tool that returned it (the system fills in the value). Never volunteer "
-    "account facts.\n"
+    "reference it by field + the tool that returned it (the system fills in the value). ONLY these "
+    "customer-visible fields are allowed: plan, price, status (get_subscription) and active_seats, "
+    "licensed_seats, logins_last_30d, feature_adoption_pct (get_usage). NEVER reference the customer's name "
+    "or any internal field — those are not customer-facing. Never volunteer account facts.\n"
     "- process_cancellation: true when you are letting the customer go (pair it with 'cant_meet'/"
     "'offer_declined', never with an offer still being presented).\n"
     "Do not call tools."
@@ -504,11 +519,15 @@ def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
             return False, (f"you have an authorized {pending.kind} the customer hasn't seen — present it "
                            f"before processing a cancellation")
 
-    # 3) each account_fact must reference a field a cited tool actually returned
+    # 3) each account_fact must (a) be a CUSTOMER-VISIBLE field (never identity/PII or an
+    #    internal field), and (b) reference a value a cited tool actually returned.
     for f in contract.get("account_facts", []):
-        if _fact_value(rec, f.get("field"), f.get("source_tool")) is None:
-            return False, (f"account_fact '{f.get('field')}' from '{f.get('source_tool')}' "
-                           f"was not returned by that tool")
+        field, tool = f.get("field"), f.get("source_tool")
+        if field not in _CUSTOMER_FACT_FIELDS.get(tool, ()):
+            return False, (f"account_fact '{field}' from '{tool}' is not a customer-visible field "
+                           f"(identity/internal fields must never be stated to the customer)")
+        if _fact_value(rec, field, tool) is None:
+            return False, (f"account_fact '{field}' from '{tool}' was not returned by that tool")
     return True, ""
 
 
@@ -555,6 +574,10 @@ def _render_reply(contract: dict, rec: dict) -> str:
     of this string is authored by the model."""
     parts = [_ACK_TEMPLATES.get(contract.get("acknowledgement"), _ACK_TEMPLATES["generic"])]
     for f in contract.get("account_facts", []):
+        # defense in depth: never render a field that isn't customer-visible, even if a
+        # contract somehow reached here with one (validation already rejects them).
+        if f.get("field") not in _CUSTOMER_FACT_FIELDS.get(f.get("source_tool"), ()):
+            continue
         val = _fact_value(rec, f.get("field"), f.get("source_tool"))
         if val is not None:
             parts.append(_fact_sentence(f["field"], val))
@@ -579,6 +602,19 @@ def _route_cancellation(rec: dict) -> None:
     rec["cancellation_routed"] = True
     rec["audit"].append(("agent", "cancellation_routed",
                          "cancellation queued for human processing (mock work queue), email follow-up"))
+
+
+def _queue_cancellation_live(conn, session_key: str | None) -> None:
+    """Durably enqueue a cancellation work item keyed by SESSION id BEFORE the live
+    routing sentence is returned — so the promise survives a browser close, restart, or
+    TTL eviction even if /resolve is never called. Idempotent on the session key; the
+    row is linked to its conversation later at persist time."""
+    if not session_key:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO cancellation_requests (session_key, status, channel, created_at) "
+        "VALUES (?,?,?,?)", (session_key, "pending_human", "email", _now()))
+    conn.commit()
 
 
 def _apply_contract(contract: dict, rec: dict) -> None:
@@ -828,11 +864,14 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
         if rec["escalated"]:
             outcome = "escalated"
             break
-        # NOTE: a routed cancellation records a real action + a terminal state on the
-        # LIVE path (a later user message won't re-enter the agent). In the BATCH sim
-        # there is no user re-entry, so we let the simulated customer respond to the
-        # close rather than hard-terminating mid-negotiation — the sim's own accept/
-        # reject then ends the conversation, matching how the live customer would react.
+        # A routed cancellation is TERMINAL in BOTH paths (one state machine, no drift):
+        # once the agent has conceded and recorded the action, it does not run again, so a
+        # conversation can never be both saved and cancellation-routed. Guard C ('offer
+        # before you concede') + the hold-your-offer prompt mean genuine saves land BEFORE
+        # any concession, so terminality doesn't cost recoverable saves.
+        if rec.get("cancellation_routed"):
+            outcome = "lost"
+            break
         cust = sim.respond(scenario, reply, transcript)
         if cust["decision"] in ("accept", "reject"):
             # The customer's closing line is part of the conversation — record it so
@@ -864,6 +903,11 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
 def persist_conversation(conn, record: dict) -> int:
     """Write a simulated conversation + its audit/guardrail rows. Returns the
     new conversation id and stamps it onto the record. Call on the main thread."""
+    # Application invariant: a routed cancellation is terminal, so 'saved' and
+    # cancellation_routed are mutually exclusive. Refuse to persist the contradiction
+    # rather than let a logically impossible record reach the metrics or the judge.
+    if record.get("outcome") == "saved" and record.get("cancellation_routed"):
+        raise ValueError("invariant violation: a conversation cannot be both saved and cancellation-routed")
     # De-identify before storage/embedding: redact EVERY role defensively (data
     # minimization). User turns are normally redacted at input, but the terminal
     # simulator reply and any assistant turn that echoes account PII must also be
@@ -903,13 +947,18 @@ def persist_conversation(conn, record: dict) -> int:
             "INSERT INTO guardrail_events (conversation_id, type, action, detail, created_at) VALUES (?,?,?,?,?)",
             [(conv_id, t, a, d, _now()) for (t, a, d) in record["guardrail_events"]],
         )
-        # A routed cancellation enqueues a durable mock work-queue item, so the
-        # customer-facing "a teammate will process this, email to follow" is backed by
-        # recorded state, not an empty promise.
+        # A routed cancellation has a durable mock work-queue item. On the LIVE path a
+        # session-keyed row was already enqueued at turn time — link it to this
+        # conversation. On the BATCH path (or if none was pre-queued) insert one now.
         if record.get("cancellation_routed"):
-            conn.execute(
-                "INSERT INTO cancellation_requests (conversation_id, status, channel, created_at) "
-                "VALUES (?,?,?,?)", (conv_id, "pending_human", "email", _now()))
+            skey = record.get("resolution_key")
+            linked = conn.execute(
+                "UPDATE cancellation_requests SET conversation_id=? WHERE session_key=? AND conversation_id IS NULL",
+                (conv_id, skey)).rowcount if skey else 0
+            if not linked:
+                conn.execute(
+                    "INSERT INTO cancellation_requests (conversation_id, status, channel, created_at) "
+                    "VALUES (?,?,?,?)", (conv_id, "pending_human", "email", _now()))
         # Persist cooldown state: extending a save offer starts the 90-day clock, so a
         # later conversation for the same customer won't immediately offer again.
         if record.get("offer_made"):
@@ -1005,6 +1054,9 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
         session["outcome"] = "escalated"
     elif rec.get("cancellation_routed"):
         session["outcome"] = "cancelled"  # terminal — the agent recorded the cancellation
+        # Durably enqueue the work item NOW (keyed by session id), before the customer
+        # receives the routing promise — not at a later /resolve that may never come.
+        _queue_cancellation_live(conn, session.get("_session_id"))
     return _turn_result(session, reply, rec["guardrail"][before:])
 
 

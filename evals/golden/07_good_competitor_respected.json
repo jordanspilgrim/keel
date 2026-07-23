@@ -22,7 +22,7 @@
     },
     {
       "role": "assistant",
-      "content": "Understood \u2014 congratulations on the new setup. If it helps, I can pause your plan for a month at no charge in case the transition hits a snag, but if you're set, I won't push. Would a short pause be useful, or should I proceed with the cancellation?"
+      "content": "I understand, and I respect that you're weighing your options \u2014 I'd genuinely like the chance to keep you with us. I can set up a 1-month pause on your plan, so you won't be billed during it. Would you like to go ahead with that, or should I process the cancellation?"
     },
     {
       "role": "user",
@@ -30,7 +30,7 @@
     },
     {
       "role": "assistant",
-      "content": "Done \u2014 I'll get that cancellation started, and you'll keep access through the end of your billing period. Best of luck with the new tool."
+      "content": "Understood \u2014 I'll pass your cancellation to our team to process, and we'll email you a confirmation once it's complete. Best of luck with the new tool."
     }
   ],
   "offers": [

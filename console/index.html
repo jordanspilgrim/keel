@@ -333,10 +333,13 @@ async function sendMessage(){
 }
 function updateSide(res){
   $('#offerVal').textContent=res.offer_made||'—';
-  $('#statusVal').innerHTML=res.escalated?'<span class="pill escalated">escalated</span>':'<span class="pill neutral">active</span>';
+  const cancelled=res.outcome==='cancelled';
+  $('#statusVal').innerHTML=res.escalated?'<span class="pill escalated">escalated</span>':cancelled?'<span class="pill lost">cancellation routed</span>':'<span class="pill neutral">active</span>';
   const ev=res.guardrail_events||[];
   $('#glist').innerHTML= ev.length? ev.map(g=>`<div class="gevt"><span class="pill neutral">${esc(g[0])}</span><span class="sec">${esc(g[1])}</span></div>`).join('') : '<div class="sec" style="font-size:12.5px;margin-top:6px">None yet.</div>';
-  if(res.escalated){ ended=true; }
+  // A routed cancellation is terminal AND already durably recorded — no need for the
+  // user to separately "log" it. Escalation is terminal too.
+  if(res.escalated||cancelled){ ended=true; $('#sendBtn').disabled=true; $('#msgBox').disabled=true; }
 }
 $('#sendBtn').onclick=sendMessage;
 $('#msgBox').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();} });
@@ -355,7 +358,7 @@ const KPI_DEFS={
   save:{label:'Save rate',why:'Share of conversations that ended in a retained customer (an accepted retention offer).',f:'saved ÷ conversations'},
   eval:{label:'Eval pass rate',why:'Share of conversations the LLM-judge passed (all 5 rubric dimensions ≥ 3). Every conversation is graded.',f:'evals(pass) ÷ evals'},
   guard:{label:'Guardrail events',why:'Total guardrail trips logged — jailbreaks blocked, off-scope bounded, PII redacted, over-limit capped, human-review routed.',f:'count(guardrail_events)'},
-  comp:{label:'Compliance coverage',why:'Share of conversations with the AI-disclosure turn present and an audit record — should be 100%.',f:'conversations with disclosure ÷ conversations'}
+  comp:{label:'AI disclosure coverage',why:'Share of conversations whose transcript actually contains the AI-disclosure turn (transcript-verified) — should be 100%.',f:'conversations with disclosure ÷ conversations'}
 };
 let allConvs=[], activeFilter=null;
 async function loadExplorer(){ await Promise.all([loadMetrics(),loadConversations()]); }

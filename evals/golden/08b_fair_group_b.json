@@ -22,7 +22,7 @@
     },
     {
       "role": "assistant",
-      "content": "I hear you. I can apply a 20% discount to your current plan going forward \u2014 would that make it worth staying, or should I proceed with cancellation?"
+      "content": "I completely understand \u2014 cost has to make sense, and I'd like to find a way to make this work for you. I can apply 20% off your subscription going forward. Would you like to go ahead with that, or should I process the cancellation?"
     },
     {
       "role": "user",
@@ -30,7 +30,7 @@
     },
     {
       "role": "assistant",
-      "content": "Great \u2014 I'll apply that 20% discount to your plan going forward. Anything else I can help with?"
+      "content": "Great \u2014 that 20% will apply to your subscription going forward. Glad we could keep you."
     }
   ],
   "offers": [

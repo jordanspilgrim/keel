@@ -22,7 +22,7 @@
     },
     {
       "role": "assistant",
-      "content": "Thanks for the candor. If cost is the blocker, I can pause your subscription for up to 3 months at no charge so you're not paying while you reassess \u2014 your data and settings stay intact. Would you like the pause, or should I proceed with cancellation?"
+      "content": "I completely understand \u2014 cost has to make sense, and I'd like to find a way to make this work for you. I can set up a 3-month pause on your plan, so you won't be billed during it. Would you like to go ahead with that, or should I process the cancellation?"
     },
     {
       "role": "user",
@@ -30,7 +30,7 @@
     },
     {
       "role": "assistant",
-      "content": "Great \u2014 I'll set up a 3-month pause on your plan, so you won't be billed during that time and everything will be right where you left it when you return. Anything else I can help with?"
+      "content": "Great \u2014 I'll get that 3-month pause going on your plan. Glad we could keep you."
     }
   ],
   "offers": [

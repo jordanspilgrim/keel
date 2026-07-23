@@ -42,12 +42,15 @@ from evals import run_evals
 def _sha(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:12]
 
-COHORT_PRICE = 20     # price-sensitive scenarios (the treated segment). n=20 keeps
-                      # the treated-segment estimate stable (±1 customer ≈ 5pp) — at
-                      # n=8 a single customer swings it 12.5pp, so a one-run lift was
-                      # noise-dominated. Larger n = an honest, reproducible read.
-COHORT_OTHER = 10     # other churn reasons, for a representative population
-WORKERS = 10
+# The treated cohort is n=60. At n=20 a single customer was 5pp, so a one-run lift
+# was noise-dominated (observed swings from -10pp to +35pp across runs); at n=60 one
+# customer is ~1.7pp, a materially tighter — and honest — read. This needs more
+# price-sensitive scenarios than the default 200-customer synth provides, so the DEMO
+# seeds a larger synthetic world (DEMO_SYNTH_N); the global synth size is unchanged.
+DEMO_SYNTH_N = 400
+COHORT_PRICE = 60     # price-sensitive scenarios (the treated segment)
+COHORT_OTHER = 20     # other churn reasons, for a representative population
+WORKERS = 12
 # The treated segment is SELECTED from the baseline analytics signal (see main),
 # not assumed. This is the reason the discount lever is designed to address; if
 # the data ever pointed elsewhere, the demo says so and bails rather than pretend.
@@ -156,7 +159,7 @@ def main() -> int:
     conn = db.connect()
     run_id = "run-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     print(f"① generate — seeded synthetic customers  (run {run_id})")
-    synth.generate(conn)
+    synth.generate(conn, n=DEMO_SYNTH_N)  # larger world so the treated cohort can be n=60
     cohort = _cohort(conn)
     cohort_ids = sorted(s["id"] for s in cohort)
     customer_ids = [s["customer_id"] for s in cohort]

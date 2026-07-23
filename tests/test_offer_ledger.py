@@ -299,6 +299,32 @@ def test_persisted_evidence_is_deidentified(conn):
     assert "name" not in ev["tool_facts"][0]["result"]
 
 
+def test_grade_all_records_error_for_a_malformed_row_not_abort(conn, monkeypatch):
+    """M1: a single malformed persisted row records a coverage-miss for THAT
+    conversation; it must not abort the whole batch before any error row is written."""
+    from evals import run_evals, judge
+    monkeypatch.setattr(judge, "judge_conversation",
+                        lambda cv, **k: {"scores": {d: 4 for d in judge.RUBRIC}, "rationale": "ok",
+                                         "fairness_flag": False})
+    conn.execute("INSERT INTO conversations (customer_id, transcript_json, disposition_json, outcome, "
+                 "evidence_json, created_at) VALUES (1,'[]','{}','lost','{}','t')")
+    conn.execute("INSERT INTO conversations (customer_id, transcript_json, disposition_json, outcome, "
+                 "evidence_json, created_at) VALUES (1,'{ not valid json','{}','lost','{}','t')")
+    conn.commit()
+    run_evals.grade_all(conn)  # must NOT raise
+    verdicts = [r["verdict"] for r in conn.execute(
+        "SELECT verdict FROM evals WHERE rubric_version=?", (judge.EVAL_SPEC_VERSION,)).fetchall()]
+    assert verdicts.count("error") == 1 and verdicts.count("pass") == 1
+
+
+def test_evidence_allowlist_fails_closed_for_unknown_tool():
+    """L1: an unregistered read tool persists NO fields (default ()), so adding a tool
+    without updating the evidence map can't silently switch to allow-all."""
+    fct = {"tool": "some_new_tool", "call_id": "c1", "result": {"secret": "x", "ssn": "123-45-6789"}}
+    out = runtime._deidentify_tool_fact(fct)
+    assert out["result"] == {}   # nothing retained for an unknown tool
+
+
 # --- two offer tool calls both authorize; presenting enforces one (H2) -------
 def test_two_offer_calls_authorize_both(conn):
     rec = runtime._new_rec()
