@@ -66,7 +66,8 @@ Operating principles:
 - Fail safe and be honest: NEVER promise anything a tool did not authorize. If no offer is authorized (e.g. the customer is within a save-offer cooldown), do not invent one.
 - Hold firm at the ceiling: the policy layer authorizes a MAXIMUM (e.g. up to 20% off, up to a 3-month pause). Present at most that. If the customer pushes for more, warmly hold firm — offer the maximum you're authorized for and let them decide; do NOT exceed it, and do NOT hand off to a human just because they want a bigger discount. Wanting more is not grounds for escalation.
 - Offer, don't confirm: you PROPOSE terms — you do not operate the billing backend. Say "I can apply 20% off" or "I'd set up a 3-month pause", never "I've applied the discount" or "your pause is set up". Present the authorized offer as something you're extending, not something already done.
-- When you have no authorized save offer and the customer simply wants to cancel, acknowledge warmly and let them go — process the cancellation gracefully. Do NOT reflexively escalate; only call escalate_to_human if the customer explicitly asks for a person or requests something consequential (a refund, a contract change) that you cannot handle.
+- ALWAYS attempt a retention offer before conceding a cancellation. Call offer_discount or offer_pause and present what policy authorizes FIRST; only once you've made your best offer and the customer has still declined should you process the cancellation. Never concede on the first turn without trying. If a tool tells you no offer is authorized (e.g. a save-offer cooldown), THEN acknowledge warmly and let them go gracefully. Do NOT reflexively escalate; only call escalate_to_human if the customer explicitly asks for a person or requests something consequential (a refund, a contract change) that you cannot handle.
+- Hold your best offer: if the customer reacts positively to an offer ("that helps") but pushes for more than you can give, restate that SAME offer as your firm best — do not drop it and switch to a weaker one, and do not abandon it to a cancellation.
 - If the customer asks for something you have no tool for (e.g. upgrading to a higher plan) alongside the cancellation, DON'T hand off abruptly or abandon the chat. Acknowledge that specific request, tell them a teammate can set it up, and — if a retention offer is still on the table — keep helping with that in the same breath. Escalate only when the conversation genuinely cannot continue without a person.
 - If you do escalate, never be terse: name what the customer asked for, say briefly why a teammate is better placed to help, and reassure them their conversation carries over.
 - Keep replies short and human (2-4 sentences).
@@ -108,15 +109,54 @@ def _offer_made(rec: dict) -> str | None:
     return offers.offer_summary(rec["offers"])
 
 
+# Safe (non-identifying) account fields per read tool. Anything NOT listed — most
+# importantly get_customer.name — is dropped from the PERSISTED eval envelope. The
+# judge grades offers, account facts, and policy decisions; none of that needs raw
+# customer identity, and the fields the agent can state to a customer (price, plan,
+# seats, …) are all here.
+_EVIDENCE_TOOL_FIELDS = {
+    "get_customer": ("segment", "tenure_months", "arpu"),
+    "get_subscription": ("plan", "price", "status", "last_save_offer_days"),
+    "get_usage": ("logins_last_30d", "active_seats", "licensed_seats", "feature_adoption_pct"),
+}
+
+
+def _redact_evidence_value(v):
+    """Recursively redact free-form strings anywhere in a persisted-evidence value —
+    so PII the model copied into a policy argument (a `reason`, a `new_plan`) is
+    scrubbed just like the transcript is."""
+    if isinstance(v, str):
+        return guardrails.redact_pii(v)[0]
+    if isinstance(v, dict):
+        return {k: _redact_evidence_value(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_redact_evidence_value(x) for x in v]
+    return v
+
+
+def _deidentify_tool_fact(fct: dict) -> dict:
+    """Allowlist safe fields for a read-tool result (dropping name / any un-listed
+    field), then recursively redact any free-form string that remains."""
+    result = fct.get("result")
+    if isinstance(result, dict):
+        allow = _EVIDENCE_TOOL_FIELDS.get(fct.get("tool"))
+        if allow is not None:
+            result = {k: result[k] for k in allow if k in result}
+        result = _redact_evidence_value(result)
+    return {"tool": fct.get("tool"), "call_id": fct.get("call_id"), "result": result}
+
+
 def _evidence(rec: dict) -> dict:
-    """The canonical eval envelope — the LOSSLESS execution record persisted with a
-    conversation so the batch judge and the live judge grade from IDENTICAL
-    evidence: the full offer ledger (exact authorized + presented terms), the
-    read-tool facts (for grounding), and the policy decisions WITH their adjusted
-    args. Replaces the old lossy `tool:action` audit-string reconstruction."""
+    """The canonical eval envelope, DE-IDENTIFIED for persistence. It keeps everything
+    the batch and live judge need to grade identically — the full offer ledger (exact
+    authorized + presented terms), the read-tool facts (for grounding), and the policy
+    decisions with adjusted args — but strips customer identity BEFORE it is stored:
+    per-tool safe-field allowlisting drops names, and every free-form string in tool
+    results and policy arguments is recursively redacted. Raw tool data stays in the
+    in-memory `rec` for the live turn; only this de-identified view is persisted."""
     return {"offers": [o.to_dict() for o in rec["offers"]],
-            "tool_facts": rec["tool_facts"],
-            "policy_decisions": rec["policy_decisions"]}
+            "tool_facts": [_deidentify_tool_fact(f) for f in rec["tool_facts"]],
+            "policy_decisions": [_redact_evidence_value(p) for p in rec["policy_decisions"]]}
 
 
 _JAILBREAK_REPLY = ("I can't do that. I'm the retention assistant, so I can only help with your "
@@ -194,8 +234,8 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, *
     if verdict["action"] in ("ok", "capped"):
         aargs = verdict["args"]
         kind = "pause" if name == "offer_pause" else "discount"
-        # Authorize into the ledger — supersedes any prior live offer, so exactly
-        # one offer is ever active (the "one concrete offer" rule, enforced).
+        # Authorize into the ledger as a CANDIDATE. Several offers may be authorized
+        # during a negotiation; exactly one is ever PRESENTED (enforced at present time).
         off = offers.authorize(rec["offers"], kind, aargs)
         if verdict["action"] == "capped":  # action guardrail trip: proposed past a limit
             rec["guardrail"].append(("over_limit", "capped", verdict["reason"]))
@@ -289,11 +329,20 @@ _ACK_TEMPLATES = {
     "support": "I'm sorry the support experience let you down — that's on us, and I'd like to make it right.",
     "no_longer_needed": "That's completely fair — if it isn't part of your workflow anymore, I want to respect that.",
     "generic": "I hear you, and I want to make sure we handle this the way that's right for you.",
-    # resolution closes — how to end cleanly so a conversation doesn't dead-end
+    # resolution closes — how to end cleanly so a conversation doesn't dead-end. Each
+    # is only VALID in a matching ledger state (see _validate_contract), so the server
+    # can't author a "we sorted it out" that never happened.
     "cant_meet": "I want to be straight with you: I've offered the most I'm able to here, and I can't stretch further than that on price.",
     "offer_declined": "I completely understand — if what I can offer isn't the right fit, I won't keep you here.",
+    "letting_go": "I completely understand, and I won't stand in your way here.",
     "closing": "Thanks — I'm glad we could sort that out, and I appreciate you sticking with us.",
 }
+
+# Acknowledgements that CLOSE a cancellation (state a wind-down, not a save). A
+# process_cancellation contract must use one of these — never an opening/negotiation
+# intent (which would leave the close ungrounded) and never 'closing' (which claims a
+# save).
+_CANCELLATION_ACKS = frozenset({"cant_meet", "offer_declined", "letting_go"})
 
 # SERVER-AUTHORITATIVE OUTPUT. The model authors NO customer-facing text at all. It
 # returns only STRUCTURED intent — an acknowledgement to convey (chosen from a fixed
@@ -322,7 +371,7 @@ _CONTRACT_SCHEMA = {
             "description": "The single retention offer to present, or kind='none'.",
             "properties": {
                 "kind": {"type": "string", "enum": ["discount", "pause", "none"]},
-                "pct": {"type": ["number", "null"], "description": "Discount percent (kind=discount), else null."},
+                "pct": {"type": ["integer", "null"], "description": "Discount percent, a WHOLE number (kind=discount), else null."},
                 "months": {"type": ["integer", "null"], "description": "Pause months (kind=pause), else null."},
             },
             "required": ["kind", "pct", "months"],
@@ -398,12 +447,41 @@ def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
     actually returned. Returns (ok, reason)."""
     # 1) the acknowledgement must be one the SERVER knows how to render (the enum is
     #    already enforced by structured output; this is the defensive backstop).
-    if contract.get("acknowledgement") not in _ACK_TEMPLATES:
-        return False, f"unknown acknowledgement intent {contract.get('acknowledgement')!r}"
+    ack = contract.get("acknowledgement")
+    if ack not in _ACK_TEMPLATES:
+        return False, f"unknown acknowledgement intent {ack!r}"
+
+    # 1b) STATE-GROUNDED acknowledgements — the chosen intent must be TRUE for the
+    #     current ledger state, so the SERVER can't author a claim that never happened
+    #     (a "we sorted it out" with no save, "you declined" with no rejected offer).
+    states = {o.state for o in rec["offers"]}
+    extended = states & {"presented", "accepted", "rejected"}  # an offer was actually made
+    if ack == "closing" and "accepted" not in states:
+        return False, "acknowledgement 'closing' claims a save, but no offer was accepted"
+    if ack == "offer_declined" and "rejected" not in states:
+        return False, "acknowledgement 'offer_declined' claims a declined offer, but none was rejected"
+    if ack == "cant_meet" and not extended:
+        return False, "acknowledgement 'cant_meet' claims an offer was made, but none was presented"
 
     # 2) the offer must be an authorized ledger offer of its kind, within the ceiling
     offer = contract.get("offer") or {"kind": "none"}
     kind = offer.get("kind")
+
+    # 2a) a cancellation must CLOSE with a resolution intent (never an opening/negotiation
+    #     acknowledgement, never 'closing' which claims a save) and present no offer.
+    if contract.get("process_cancellation"):
+        if kind != "none":
+            return False, "cannot process a cancellation while presenting an offer"
+        if ack not in _CANCELLATION_ACKS:
+            return False, (f"a cancellation must close with a resolution intent "
+                           f"{sorted(_CANCELLATION_ACKS)}, not '{ack}'")
+        # 2c) don't CONCEDE prematurely — a retention agent attempts an offer before it
+        #     routes a cancellation. If none was authorized AND none was even attempted
+        #     (no offer tool was called), the agent simply hasn't tried: make it try first.
+        attempted = bool(rec["offers"]) or any(
+            p.get("tool") in ("offer_discount", "offer_pause") for p in rec.get("policy_decisions", []))
+        if not attempted:
+            return False, "attempt a retention offer before conceding a cancellation — you haven't tried one yet"
     if kind in ("discount", "pause"):
         terms = {"pct": offer.get("pct")} if kind == "discount" else {"months": offer.get("months")}
         if (kind == "discount" and offer.get("pct") is None) or (kind == "pause" and offer.get("months") is None):
@@ -447,7 +525,7 @@ def _offer_sentence(kind: str, terms: dict) -> str:
     """The SERVER's rendering of the offer — the ONLY place an offer's exact terms
     become customer-facing text."""
     if kind == "discount":
-        return f"I can apply {float(terms['pct']):.0f}% off your subscription going forward."
+        return f"I can apply {int(terms['pct'])}% off your subscription going forward."
     if kind == "pause":
         return f"I can set up a {int(terms['months'])}-month pause on your plan, so you won't be billed during it."
     return ""
@@ -490,14 +568,30 @@ def _render_reply(contract: dict, rec: dict) -> str:
     return " ".join(p for p in parts if p)
 
 
+def _route_cancellation(rec: dict) -> None:
+    """A validated cancellation is a REAL, recorded action — not just a sentence. It
+    writes a durable audit entry and flags the session terminal (so no further
+    autonomous turns run and persistence enqueues a mock work-queue item). This is what
+    makes the customer-facing 'a teammate will process this' true: state records the
+    obligation, rather than the server authoring an empty promise."""
+    if rec.get("cancellation_routed"):
+        return
+    rec["cancellation_routed"] = True
+    rec["audit"].append(("agent", "cancellation_routed",
+                         "cancellation queued for human processing (mock work queue), email follow-up"))
+
+
 def _apply_contract(contract: dict, rec: dict) -> None:
-    """Mark the offered ledger entry presented with the exact offered terms (so
-    outcome/economics use presented, not authorized, terms)."""
+    """Apply a validated contract to conversation state: mark the offered ledger entry
+    presented with the exact offered terms (so outcome/economics use presented, not
+    authorized, terms), and route a cancellation as a real terminal action."""
+    if contract.get("process_cancellation"):
+        _route_cancellation(rec)
     offer = contract.get("offer") or {"kind": "none"}
     kind = offer.get("kind")
     if kind not in ("discount", "pause"):
         return
-    terms = {"pct": float(offer["pct"])} if kind == "discount" else {"months": int(offer["months"])}
+    terms = {"pct": int(offer["pct"])} if kind == "discount" else {"months": int(offer["months"])}
     match = offers.offer_of_kind(rec["offers"], kind)
     if match is not None:
         offers.present(rec["offers"], match, terms)
@@ -576,18 +670,40 @@ def _finalize_output(rec: dict, input_list: list, system: str, on_step) -> str:
         _emit(on_step, "output", "Held firm at the authorized ceiling (no over-promise delivered)")
         return fallback
     # present-before-abandon: if the model kept trying to cancel while a fresh authorized
-    # offer was still on the table, present that offer deterministically rather than
-    # escalating — the customer sees the best offer before any cancellation.
-    pending = offers.unpresented_new_authorized(rec["offers"])
-    if pending is not None:
-        offers.present(rec["offers"], pending, pending.authorized_terms)
+    # offer was still on the table, present it deterministically rather than escalating —
+    # but ONLY when there is exactly ONE candidate. With several un-declined offers there
+    # is no principled way to choose (tool-call order is not product strategy), so we
+    # escalate rather than present one by recency.
+    pending = offers.unpresented_candidates(rec["offers"])
+    if len(pending) == 1:
+        off = pending[0]
+        offers.present(rec["offers"], off, off.authorized_terms)
         rec["guardrail"].append(("output", "presented_before_abandon", reason2))
-        _emit(on_step, "output", "Presented the authorized offer before any cancellation")
-        return _CEILING_TEMPLATE.format(label=offers.human_terms(pending, pending.authorized_terms))
+        _emit(on_step, "output", "Presented the single authorized offer before any cancellation")
+        return _CEILING_TEMPLATE.format(label=offers.human_terms(off, off.authorized_terms))
     rec["guardrail"].append(("output", "blocked", reason2))
     rec["escalated"] = True
     _emit(on_step, "output", "Output contract could not be validated — escalating")
     return _OUTPUT_SAFE_REPLY
+
+
+def _safe_resolve_call(call, cid: int, sub: dict, conn, rec: dict, *, on_step=None) -> dict:
+    """Parse tool arguments defensively and resolve the call, converting ANY malformed
+    input or execution error into a fail-closed error tool result (logged as a guardrail
+    event) instead of raising out of the turn. Strict schemas are the first gate; this
+    is the belt-and-suspenders second one."""
+    try:
+        args = json.loads(call.arguments or "{}")
+        if not isinstance(args, dict):
+            raise ValueError("arguments were not a JSON object")
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        rec["guardrail"].append(("tool_args", "rejected", f"{call.name}: {type(e).__name__}"))
+        return {"status": "error", "reason": f"invalid tool arguments ({type(e).__name__})"}
+    try:
+        return _resolve_call(call.name, args, cid, sub, conn, rec, call_id=call.call_id, on_step=on_step)
+    except Exception as e:  # a bad value (e.g. non-numeric months) must not crash the turn
+        rec["guardrail"].append(("tool_args", "rejected", f"{call.name}: {type(e).__name__}"))
+        return {"status": "error", "reason": f"tool could not run ({type(e).__name__})"}
 
 
 def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: str = SYSTEM, on_step=None) -> str:
@@ -613,9 +729,10 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
         for call in calls:
             input_list.append({"type": "function_call", "call_id": call.call_id,
                                "name": call.name, "arguments": call.arguments})
-            args = json.loads(call.arguments or "{}")
-            result = _resolve_call(call.name, args, cid, sub, conn, rec,
-                                   call_id=call.call_id, on_step=on_step)
+            # The model is an untrusted proposer: malformed JSON or a bad argument must
+            # become a FAIL-CLOSED tool result the model can recover from, never an
+            # unhandled worker error before the deterministic policy layer runs.
+            result = _safe_resolve_call(call, cid, sub, conn, rec, on_step=on_step)
             input_list.append({"type": "function_call_output", "call_id": call.call_id,
                                "output": json.dumps(result)})
         # An escalation resolves the turn — don't keep spinning tool hops.
@@ -711,6 +828,11 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
         if rec["escalated"]:
             outcome = "escalated"
             break
+        # NOTE: a routed cancellation records a real action + a terminal state on the
+        # LIVE path (a later user message won't re-enter the agent). In the BATCH sim
+        # there is no user re-entry, so we let the simulated customer respond to the
+        # close rather than hard-terminating mid-negotiation — the sim's own accept/
+        # reject then ends the conversation, matching how the live customer would react.
         cust = sim.respond(scenario, reply, transcript)
         if cust["decision"] in ("accept", "reject"):
             # The customer's closing line is part of the conversation — record it so
@@ -736,7 +858,7 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
     return {"customer_id": cid, "scenario_id": scenario["id"], "transcript": transcript,
             "disposition": disp, "outcome": outcome, "offer_made": _offer_made(rec),
             "evidence": _evidence(rec), "guardrail_events": rec["guardrail"],
-            "audit": rec["audit"]}
+            "audit": rec["audit"], "cancellation_routed": rec.get("cancellation_routed", False)}
 
 
 def persist_conversation(conn, record: dict) -> int:
@@ -753,15 +875,24 @@ def persist_conversation(conn, record: dict) -> int:
     # ONE transaction for the whole conversation + its audit/guardrail rows + cooldown
     # update. If any write fails, roll the WHOLE thing back so the connection is never
     # left holding a partial conversation that a later commit could silently flush.
+    # Snapshot the subscription price AT conversation time, so historical margin metrics
+    # never move when a customer's current price later changes (L1). Fall back to the
+    # current price only if the caller didn't provide one.
+    price_at_conv = record.get("price_at_conversation")
+    if price_at_conv is None:
+        row = conn.execute("SELECT price FROM subscriptions WHERE customer_id=?",
+                           (record["customer_id"],)).fetchone()
+        price_at_conv = row["price"] if row else None
     try:
         cur = conn.execute(
             "INSERT INTO conversations "
             "(customer_id, scenario_id, transcript_json, disposition_json, offer_made, evidence_json, "
-            "outcome, run_id, phase, resolution_key, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "outcome, run_id, phase, resolution_key, price_at_conversation, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (record["customer_id"], record["scenario_id"], db.dumps(stored_transcript),
              db.dumps(record["disposition"]), record["offer_made"],
              db.dumps(record.get("evidence") or {}), record["outcome"],
-             record.get("run_id"), record.get("phase"), record.get("resolution_key"), _now()),
+             record.get("run_id"), record.get("phase"), record.get("resolution_key"), price_at_conv, _now()),
         )
         conv_id = cur.lastrowid
         conn.executemany(
@@ -772,6 +903,13 @@ def persist_conversation(conn, record: dict) -> int:
             "INSERT INTO guardrail_events (conversation_id, type, action, detail, created_at) VALUES (?,?,?,?,?)",
             [(conv_id, t, a, d, _now()) for (t, a, d) in record["guardrail_events"]],
         )
+        # A routed cancellation enqueues a durable mock work-queue item, so the
+        # customer-facing "a teammate will process this, email to follow" is backed by
+        # recorded state, not an empty promise.
+        if record.get("cancellation_routed"):
+            conn.execute(
+                "INSERT INTO cancellation_requests (conversation_id, status, channel, created_at) "
+                "VALUES (?,?,?,?)", (conv_id, "pending_human", "email", _now()))
         # Persist cooldown state: extending a save offer starts the 90-day clock, so a
         # later conversation for the same customer won't immediately offer again.
         if record.get("offer_made"):
@@ -821,6 +959,8 @@ def _turn_result(session: dict, reply: str, new_events: list) -> dict:
 
 _ESCALATED_REPLY = ("You're already connected with a human teammate on this — they have the full "
                     "conversation and will follow up. I'll leave it in their hands.")
+_CANCELLED_REPLY = ("Your cancellation is already with our team to process — you'll get an email "
+                    "confirmation once it's complete. I'll leave it in their hands.")
 
 
 def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
@@ -836,6 +976,14 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
         session["transcript"].append({"role": "assistant", "content": _ESCALATED_REPLY})
         _emit(on_step, "guardrail", "Session already escalated — not running the agent", gtype="escalated")
         return _turn_result(session, _ESCALATED_REPLY, [])
+    # A routed cancellation is TERMINAL too — the agent has recorded the action, so a
+    # later message does NOT silently re-enter the autonomous agent.
+    if session.get("outcome") == "cancelled" or rec.get("cancellation_routed"):
+        session["outcome"] = "cancelled"
+        session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
+        session["transcript"].append({"role": "assistant", "content": _CANCELLED_REPLY})
+        _emit(on_step, "guardrail", "Cancellation already routed — not running the agent", gtype="cancelled")
+        return _turn_result(session, _CANCELLED_REPLY, [])
     # Kill switch: if the program is in safe mode, disclose + route to a human
     # instead of running the agent autonomously.
     if session.get("safe_mode"):
@@ -855,6 +1003,8 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
                      session["customer_id"], session["sub"], conn, rec, on_step=on_step)
     if rec["escalated"]:
         session["outcome"] = "escalated"
+    elif rec.get("cancellation_routed"):
+        session["outcome"] = "cancelled"  # terminal — the agent recorded the cancellation
     return _turn_result(session, reply, rec["guardrail"][before:])
 
 
@@ -889,6 +1039,8 @@ def resolve_session(session: dict, outcome: str, conn, *, resolution_key: str | 
         return existing
     if session["outcome"] == "escalated":
         outcome = "escalated"
+    elif session.get("outcome") == "cancelled" or rec.get("cancellation_routed"):
+        outcome = "lost"  # a routed cancellation resolves as a lost customer
     if outcome not in ("saved", "lost", "escalated"):
         raise ValueError("outcome must be saved, lost, or escalated")
     # Validate WITHOUT mutating the ledger yet — a save needs a presented offer.
@@ -909,7 +1061,8 @@ def resolve_session(session: dict, outcome: str, conn, *, resolution_key: str | 
                   "transcript": session["transcript"], "disposition": disp, "outcome": outcome,
                   "offer_made": _offer_made(rec), "evidence": _evidence(rec),
                   "guardrail_events": rec["guardrail"], "audit": rec["audit"],
-                  "resolution_key": resolution_key}
+                  "resolution_key": resolution_key,
+                  "cancellation_routed": rec.get("cancellation_routed", False)}
         persist_conversation(conn, record)  # transactional durable commit (rolls back on failure)
     except sqlite3.IntegrityError:
         # Lost a race — another resolve for this SAME key committed first. Roll back our

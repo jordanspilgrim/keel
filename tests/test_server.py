@@ -166,20 +166,35 @@ def test_duplicate_resolve_claim_rejected(client):
     assert client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"}).status_code == 409
 
 
-def test_abandoned_sessions_are_ttl_evicted(client):
-    """L2: an unresolved session a user walked away from is evicted once it's idle past
-    the TTL, so abandoned sessions don't accumulate forever. A busy session is spared."""
+def test_abandoned_sessions_are_ttl_evicted_by_a_new_start(client):
+    """M6/L2: an unresolved session a user walked away from is evicted once idle past the
+    TTL — and the sweep runs on a NEW /chat/start (page refreshes), not only on a later
+    turn. A busy session (turn in flight) is spared."""
     import server
     abandoned = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
     busy = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
-    # age both past the TTL; mark one busy (a turn in flight)
     server.SESSIONS[abandoned]["_last_active"] = time.time() - server._SESSION_TTL_S - 1
     server.SESSIONS[busy]["_last_active"] = time.time() - server._SESSION_TTL_S - 1
     server.SESSIONS[busy]["_busy"] = True
-    with server._LOCK:
-        server._evict()
-    assert abandoned not in server.SESSIONS       # abandoned + idle → evicted
+    # simply starting another session triggers the sweep (no turn required)
+    client.post("/api/chat/start", json={"customer_id": 1})
+    assert abandoned not in server.SESSIONS       # abandoned + idle → evicted on start
     assert busy in server.SESSIONS                # a turn in flight is never evicted
+
+
+def test_resolve_retry_across_restart_returns_record(client):
+    """M1: after a process restart (in-memory SESSIONS lost), retrying a resolve with the
+    same session id consults the durable resolution key instead of 404-ing."""
+    import server
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    r1 = client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"})
+    assert r1.status_code == 200
+    with server._LOCK:
+        server.SESSIONS.clear()  # simulate a restart — in-memory sessions are gone
+    r2 = client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"})
+    assert r2.status_code == 200 and r2.json()["conversation_id"] == r1.json()["conversation_id"]
+    # a never-seen key is still an honest 404
+    assert client.post("/api/chat/resolve", json={"session_id": "never", "outcome": "lost"}).status_code == 404
 
 
 def test_resolve_retry_returns_record_not_409(client):

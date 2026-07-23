@@ -90,6 +90,22 @@ def test_conversation_metrics_and_margin(conn):
     assert price == 499.0  # customer 1 is on the Enterprise plan (deterministic synth)
 
 
+def test_price_snapshot_is_frozen_at_conversation_time(conn):
+    """L1: the price used for historical margin is snapshotted at conversation time, so a
+    later subscription price change cannot rewrite history. conversation_metrics reads
+    the snapshot (COALESCE with current only for legacy rows)."""
+    _persist(conn, "saved", "20% discount")
+    row = conn.execute("SELECT price_at_conversation FROM conversations").fetchone()
+    assert row["price_at_conversation"] == 499.0          # customer 1's price at persist
+    before = export.conversation_metrics(conn, run_id="run-A", phase="baseline")["madj_save_rate"]
+    conn.execute("UPDATE subscriptions SET price = 100 WHERE customer_id = 1")
+    conn.commit()
+    frozen = conn.execute("SELECT price_at_conversation FROM conversations").fetchone()["price_at_conversation"]
+    assert frozen == 499.0                                 # snapshot unchanged by the price update
+    after = export.conversation_metrics(conn, run_id="run-A", phase="baseline")["madj_save_rate"]
+    assert after == before                                 # history did not move
+
+
 def test_eval_metrics_and_compliance_zero_safe(conn):
     # no conversations → no division by zero; rates are 0.0, coverage 0.0
     em = export.eval_metrics(conn)

@@ -16,8 +16,10 @@ lifecycle:
   the agent proposed) — a *ceiling*.
 - `presented_terms` are the exact terms the agent committed to the customer (from
   the structured response contract) — always ≤ the ceiling.
-- Only ONE offer is active (authorized/presented) at a time; proposing a new one
-  supersedes the prior, so "one concrete offer" is enforced, not merely requested.
+- MULTIPLE offers may be AUTHORIZED during a negotiation (the agent may explore a
+  discount AND a pause), but exactly ONE is ever PRESENTED — presenting supersedes any
+  other presented offer, so "one concrete offer to the customer" is enforced at the
+  point it matters, not by invalidating candidates at authorize time.
 
 Outcome, cooldown, disposition, economics, and the eval envelope ALL derive from
 the accepted presented offer — never from a stray last authorization.
@@ -77,16 +79,28 @@ def rejected_of_kind(offers: list[Offer], kind: str) -> Offer | None:
     return None
 
 
-def unpresented_new_authorized(offers: list[Offer]) -> Offer | None:
-    """An authorized offer of a kind the customer has NOT already declined — a genuinely
-    new lever still on the table. Used to enforce 'present your best offer before you
-    abandon to a cancellation'; scoped to un-declined kinds so a re-authorized offer the
-    customer already refused doesn't deadlock against the anti-loop rule."""
+def unpresented_candidates(offers: list[Offer]) -> list[Offer]:
+    """All authorized offers of a kind the customer has NOT already declined — genuinely
+    new levers still on the table. Scoped to un-declined kinds so a re-authorized offer
+    the customer already refused doesn't deadlock against the anti-loop rule. At most one
+    per kind (the latest authorized)."""
     declined = {o.kind for o in offers if o.state == "rejected"}
+    seen: set[str] = set()
+    out: list[Offer] = []
     for o in reversed(offers):
-        if o.state == "authorized" and o.kind not in declined:
-            return o
-    return None
+        if o.state == "authorized" and o.kind not in declined and o.kind not in seen:
+            seen.add(o.kind)
+            out.append(o)
+    return out
+
+
+def unpresented_new_authorized(offers: list[Offer]) -> Offer | None:
+    """True iff a fresh un-declined authorized offer is still on the table (used to
+    reject 'abandon to a cancellation while an offer is unpresented'). Returns one such
+    offer or None; callers that must CHOOSE among several use `unpresented_candidates`
+    and only auto-present when exactly one exists — never by recency."""
+    cands = unpresented_candidates(offers)
+    return cands[0] if cands else None
 
 
 def present(offers: list[Offer], offer: Offer, terms: dict) -> None:
@@ -134,15 +148,21 @@ def mark_rejected(offers: list[Offer]) -> Offer | None:
 
 
 def terms_within(committed: dict, ceiling: dict, kind: str) -> bool:
-    """Is a committed offer POSITIVE and within the authorized ceiling for its kind?
-    A non-positive committed term (0 or negative) is never valid — the tools only
-    authorize genuine positive offers."""
+    """Is a committed offer POSITIVE, a canonical whole unit, and AT OR BELOW the
+    authorized ceiling for its kind? Discounts are whole percents and pauses whole
+    months; a fractional value (e.g. 20.49% against a 20% ceiling) is rejected outright
+    rather than tolerated and later rounded away — so the ledger never holds a term that
+    downstream rendering/economics would disagree with."""
     if kind == "discount":
-        pct = float(committed.get("pct", 0))
-        return 0 < pct <= float(ceiling.get("pct", 0)) + 0.5
+        pct = committed.get("pct")
+        if pct is None or not float(pct).is_integer():
+            return False
+        return 0 < int(pct) <= int(ceiling.get("pct", 0))
     if kind == "pause":
-        months = int(committed.get("months", 0))
-        return 0 < months <= int(ceiling.get("months", 0))
+        months = committed.get("months")
+        if months is None or not float(months).is_integer():
+            return False
+        return 0 < int(months) <= int(ceiling.get("months", 0))
     return False
 
 

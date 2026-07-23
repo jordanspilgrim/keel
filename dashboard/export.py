@@ -33,9 +33,12 @@ def conversation_metrics(conn, *, run_id: str | None = None, phase: str | None =
     if phase is not None:
         where.append("c.phase = ?"); params.append(phase)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
+    # Use the price SNAPSHOT taken at conversation time; fall back to the current
+    # subscription price only for legacy rows written before the snapshot existed. This
+    # keeps historical margin immutable to later price changes (L1).
     rows = conn.execute(
-        "SELECT c.outcome, c.offer_made, s.price FROM conversations c "
-        "JOIN subscriptions s ON s.customer_id = c.customer_id" + clause, params
+        "SELECT c.outcome, c.offer_made, COALESCE(c.price_at_conversation, s.price) AS price "
+        "FROM conversations c LEFT JOIN subscriptions s ON s.customer_id = c.customer_id" + clause, params
     ).fetchall()
     n = len(rows) or 1
     saved = sum(1 for r in rows if r["outcome"] == "saved")

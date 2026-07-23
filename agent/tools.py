@@ -34,7 +34,7 @@ TOOL_SCHEMAS = [
      "parameters": _obj({}, [])},
     {"type": "function", "name": "offer_discount",
      "description": "Propose a percentage discount as a retention offer. Policy may cap or reject it.",
-     "parameters": _obj({"pct": {"type": "number", "description": "Discount percent, e.g. 15"}}, ["pct"])},
+     "parameters": _obj({"pct": {"type": "integer", "description": "Discount percent (whole number), e.g. 15"}}, ["pct"])},
     {"type": "function", "name": "offer_pause",
      "description": "Propose pausing the subscription for N months as a retention offer. Policy may cap or reject it.",
      "parameters": _obj({"months": {"type": "integer", "description": "Months to pause, e.g. 1"}}, ["months"])},
@@ -48,6 +48,13 @@ TOOL_SCHEMAS = [
      "description": "Hand the conversation to a human agent. Use when uncertain or the customer needs a person.",
      "parameters": _obj({"reason": {"type": "string"}}, ["reason"])},
 ]
+
+# Strict function-calling: the API validates arguments against each schema (required +
+# additionalProperties:false) before the model can emit a call, so the deterministic
+# policy layer receives well-typed args. The runtime ALSO validates defensively (see
+# _safe_tool_args) — strict schemas are the first gate, not the only one.
+for _t in TOOL_SCHEMAS:
+    _t["strict"] = True
 
 READ_TOOLS = frozenset({"get_customer", "get_subscription", "get_usage"})
 

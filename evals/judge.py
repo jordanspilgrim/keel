@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 
 import config
 import llm
@@ -56,8 +57,13 @@ def _spec_version() -> str:
     change to the rubric, schema, model, or the code that renders the judge prompt
     yields a new version automatically (a formatter edit can't silently reuse the old
     spec, and no one has to remember to bump a string)."""
-    import json
-    formatter_src = inspect.getsource(judge_conversation) + inspect.getsource(_offer_ledger_line)
+    # EVERY function whose behavior changes a persisted grade: the prompt/evidence
+    # renderer (judge_conversation + _offer_ledger_line), the mechanical verdict
+    # (derive_verdict), and the input-envelope serializer (build_judge_input). A change
+    # to any of them yields a new spec id — none can silently reuse the old grade
+    # definition.
+    formatter_src = "".join(inspect.getsource(f) for f in
+                            (judge_conversation, _offer_ledger_line, derive_verdict, build_judge_input))
     blob = json.dumps({
         "instructions": _INSTRUCTIONS, "schema": VERDICT_SCHEMA, "rubric": RUBRIC,
         "pass_floor": PASS_FLOOR, "model": config.MINI_MODEL,
@@ -88,6 +94,30 @@ def derive_verdict(scores: dict) -> str:
         return "pass" if all(int(scores.get(d, 0)) >= PASS_FLOOR for d in RUBRIC) else "fail"
     except (TypeError, ValueError):
         return "fail"
+
+
+def build_judge_input(conn, cid: int) -> dict:
+    """Assemble the judge's evidence for one conversation FROM PERSISTED RECORDS — the
+    de-identified eval envelope (offer ledger with exact terms, tool facts, policy
+    decisions) plus the transcript, disposition, and demographic slice. Both the batch
+    runner (grade_all) and the live path (_grade_and_store) call this, so they grade on
+    IDENTICAL evidence — no batch/live divergence. Lives here (not in run_evals) because
+    it is part of the grade DEFINITION: the eval-spec version hashes its source, so a
+    change to what evidence reaches the judge yields a new spec id."""
+    r = conn.execute(
+        "SELECT c.transcript_json, c.disposition_json, c.outcome, c.evidence_json, cu.demographic_attr "
+        "FROM conversations c JOIN customers cu ON cu.id = c.customer_id WHERE c.id=?", (cid,)
+    ).fetchone()
+    if r is None:
+        raise ValueError(f"conversation {cid} not found")
+    ev = json.loads(r["evidence_json"] or "{}")
+    gev = conn.execute("SELECT type, action FROM guardrail_events WHERE conversation_id=?", (cid,)).fetchall()
+    return {"id": cid, "transcript": json.loads(r["transcript_json"]),
+            "disposition": json.loads(r["disposition_json"]), "outcome": r["outcome"],
+            "demographic_attr": r["demographic_attr"],
+            "offers": ev.get("offers", []), "tool_facts": ev.get("tool_facts", []),
+            "policy_decisions": ev.get("policy_decisions", []),
+            "guardrail_events": [(g["type"], g["action"]) for g in gev]}
 
 
 def _offer_ledger_line(offers_list: list) -> str:

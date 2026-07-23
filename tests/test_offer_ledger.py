@@ -9,6 +9,8 @@ guardrail-health gate honours version + freshness.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import config
@@ -85,6 +87,23 @@ def test_terms_within_ceiling():
     assert offers.terms_within({"pct": 10}, {"pct": 20}, "discount")
     assert not offers.terms_within({"pct": 25}, {"pct": 20}, "discount")
     assert offers.terms_within({"months": 2}, {"months": 3}, "pause")
+
+
+def test_discounts_are_whole_percents_no_tolerance():
+    """M4: a fractional discount is rejected outright — no ceiling+0.5 tolerance that
+    would pass validation and then be rounded away in rendering/economics."""
+    assert not offers.terms_within({"pct": 20.49}, {"pct": 20}, "discount")
+    assert not offers.terms_within({"pct": 20.5}, {"pct": 20}, "discount")
+    assert offers.terms_within({"pct": 20}, {"pct": 20}, "discount")   # exact ceiling ok
+    assert not offers.terms_within({"months": 1.5}, {"months": 3}, "pause")
+
+
+def test_policy_floors_a_fractional_discount_to_whole_percent(monkeypatch):
+    from agent import policy
+    monkeypatch.setattr(policy, "DISCOUNTS_ENABLED", True)
+    v = policy.authorize("offer_discount", {"pct": 18.9},
+                         {"plan": "Pro", "price": 99.0, "last_save_offer_days": None})
+    assert v["allowed"] and v["args"]["pct"] == 18   # floored, never rounded up past intent
     assert not offers.terms_within({"months": 4}, {"months": 3}, "pause")
 
 
@@ -156,6 +175,19 @@ def test_eval_spec_version_hashes_the_actual_formatter_source(monkeypatch):
     monkeypatch.setattr(judge.inspect, "getsource",
                         lambda fn: real(fn) + "\n# edited prompt rendering\n")
     assert judge._spec_version() != base  # the version tracked the formatter change
+
+
+def test_eval_spec_hash_includes_verdict_and_input_builder(monkeypatch):
+    """M2: the spec version must change if EITHER the mechanical verdict (derive_verdict)
+    or the input-envelope serializer (build_judge_input) changes — both define a grade."""
+    from evals import judge
+    real = judge.inspect.getsource
+    for target in (judge.derive_verdict, judge.build_judge_input):
+        base = judge._spec_version()
+        monkeypatch.setattr(judge.inspect, "getsource",
+                            lambda fn, t=target, r=real: r(fn) + ("\n# edited\n" if fn is t else ""))
+        assert judge._spec_version() != base
+        monkeypatch.undo()
 
 
 def test_judge_prompt_includes_policy_decisions(monkeypatch):
@@ -242,6 +274,29 @@ def test_persistence_redacts_all_roles(conn):
     cid = runtime.persist_conversation(conn, record)
     stored = conn.execute("SELECT transcript_json FROM conversations WHERE id=?", (cid,)).fetchone()[0]
     assert "4111" not in stored  # user turn scrubbed even without an upstream guarantee
+
+
+def test_persisted_evidence_is_deidentified(conn):
+    """H1: the eval envelope is de-identified BEFORE it is stored — the customer name
+    from a read tool is dropped, and PII the model copied into a policy argument is
+    recursively redacted — so the same conversation isn't identifiable in evidence_json
+    while its transcript is scrubbed. Grounding fields (price, plan, …) survive."""
+    rec = runtime._new_rec()
+    rec["tool_facts"] = [
+        {"tool": "get_customer", "call_id": "c1", "result": {"name": "Emma Nguyen", "segment": "SMB", "arpu": 99.0}},
+        {"tool": "get_subscription", "call_id": "c2", "result": {"plan": "Pro", "price": 99.0}}]
+    rec["policy_decisions"] = [{"tool": "offer_discount", "action": "ok",
+                                "args": {"pct": 20, "reason": "email me at jane@example.com"}, "reason": "ok"}]
+    record = {"customer_id": 1, "scenario_id": None, "transcript": [{"role": "user", "content": "hi"}],
+              "disposition": {"outcome": "lost", "offer_made": None}, "outcome": "lost",
+              "offer_made": None, "evidence": runtime._evidence(rec), "guardrail_events": [], "audit": []}
+    cid = runtime.persist_conversation(conn, record)
+    stored = conn.execute("SELECT evidence_json FROM conversations WHERE id=?", (cid,)).fetchone()[0]
+    assert "Emma Nguyen" not in stored        # name dropped by the per-tool allowlist
+    assert "jane@example.com" not in stored    # PII in a policy arg recursively redacted
+    ev = json.loads(stored)
+    assert ev["tool_facts"][1]["result"]["price"] == 99.0   # grounding field survives
+    assert "name" not in ev["tool_facts"][0]["result"]
 
 
 # --- two offer tool calls both authorize; presenting enforces one (H2) -------

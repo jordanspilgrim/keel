@@ -103,6 +103,7 @@ def chat_start(req: StartReq):
     with _LOCK:
         session["_last_active"] = time.time()
         SESSIONS[sid] = session
+        _evict()  # sweep abandoned sessions on EVERY start, not only on a later turn (M6)
     return {"session_id": sid, "disclosure": session["disclosure"], "customer": session["customer"]}
 
 
@@ -189,12 +190,30 @@ def turn_status(turn_id: str):
                 "result": ts["result"], "error": ts["error"]}
 
 
+def _durable_resolution(session_id: str) -> dict | None:
+    """The durably-committed resolution for a key, or None — the source of truth that
+    survives a process restart (when the in-memory SESSIONS map is empty)."""
+    conn = db.connect()
+    try:
+        return runtime._load_resolved_record(conn, session_id)
+    finally:
+        conn.close()
+
+
 @app.post("/api/chat/resolve")
 def chat_resolve(req: ResolveReq):
     with _LOCK:
         session = SESSIONS.get(req.session_id)
-        if session is None:
-            raise HTTPException(404, "session not found")
+    if session is None:
+        # After a restart the in-memory session is gone, but this key may have durably
+        # committed — honor the documented cross-restart retry by consulting the DB
+        # before giving up, instead of 404-ing before the durable-key lookup.
+        existing = _durable_resolution(req.session_id)
+        if existing is not None:
+            return {"conversation_id": existing["conversation_id"], "outcome": existing["outcome"],
+                    "disposition": existing["disposition"]}
+        raise HTTPException(404, "session not found, and no prior resolution is recorded for it")
+    with _LOCK:
         if session.get("_busy"):
             raise HTTPException(409, "a turn is still in progress")
         # Idempotent retry: an already-resolved session returns its existing record

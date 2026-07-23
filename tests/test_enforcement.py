@@ -114,35 +114,135 @@ def test_does_not_reoffer_a_declined_offer():
 
 def test_does_not_abandon_while_an_authorized_offer_is_unpresented():
     """Processing a cancellation while a fresh authorized offer the customer hasn't seen
-    is still on the table is premature — present it first."""
+    is still on the table is premature — present it first. ('letting_go' is used so the
+    only violation is the unpresented offer, not a state-grounding mismatch.)"""
     from agent import offers as offers_mod
     rec = _rec()
     offers_mod.authorize(rec["offers"], "discount", {"pct": 20})   # authorized, never presented
-    ok, reason = runtime._validate_contract(_contract("offer_declined", kind="none", cancel=True), rec)
+    ok, reason = runtime._validate_contract(_contract("letting_go", kind="none", cancel=True), rec)
     assert not ok and "present it before" in reason
     # once that offer has been presented AND declined, a graceful close IS allowed
     off = offers_mod.offer_of_kind(rec["offers"], "discount")
     off.state, off.presented_terms = "presented", {"pct": 20}
     offers_mod.mark_rejected(rec["offers"])
     ok2, _ = runtime._validate_contract(_contract("offer_declined", kind="none", cancel=True), rec)
-    assert ok2
+    assert ok2  # offer_declined is now TRUE (a presented offer was rejected)
 
 
-def test_present_before_abandon_fallback_presents_not_escalates(monkeypatch):
-    """If the model keeps trying to cancel while an authorized offer is unpresented, the
-    server presents that offer deterministically rather than escalating — the customer
-    always sees the best offer before any cancellation."""
+def test_present_before_abandon_presents_only_a_single_candidate(monkeypatch):
+    """With exactly ONE authorized offer unpresented, the server presents it rather than
+    escalating. With MORE than one, it must NOT pick by recency — it escalates (M3)."""
     from agent import offers as offers_mod
     monkeypatch.setattr(runtime, "_generate_contract",
-                        lambda *a, **k: {"acknowledgement": "offer_declined", "account_facts": [],
+                        lambda *a, **k: {"acknowledgement": "letting_go", "account_facts": [],
                                          "process_cancellation": True,
                                          "offer": {"kind": "none", "pct": None, "months": None}})
+    one = _rec()
+    offers_mod.authorize(one["offers"], "discount", {"pct": 20})
+    out = runtime._finalize_output(one, [], runtime.SYSTEM, None)
+    assert not one["escalated"] and "20% discount" in out
+    assert any(a == "presented_before_abandon" for (_, a, _) in one["guardrail"])
+
+    two = _rec()
+    offers_mod.authorize(two["offers"], "discount", {"pct": 20})
+    offers_mod.authorize(two["offers"], "pause", {"months": 3})
+    out2 = runtime._finalize_output(two, [], runtime.SYSTEM, None)
+    assert two["escalated"]                              # two candidates → escalate, don't guess
+    assert offers_mod.presented(two["offers"]) is None   # nothing presented by recency
+    assert out2 == runtime._OUTPUT_SAFE_REPLY
+
+
+# --- strict tool schemas + fail-closed tool-arg parsing (M5) -----------------
+def test_all_tool_schemas_are_strict():
+    from agent import tools
+    assert tools.TOOL_SCHEMAS and all(t.get("strict") is True for t in tools.TOOL_SCHEMAS)
+    disc = next(t for t in tools.TOOL_SCHEMAS if t["name"] == "offer_discount")
+    assert disc["parameters"]["properties"]["pct"]["type"] == "integer"  # whole percents
+
+
+def test_malformed_tool_call_fails_closed():
+    """M5: malformed JSON or a non-object argument becomes a logged, fail-closed error
+    tool result — never an unhandled worker error before the policy layer runs."""
+    import types
     rec = _rec()
-    offers_mod.authorize(rec["offers"], "discount", {"pct": 20})
-    out = runtime._finalize_output(rec, [], runtime.SYSTEM, None)
-    assert not rec["escalated"]                          # presented instead of escalating
-    assert "20% discount" in out
-    assert any(a == "presented_before_abandon" for (_, a, _) in rec["guardrail"])
+    bad = types.SimpleNamespace(name="offer_pause", arguments="{not valid json", call_id="c1")
+    res = runtime._safe_resolve_call(bad, 1, {"plan": "Pro", "price": 99.0}, None, rec)
+    assert res["status"] == "error"
+    assert any(t == "tool_args" for (t, _, _) in rec["guardrail"])
+    arr = types.SimpleNamespace(name="offer_pause", arguments="[1,2,3]", call_id="c2")
+    assert runtime._safe_resolve_call(arr, 1, {}, None, rec)["status"] == "error"
+
+
+# --- state-grounded acknowledgements + real cancellation action (H2) --------
+def test_acknowledgement_must_be_true_for_the_ledger_state():
+    """The server can't author a claim that never happened: 'closing' needs an accepted
+    offer, 'offer_declined' a rejected one, 'cant_meet' an offer actually presented."""
+    from agent import offers as offers_mod
+    rec = _rec()
+    # fresh conversation — every state-claiming close is false → rejected
+    assert not runtime._validate_contract(_contract("closing"), rec)[0]
+    assert not runtime._validate_contract(_contract("offer_declined", cancel=True), rec)[0]
+    assert not runtime._validate_contract(_contract("cant_meet", cancel=True), rec)[0]
+    # present an offer → 'cant_meet' becomes true
+    o = offers_mod.authorize(rec["offers"], "discount", {"pct": 20})
+    o.state, o.presented_terms = "presented", {"pct": 20}
+    assert runtime._validate_contract(_contract("cant_meet", cancel=True), rec)[0]
+    # decline it → 'offer_declined' true; accept a different one → 'closing' true
+    offers_mod.mark_rejected(rec["offers"])
+    assert runtime._validate_contract(_contract("offer_declined", cancel=True), rec)[0]
+    p = offers_mod.authorize(rec["offers"], "pause", {"months": 3})
+    p.state, p.presented_terms = "presented", {"months": 3}
+    offers_mod.mark_accepted(rec["offers"])
+    assert runtime._validate_contract(_contract("closing"), rec)[0]
+
+
+def test_cancellation_must_close_with_a_resolution_intent():
+    rec = _rec()
+    # a negotiation acknowledgement cannot close a cancellation
+    ok, reason = runtime._validate_contract(_contract("price", kind="none", cancel=True), rec)
+    assert not ok and "resolution intent" in reason
+    # even a valid close intent is premature before ANY retention attempt (guard C)
+    ok2, reason2 = runtime._validate_contract(_contract("letting_go", kind="none", cancel=True), rec)
+    assert not ok2 and "before conceding" in reason2
+    # once an offer has been attempted (here rejected by policy, e.g. a cooldown), the
+    # graceful close is valid — the agent tried, nothing more is available
+    rec["policy_decisions"].append({"tool": "offer_discount", "action": "rejected", "reason": "cooldown"})
+    assert runtime._validate_contract(_contract("letting_go", kind="none", cancel=True), rec)[0]
+
+
+def test_must_attempt_an_offer_before_conceding_a_cancellation():
+    """B/guard C: a retention agent cannot concede a cancellation on the first turn
+    without trying — process_cancellation is rejected until an offer was authorized or
+    at least attempted (an offer tool was called)."""
+    from agent import offers as offers_mod
+    rec = _rec()
+    assert not runtime._validate_contract(_contract("letting_go", kind="none", cancel=True), rec)[0]
+    # an authorized offer counts as an attempt (guard B then requires presenting it)
+    offers_mod.authorize(rec["offers"], "pause", {"months": 3})
+    ok, reason = runtime._validate_contract(_contract("letting_go", kind="none", cancel=True), rec)
+    assert not ok and "present it before" in reason   # now it's the present-before-abandon guard
+
+
+def test_cancellation_is_a_real_recorded_action(conn=None):
+    """process_cancellation is not just a sentence: it flags the routed state (terminal
+    on the live path), writes an audit entry, and (on persist) enqueues a mock
+    work-queue row — the customer-facing promise is backed by recorded state."""
+    import db as _db
+    from agent import runtime as rt
+    rec = rt._new_rec()
+    rt._apply_contract(_contract("letting_go", kind="none", cancel=True), rec)
+    assert rec.get("cancellation_routed") is True
+    assert any(d == "cancellation_routed" for (_, d, _) in rec["audit"])
+    # persist enqueues a durable cancellation_requests row
+    c = _db.connect(":memory:"); _db.init_db(c)
+    c.execute("INSERT INTO customers (id,name,segment,tenure_months,arpu,demographic_attr,created_at) "
+              "VALUES (1,'x','SMB',5,99,'group_a','t')")
+    cid = rt.persist_conversation(c, {
+        "customer_id": 1, "scenario_id": None, "transcript": [{"role": "user", "content": "cancel"}],
+        "disposition": {"outcome": "lost", "offer_made": None}, "outcome": "lost", "offer_made": None,
+        "evidence": {}, "guardrail_events": [], "audit": rec["audit"], "cancellation_routed": True})
+    row = c.execute("SELECT status, channel FROM cancellation_requests WHERE conversation_id=?", (cid,)).fetchone()
+    assert row["status"] == "pending_human" and row["channel"] == "email"
 
 
 def test_graceful_decline_close_renders_a_resolution_intent():

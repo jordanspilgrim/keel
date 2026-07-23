@@ -58,7 +58,12 @@ def authorize(tool_name: str, args: dict, sub: dict) -> dict:
         if not math.isfinite(pct) or pct <= 0:
             return {"action": "rejected", "allowed": False,
                     "reason": "A discount must be a positive, finite percentage.", "args": args}
-        capped = min(pct, config.MAX_DISCOUNT_PCT)
+        # Discounts are WHOLE percents. Floor a stray fractional input (never round up —
+        # that could exceed the ceiling) so the authorized term is a canonical integer.
+        capped = min(int(pct), config.MAX_DISCOUNT_PCT)
+        if capped <= 0:
+            return {"action": "rejected", "allowed": False,
+                    "reason": "A discount must be at least 1%.", "args": args}
         post_price = float(sub.get("price", 0)) * (1 - capped / 100)
         if post_price < config.MARGIN_FLOOR_USD:
             return {"action": "rejected", "allowed": False,

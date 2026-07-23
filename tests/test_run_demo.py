@@ -55,6 +55,20 @@ def test_world_hash_is_order_independent_and_reproducible(conn):
         == run_demo._world_hash(run_demo._snapshot_world(conn, list(reversed(ids))))
 
 
+def test_reset_db_clears_cancellation_requests(conn):
+    """A cancellation_requests row (FK → conversations) must not block reset_db's
+    FK-ordered deletes — the demo re-seeds a DB that already holds routed cancellations."""
+    conn.execute("INSERT INTO conversations (customer_id, transcript_json, outcome, created_at) "
+                 "VALUES (1, '[]', 'lost', 't')")
+    cid = conn.execute("SELECT id FROM conversations ORDER BY id DESC LIMIT 1").fetchone()["id"]
+    conn.execute("INSERT INTO cancellation_requests (conversation_id, status, channel, created_at) "
+                 "VALUES (?,?,?,?)", (cid, "pending_human", "email", "t"))
+    conn.commit()
+    db.reset_db(conn)  # must not raise sqlite3.IntegrityError on the FK
+    assert conn.execute("SELECT count(*) FROM cancellation_requests").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM conversations").fetchone()[0] == 0
+
+
 # --- M2: cited experiment signal survives a post-run re-cluster ------------
 def test_experiment_signal_survives_reclustering(conn):
     signal = {"segment": "Price too high", "recommended_lever": "discount", "evidence": {"loss": 4.2}}

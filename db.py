@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     run_id            TEXT,                    -- experiment run this belongs to (flywheel lineage)
     phase             TEXT,                    -- baseline / after (within a run)
     resolution_key    TEXT,                    -- durable idempotency key for a live resolve (NULL for batch)
+    price_at_conversation REAL,                -- subscription price snapshot; historical margin is immutable to later price changes
     created_at        TEXT NOT NULL
 );
 
@@ -94,6 +95,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     actor             TEXT NOT NULL,           -- agent / policy / human / system
     decision          TEXT NOT NULL,
     reason            TEXT,
+    created_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cancellation_requests (
+    id                INTEGER PRIMARY KEY,
+    conversation_id   INTEGER REFERENCES conversations(id),
+    status            TEXT NOT NULL,           -- pending_human (mock work queue)
+    channel           TEXT,                    -- follow-up channel the reply promised, e.g. email
     created_at        TEXT NOT NULL
 );
 
@@ -135,7 +144,7 @@ CREATE TABLE IF NOT EXISTS program_health (
 # Tables cleared by reset_db(), in FK-safe order (children first).
 _TABLES = [
     "program_health", "signals", "themes", "audit_log", "guardrail_events", "evals",
-    "conversations", "scenarios", "subscriptions", "customers",
+    "cancellation_requests", "conversations", "scenarios", "subscriptions", "customers",
 ]
 
 
@@ -184,6 +193,7 @@ _ADDED_COLUMNS = [
     ("evals", "rubric_version", "TEXT"),
     ("signals", "run_id", "TEXT"),
     ("conversations", "resolution_key", "TEXT"),
+    ("conversations", "price_at_conversation", "REAL"),
 ]
 
 

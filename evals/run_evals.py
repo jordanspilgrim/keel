@@ -27,26 +27,9 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def build_judge_input(conn, cid: int) -> dict:
-    """Assemble the judge's evidence for one conversation FROM PERSISTED RECORDS —
-    the lossless eval envelope (offer ledger with exact terms, tool facts, policy
-    decisions) plus the transcript, disposition, and demographic slice. Both the
-    batch runner (grade_all) and the live path (_grade_and_store) call this, so
-    they grade on IDENTICAL evidence — no batch/live divergence."""
-    r = conn.execute(
-        "SELECT c.transcript_json, c.disposition_json, c.outcome, c.evidence_json, cu.demographic_attr "
-        "FROM conversations c JOIN customers cu ON cu.id = c.customer_id WHERE c.id=?", (cid,)
-    ).fetchone()
-    if r is None:
-        raise ValueError(f"conversation {cid} not found")
-    ev = json.loads(r["evidence_json"] or "{}")
-    gev = conn.execute("SELECT type, action FROM guardrail_events WHERE conversation_id=?", (cid,)).fetchall()
-    return {"id": cid, "transcript": json.loads(r["transcript_json"]),
-            "disposition": json.loads(r["disposition_json"]), "outcome": r["outcome"],
-            "demographic_attr": r["demographic_attr"],
-            "offers": ev.get("offers", []), "tool_facts": ev.get("tool_facts", []),
-            "policy_decisions": ev.get("policy_decisions", []),
-            "guardrail_events": [(g["type"], g["action"]) for g in gev]}
+# build_judge_input lives in judge.py (it is part of the grade DEFINITION the eval-spec
+# hash covers). Re-exported here so run_evals.build_judge_input keeps working.
+build_judge_input = judge.build_judge_input
 
 
 def grade_all(conn, *, max_workers: int = 8) -> dict:
