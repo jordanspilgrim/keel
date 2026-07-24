@@ -181,14 +181,16 @@ function compute(){
   const other = gInfra;                 // guardrail + embedding + infra
   const human = esc*escC;
   const cpc = agent + evalc + other + human;
-  const cps = save>0 ? cpc/save : 0;
+  // With NO saves, cost-per-save and gross-margin-per-save are UNDEFINED (null → "N/A"),
+  // not an impossible $0 / 100% (L1).
+  const cps = save>0 ? cpc/save : null;
 
   // vendor
   const saves = vol*save;
   const rev = saves*fee;
   const cost = vol*cpc;
   const gp = rev-cost;
-  const gm = fee>0 ? (fee-cps)/fee : 0;
+  const gm = (cps!==null && fee>0) ? (fee-cps)/fee : null;
   const be = fee>0 ? cpc/fee : 0;        // break-even save rate
 
   // customer
@@ -207,10 +209,10 @@ function compute(){
 
   // KPI tiles
   $('oCPC').textContent=cents(cpc);
-  $('oCPS').textContent=cents(cps);
-  $('oGM').textContent=Math.round(gm*100)+'%';
-  $('oGMn').textContent='at $'+fee+' fee − '+cents(cps)+' cost';
-  $('oGM').style.color = gm<0 ? 'var(--critical)' : '';
+  $('oCPS').textContent = cps===null ? 'N/A' : cents(cps);
+  $('oGM').textContent = gm===null ? 'N/A' : Math.round(gm*100)+'%';
+  $('oGMn').textContent = cps===null ? 'no saves — undefined' : ('at $'+fee+' fee − '+cents(cps)+' cost');
+  $('oGM').style.color = (gm!==null && gm<0) ? 'var(--critical)' : '';
   $('oBE').textContent=(be*100).toFixed(be*100<10?1:0)+'%';
 
   // cost breakdown bar

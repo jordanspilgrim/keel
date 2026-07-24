@@ -32,9 +32,10 @@ def test_economics_headline_values():
 
 
 def test_economics_zero_save_rate_is_safe():
-    # a zero save rate must not divide-by-zero — cost/save collapses to 0, not a crash
+    # a zero save rate must not divide-by-zero or report a favorable number — cost/save is
+    # UNDEFINED (None → 'N/A'), not $0 (L1)
     r = economics.compute(economics.Levers(save_rate=0.0))
-    assert r["cost_per_save"] == 0.0
+    assert r["cost_per_save"] is None
     assert r["vendor_pnl"]["revenue"] == 0
 
 
@@ -65,6 +66,26 @@ def test_margin_cost_by_offer_and_acceptance():
     assert three == pytest.approx(3 * one)
     # no offer → no cost
     assert economics.margin_cost(None, 100.0) == 0.0
+
+
+def test_economics_zero_save_boundary_is_undefined_not_favorable():
+    """L1: with NO saves, cost-per-save and gross-margin-per-save are UNDEFINED (None → the
+    CLI renders 'N/A'), not an impossible $0 / 100%. The default (save_rate > 0) is unaffected."""
+    r0 = economics.compute(economics.Levers(save_rate=0.0))
+    assert r0["cost_per_save"] is None and r0["gross_margin_per_save"] is None
+    assert r0["vendor_pnl"]["revenue"] == 0  # zero saves earn no revenue
+    d = economics.compute()
+    assert d["cost_per_save"] is not None and d["gross_margin_per_save"] is not None  # default still numeric
+
+
+def test_economics_rejects_out_of_range_inputs():
+    """L1: a rate outside [0,1] or a negative money/token input is rejected, so the model can
+    never return a nonsense number from a nonsense input."""
+    for bad in (economics.Levers(save_rate=1.5), economics.Levers(save_rate=-0.1),
+                economics.Levers(escalation_rate=2.0), economics.Levers(outcome_fee=-1.0),
+                economics.Levers(conversations=-5), economics.Levers(eval_sampling=1.2)):
+        with pytest.raises(ValueError):
+            economics.compute(bad)
 
 
 # --- dashboard/export math -------------------------------------------------
