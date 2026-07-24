@@ -35,9 +35,14 @@ def _stub_grade(conn, conv_id, record, customer_id):
 
 @pytest.fixture(autouse=True)
 def _no_api(monkeypatch):
-    # the scope classifier + judge hit the API; stub them for deterministic offline tests
+    # the scope classifier + judge + disposition hit the API; stub them so the H3 terminal
+    # self-finalize (which persists + grades) runs deterministically offline.
     monkeypatch.setattr(guardrails, "check_scope", lambda t: {"in_scope": True, "reason": "test"})
     monkeypatch.setattr(runtime, "_grade_and_store", _stub_grade)
+    monkeypatch.setattr(runtime, "_disposition",
+                        lambda transcript, scenario, rec, outcome, accepted: {
+                            "intent": "cancel", "churn_reason": "price", "offer_made": runtime._offer_made(rec),
+                            "offer_accepted": accepted, "outcome": outcome, "confidence": 0.8})
 
 
 def _present(rec, offer: str) -> None:
@@ -219,18 +224,42 @@ def test_resolve_is_idempotent(conn, monkeypatch):
                         (r1["conversation_id"],)).fetchone()[0] == 1
 
 
-def test_live_escalation_is_durable_before_resolve(conn):
-    """M2: a live escalation records a durable hand-off work item at turn time (parallel
-    to the cancellation fix), so the promised human hand-off survives if /resolve never
-    comes — the exact hole H4 closed for cancellations, now closed for escalations."""
+def test_live_escalation_self_finalizes_at_turn_time(conn):
+    """H3: a terminal escalation self-finalizes at turn time — the conversation, its LINKED
+    escalation_requests row, and its eval all exist WITHOUT any /resolve, so a browser close
+    or TTL eviction can't lose the case a safety team most needs to inspect."""
     s = runtime.new_session(1, conn)
     s["_session_id"] = "sess-ESC"
-    s["safe_mode"] = True  # kill switch forces an escalation with no LLM call
+    s["safe_mode"] = True  # kill switch forces an escalation with no agent LLM call
     res = runtime.live_turn(s, "please help", conn)
-    assert res["escalated"] and s["outcome"] == "escalated"
+    assert res["escalated"] and s["outcome"] == "escalated" and s.get("resolved")
+    conv = conn.execute("SELECT id, outcome FROM conversations WHERE resolution_key=?",
+                        ("sess-ESC",)).fetchone()
+    assert conv is not None and conv["outcome"] == "escalated"                 # persisted, no /resolve
     row = conn.execute("SELECT status, conversation_id FROM escalation_requests WHERE session_key=?",
                        ("sess-ESC",)).fetchone()
-    assert row is not None and row["status"] == "pending_human" and row["conversation_id"] is None
+    assert row["status"] == "pending_human" and row["conversation_id"] == conv["id"]  # LINKED
+    assert conn.execute("SELECT count(*) FROM evals WHERE conversation_id=?",
+                        (conv["id"],)).fetchone()[0] == 1                       # and graded
+
+
+def test_terminal_escalation_survives_process_loss(conn, monkeypatch):
+    """H3 (Codex): an agent-driven escalation persists + grades at turn time; even if the
+    session object is then lost (browser close / restart) with NO /resolve ever called, the
+    conversation, its linked queue row, and its current-spec eval remain."""
+    monkeypatch.setattr(runtime, "_agent_turn",
+                        _fake_agent(reply="Connecting you with a teammate.", escalate=True))
+    s = runtime.new_session(1, conn)
+    s["_session_id"] = "sess-LOSS"
+    runtime.live_turn(s, "I demand a full refund now.", conn)
+    del s  # simulate process loss — no /resolve will ever be called
+    conv = conn.execute("SELECT id, outcome FROM conversations WHERE resolution_key=?",
+                        ("sess-LOSS",)).fetchone()
+    assert conv is not None and conv["outcome"] == "escalated"
+    assert conn.execute("SELECT conversation_id FROM escalation_requests WHERE session_key=?",
+                        ("sess-LOSS",)).fetchone()["conversation_id"] == conv["id"]
+    assert conn.execute("SELECT count(*) FROM evals WHERE conversation_id=?",
+                        (conv["id"],)).fetchone()[0] == 1
 
 
 def test_queue_escalation_live_redacts_the_model_authored_reason(conn):
@@ -292,10 +321,10 @@ def test_cannot_assert_escalated_without_a_real_handoff(conn, monkeypatch):
         runtime.resolve_session(s, conn, outcome="escalated", resolution_key="sid-fake-esc")
 
 
-def test_live_cancellation_is_durable_before_resolve(conn, monkeypatch):
-    """H4: when a live turn routes a cancellation, the mock work-queue row is durable
-    IMMEDIATELY (keyed by session id), before any /resolve — so a browser close, restart,
-    or TTL eviction can't lose the promised obligation."""
+def test_live_cancellation_self_finalizes_at_turn_time(conn, monkeypatch):
+    """H3: a routed cancellation self-finalizes at turn time — the conversation, its LINKED
+    cancellation_requests row, and its eval all exist WITHOUT any /resolve, and a later
+    /resolve is an idempotent no-op (no double-insert)."""
     def _cancel_agent(input_list, cid, sub, conn, rec, system=runtime.SYSTEM, on_step=None):
         runtime._route_cancellation(rec)  # the agent conceded a cancellation this turn
         reply = "I'll pass your cancellation to our team to process."
@@ -305,16 +334,19 @@ def test_live_cancellation_is_durable_before_resolve(conn, monkeypatch):
     s = runtime.new_session(1, conn)
     s["_session_id"] = "sess-DUR"
     res = runtime.live_turn(s, "just cancel me", conn)
-    assert res["outcome"] == "cancelled"
-    # the work item is durable NOW — before any resolve — keyed by the session
-    row = conn.execute("SELECT status, channel, conversation_id FROM cancellation_requests "
-                       "WHERE session_key=?", ("sess-DUR",)).fetchone()
-    assert row is not None and row["status"] == "pending_human" and row["conversation_id"] is None
-    # a later resolve LINKS that row to the conversation instead of double-inserting
-    runtime.resolve_session(s, conn, resolution_key="sess-DUR")  # derives 'lost' (cancelled)
-    rows = conn.execute("SELECT conversation_id FROM cancellation_requests WHERE session_key=?",
-                        ("sess-DUR",)).fetchall()
-    assert len(rows) == 1 and rows[0]["conversation_id"] is not None  # linked, not duplicated
+    assert res["outcome"] == "cancelled" and s.get("resolved")
+    conv = conn.execute("SELECT id, outcome FROM conversations WHERE resolution_key=?",
+                        ("sess-DUR",)).fetchone()
+    assert conv is not None and conv["outcome"] == "lost"                      # cancellation resolves as lost
+    row = conn.execute("SELECT status, conversation_id FROM cancellation_requests WHERE session_key=?",
+                       ("sess-DUR",)).fetchone()
+    assert row["status"] == "pending_human" and row["conversation_id"] == conv["id"]  # LINKED at turn time
+    assert conn.execute("SELECT count(*) FROM evals WHERE conversation_id=?",
+                        (conv["id"],)).fetchone()[0] == 1                       # and graded
+    # a later /resolve is an idempotent no-op — no second conversation or queue row
+    runtime.resolve_session(s, conn, resolution_key="sess-DUR")
+    assert conn.execute("SELECT count(*) FROM cancellation_requests WHERE session_key=?",
+                        ("sess-DUR",)).fetchone()[0] == 1
 
 
 def test_resolve_is_durably_idempotent_across_sessions(conn, monkeypatch):

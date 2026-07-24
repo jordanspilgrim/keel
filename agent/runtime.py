@@ -1106,6 +1106,27 @@ def classify_customer_decision(message: str, offer_summary: str) -> str:
         return "continue"  # fail safe — never manufacture a save from a classifier failure
 
 
+def _finalize_if_terminal(session: dict, conn) -> None:
+    """H3: a TERMINAL live transition self-finalizes — persist the conversation, link its
+    queue row, and grade it NOW (keyed by the session id, idempotent) — instead of waiting
+    for a manual /resolve that a browser close or TTL eviction may never send. Escalations
+    and routed cancellations were previously only QUEUED, so the conversation, transcript,
+    audit trail, and grade never existed unless someone clicked End; those are exactly the
+    cases a safety/quality team most needs to inspect. Scoped to escalation/cancellation — a
+    customer accept/reject stays a MANUAL /resolve (the operator confirms the recorded
+    decision). Best-effort: a failure here never breaks the turn (the durable queue row +
+    grade_all reconcile), but on the happy path the record and its eval exist immediately."""
+    rec = session["rec"]
+    terminal = (session.get("outcome") in ("escalated", "cancelled")
+                or rec.get("escalated") or rec.get("cancellation_routed"))
+    if not terminal or session.get("resolved"):
+        return
+    try:
+        resolve_session(session, conn, resolution_key=session.get("_session_id"))
+    except Exception:
+        pass  # durable queue row is the safety net; grade_all / a later /resolve reconcile
+
+
 def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: str | None = None) -> dict:
     """Advance one live turn using the SAME shared core (_advance) as the batch
     runner: a jailbreak is blocked before the model, off-scope is bounded,
@@ -1150,6 +1171,7 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
         _queue_escalation_live(conn, skey, ev[2])
         session["outcome"] = "escalated"
         _emit(on_step, "reply", reply)
+        _finalize_if_terminal(session, conn)  # H3: persist + grade the hand-off now
         return _turn_result(session, reply, [ev])
     # H2 — CUSTOMER-EARNED ACCEPTANCE. If a retention offer is on the table, classify the
     # customer's reply (or use an explicit button `decision`) and apply it to the ledger
@@ -1167,7 +1189,7 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
             reply = _SAVED_REPLY if outcome == "saved" else _DECLINED_REPLY
             session["transcript"].append({"role": "assistant", "content": reply})
             _emit(on_step, "decision", f"customer {d}ed the {presented.kind} offer → {outcome}")
-            return _turn_result(session, reply, [])
+            return _turn_result(session, reply, [])  # save/lost is finalized by a manual /resolve (H2)
     before = len(rec["guardrail"])
     reply = _advance(user_text, session["transcript"], session["input_list"],
                      session["customer_id"], session["sub"], conn, rec, on_step=on_step)
@@ -1181,6 +1203,7 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
         # failure can't leave a terminal session promising an obligation in no table.
         _queue_cancellation_live(conn, skey)
         session["outcome"] = "cancelled"  # terminal — the agent recorded the cancellation
+    _finalize_if_terminal(session, conn)  # H3: if this turn reached a terminal, persist + grade it now
     return _turn_result(session, reply, rec["guardrail"][before:])
 
 
