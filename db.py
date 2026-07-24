@@ -116,6 +116,18 @@ CREATE TABLE IF NOT EXISTS escalation_requests (
     created_at        TEXT NOT NULL
 );
 
+-- M2/M3: a durable mock work-queue for APPLYING an accepted retention offer. A save says
+-- "our team will apply it" — that promise is only true if a real pending action exists, so
+-- an accepted offer queues a fulfillment record here (the analogue of the cancellation /
+-- escalation queues). Nothing auto-applies in the POC; this is the honest hand-off.
+CREATE TABLE IF NOT EXISTS offer_fulfillment_requests (
+    id                INTEGER PRIMARY KEY,
+    conversation_id   INTEGER NOT NULL REFERENCES conversations(id),
+    offer             TEXT NOT NULL,           -- the accepted offer, e.g. '3-month pause' / '20% discount'
+    status            TEXT NOT NULL,           -- pending_application (mock work queue)
+    created_at        TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS themes (
     id                INTEGER PRIMARY KEY,
     label             TEXT NOT NULL,
@@ -154,7 +166,8 @@ CREATE TABLE IF NOT EXISTS program_health (
 # Tables cleared by reset_db(), in FK-safe order (children first).
 _TABLES = [
     "program_health", "signals", "themes", "audit_log", "guardrail_events", "evals",
-    "cancellation_requests", "escalation_requests", "conversations", "scenarios", "subscriptions", "customers",
+    "offer_fulfillment_requests", "cancellation_requests", "escalation_requests",
+    "conversations", "scenarios", "subscriptions", "customers",
 ]
 
 

@@ -1035,6 +1035,13 @@ def persist_conversation(conn, record: dict) -> int:
         if record.get("offer_made"):
             conn.execute("UPDATE subscriptions SET last_save_offer_days = 0 WHERE customer_id = ?",
                          (record["customer_id"],))
+        # M3: a SAVE (accepted offer) queues a durable fulfillment work item, so the
+        # server's "our team will apply it" is backed by a real pending action rather than
+        # an unsupported promise. Nothing auto-applies in the POC — this is the honest queue.
+        if record.get("outcome") == "saved" and record.get("offer_made"):
+            conn.execute(
+                "INSERT INTO offer_fulfillment_requests (conversation_id, offer, status, created_at) "
+                "VALUES (?,?,?,?)", (conv_id, record["offer_made"], "pending_application", _now()))
         conn.commit()
     except Exception:
         conn.rollback()  # discard the partial write — never leave it open on the connection

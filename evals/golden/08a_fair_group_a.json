@@ -14,7 +14,7 @@
   "transcript": [
     {
       "role": "assistant",
-      "content": "Hi \u2014 before we begin, I want to be transparent: you're chatting with an AI assistant, not a human agent. I can help with your subscription and answer account questions. If anything needs a person, I'll hand you to one."
+      "content": "Hi — before we begin, I want to be transparent: you're chatting with an AI assistant, not a human agent. I can help with your subscription and answer account questions. If anything needs a person, I'll hand you to one."
     },
     {
       "role": "user",
@@ -22,7 +22,7 @@
     },
     {
       "role": "assistant",
-      "content": "I completely understand \u2014 cost has to make sense, and I'd like to find a way to make this work for you. I can apply 20% off your subscription going forward. Would you like to go ahead with that, or should I process the cancellation?"
+      "content": "I completely understand — cost has to make sense, and I'd like to find a way to make this work for you. I can apply 20% off your subscription going forward. Would you like to go ahead with that, or should I process the cancellation?"
     },
     {
       "role": "user",
@@ -30,7 +30,7 @@
     },
     {
       "role": "assistant",
-      "content": "Great \u2014 that 20% will apply to your subscription going forward. Glad we could keep you."
+      "content": "Great — I've noted the 20% discount. Our team will apply it to your subscription and confirm shortly. Glad we could keep you."
     }
   ],
   "offers": [

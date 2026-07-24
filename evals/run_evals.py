@@ -190,4 +190,8 @@ def run_golden() -> dict:
             "passes_floor": (not errored) and judged > 0 and agreement >= AGREEMENT_FLOOR,
             "errored": errored,
             "per_dimension_mae": mae, "mae_within_tolerance": mae <= CALIBRATION_MAE_FLOOR,
-            "fairness_consistent": fairness_consistent, "fairness_pairs": pair_report}
+            "fairness_consistent": fairness_consistent, "fairness_pairs": pair_report,
+            # M3: version the calibration output so the golden-agreement claim is a
+            # machine-readable, self-describing artifact (judge model + eval-spec id), not
+            # unversioned prose. The acceptance script persists this dict.
+            "judge_model": config.MINI_MODEL, "spec_version": judge.EVAL_SPEC_VERSION}

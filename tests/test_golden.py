@@ -20,6 +20,10 @@ _FORBIDDEN = [
     "data and settings", "everything will be right where you left",
     "won't be charged again", "keep access through", "retain access",
     "i've applied", "i've set up", "i've processed",
+    # M3: unsupported first-person fulfillment promises. The honest close defers to a team
+    # ("our team will apply it"), backed by the offer_fulfillment_requests work item — the
+    # agent must not assert it personally applied or guarantees a future application.
+    "i'll get that", "that 20% will apply", "will apply to your subscription going forward",
 ]
 
 

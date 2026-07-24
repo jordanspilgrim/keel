@@ -104,6 +104,26 @@ def test_init_db_migrates_legacy_escalation_requests(tmp_path):
     c.close()
 
 
+def test_save_queues_a_durable_fulfillment_record(conn):
+    """M3: an accepted offer (a save) queues a durable offer_fulfillment_requests work item,
+    so the server's 'our team will apply it' is backed by a real pending action — while a
+    lost conversation queues nothing."""
+    from agent import runtime
+    runtime.persist_conversation(conn, {
+        "customer_id": 1, "scenario_id": None,
+        "transcript": [{"role": "user", "content": "too expensive"}, {"role": "assistant", "content": "ok"}],
+        "disposition": {"outcome": "saved", "offer_made": "3-month pause"},
+        "outcome": "saved", "offer_made": "3-month pause", "evidence": {},
+        "guardrail_events": [], "audit": []})
+    row = conn.execute("SELECT offer, status, conversation_id FROM offer_fulfillment_requests").fetchone()
+    assert row is not None and row["offer"] == "3-month pause" and row["status"] == "pending_application"
+    runtime.persist_conversation(conn, {
+        "customer_id": 1, "scenario_id": None,
+        "transcript": [{"role": "user", "content": "bye"}], "disposition": {"outcome": "lost"},
+        "outcome": "lost", "offer_made": None, "evidence": {}, "guardrail_events": [], "audit": []})
+    assert conn.execute("SELECT count(*) FROM offer_fulfillment_requests").fetchone()[0] == 1  # only the save
+
+
 def test_reset_db_clears_cancellation_requests(conn):
     """A cancellation_requests row (FK → conversations) must not block reset_db's
     FK-ordered deletes — the demo re-seeds a DB that already holds routed cancellations."""
