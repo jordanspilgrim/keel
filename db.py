@@ -205,6 +205,10 @@ _ADDED_COLUMNS = [
     ("conversations", "resolution_key", "TEXT"),
     ("conversations", "price_at_conversation", "REAL"),
     ("cancellation_requests", "session_key", "TEXT"),
+    # M1: an existing DB whose escalation_requests table predates session_key must gain the
+    # column BEFORE idx_escalation_session_key is created, or init_db fails with
+    # "no such column: session_key". Fresh DBs already include it via CREATE TABLE.
+    ("escalation_requests", "session_key", "TEXT"),
 ]
 
 

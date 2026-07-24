@@ -88,6 +88,22 @@ def test_batch_is_terminal_after_routed_cancellation(conn, monkeypatch):
     assert calls["sim"] == 0  # simulator never re-asked → terminal, no re-entry
 
 
+def test_init_db_migrates_legacy_escalation_requests(tmp_path):
+    """M1: an existing DB whose escalation_requests table predates session_key must gain the
+    column BEFORE idx_escalation_session_key is built — init_db must not fail with 'no such
+    column: session_key', and must be safely re-runnable."""
+    c = db.connect(str(tmp_path / "legacy.db"))
+    # a pre-column escalation_requests table, exactly as an older build shipped
+    c.executescript("CREATE TABLE escalation_requests (id INTEGER PRIMARY KEY, "
+                    "conversation_id INTEGER, reason TEXT, status TEXT, created_at TEXT);")
+    c.commit()
+    db.init_db(c)   # must migrate + index without raising
+    db.init_db(c)   # idempotent
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(escalation_requests)")}
+    assert "session_key" in cols
+    c.close()
+
+
 def test_reset_db_clears_cancellation_requests(conn):
     """A cancellation_requests row (FK → conversations) must not block reset_db's
     FK-ordered deletes — the demo re-seeds a DB that already holds routed cancellations."""
