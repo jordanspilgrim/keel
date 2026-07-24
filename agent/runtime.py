@@ -253,8 +253,9 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, *
     _emit(on_step, "policy", f"{name} → {verdict['action']}: {verdict['reason']}")
 
     if name == "escalate_to_human" and verdict["allowed"]:
-        rec["escalated"] = True
-        rec["escalate_reason"] = args.get("reason", "")
+        # STRUCTURED code only — the model cannot write free text into the durable store (H4).
+        code = args.get("reason_code", "other")
+        _set_escalation(rec, code if code in _MODEL_ESCALATION_CODES else "other")
         return {"status": "escalated", "note": "Handed to a human agent."}
 
     if verdict["action"] in ("ok", "capped"):
@@ -274,8 +275,8 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, *
 
     if verdict["action"] == "needs_human":  # consequential → human-in-the-loop (GDPR Art. 22)
         rec["guardrail"].append(("human_review", "routed", f"{name}: {verdict['reason']}"))
-        rec["escalated"] = True  # a real state transition — the turn will hand off to a human
-        rec["escalate_reason"] = f"{name} requires human approval"
+        # a real state transition — the turn will hand off to a human (structured code, H4)
+        _set_escalation(rec, "refund_request" if name == "deny_refund" else "consequential_change")
         return {"status": "needs_human", "reason": verdict["reason"],
                 "note": "This action needs a human — routing the customer to a teammate now."}
 
@@ -319,18 +320,43 @@ def _handoff_safe(text: str, rec: dict | None = None) -> bool:
     return not guardrails.check_completion_claim(text)
 
 
+# H4 — escalation reasons are a STRUCTURED, allowlisted code, never model-authored free
+# text. `get_customer` exposes the customer's raw name to the model, which could copy it
+# into a free-text reason that no redactor reliably catches; a fixed code set makes the
+# durable `escalation_requests.reason` server-authored by construction. safety_fallback and
+# hop_limit are server-only (not in the tool enum); the model may pick only the rest.
+_ESCALATION_DETAIL = {
+    "explicit_human_request": "Customer explicitly asked to speak with a person.",
+    "refund_request": "Customer requested a refund — needs a human to review.",
+    "consequential_change": "Customer requested a consequential account change — needs a human.",
+    "output_unverified": "Agent output could not be validated against policy — routed to a human.",
+    "safety_fallback": "Safety fallback engaged (kill switch) — routed to a human teammate.",
+    "hop_limit": "Tool-resolution limit reached without a final reply — routed to a human.",
+    "other": "Agent handed the conversation to a human teammate.",
+}
+_MODEL_ESCALATION_CODES = frozenset(
+    {"explicit_human_request", "refund_request", "consequential_change", "other"})
+_ESCALATION_HANDOFF_KEY = {
+    "explicit_human_request": "human", "refund_request": "refund",
+    "consequential_change": "consequential",
+    # everything else routes to the generic hand-off template
+}
+
+
+def _set_escalation(rec: dict, code: str, *, detail: str | None = None) -> None:
+    """Mark the conversation escalated with a STRUCTURED reason code (H4). The persisted
+    detail is server-authored from the code — never the model's free text — so no customer
+    PII copied into a reason can reach the durable store. `detail` optionally overrides with
+    OTHER server-authored text (e.g. the specific safety reason)."""
+    code = code if code in _ESCALATION_DETAIL else "other"
+    rec["escalated"] = True
+    rec["escalate_reason_code"] = code
+    rec["escalate_reason"] = detail or _ESCALATION_DETAIL[code]
+
+
 def _handoff_reason_key(rec: dict) -> str:
-    """Choose the hand-off template matching the escalation reason: an explicit refund
-    request, an explicit ask for a person, another consequential change, or generic."""
-    blob = (str(rec.get("escalate_reason", "")) + " "
-            + " ".join(str(e) for e in rec.get("guardrail", []))).lower()
-    if "refund" in blob:
-        return "refund"
-    if any(w in blob for w in ("human", "person", "representative", "someone", "manager")):
-        return "human"
-    if any(w in blob for w in ("consequential", "contract", "cancel_contract", "legal")):
-        return "consequential"
-    return "generic"
+    """Choose the hand-off template matching the STRUCTURED escalation code (H4)."""
+    return _ESCALATION_HANDOFF_KEY.get(rec.get("escalate_reason_code"), "generic")
 
 
 def _handoff_message(input_list: list, system: str, rec: dict | None = None) -> str:
@@ -748,7 +774,7 @@ def _finalize_output(rec: dict, input_list: list, system: str, on_step) -> str:
         _emit(on_step, "output", "Presented the single authorized offer before any cancellation")
         return _CEILING_TEMPLATE.format(label=offers.human_terms(off, off.authorized_terms))
     rec["guardrail"].append(("output", "blocked", reason2))
-    rec["escalated"] = True
+    _set_escalation(rec, "output_unverified")  # structured code (H4)
     _emit(on_step, "output", "Output contract could not be validated — escalating")
     return _OUTPUT_SAFE_REPLY
 
@@ -809,8 +835,7 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
             return msg
     # MAX_HOPS exhausted without a final reply — treat it as a real escalation
     # (log it, transition state, hand off warmly), not a silent truncation.
-    rec["escalated"] = True
-    rec["escalate_reason"] = "tool-resolution hop limit reached without a final reply"
+    _set_escalation(rec, "hop_limit")  # structured code (H4)
     rec["guardrail"].append(("max_hops", "routed", f"exceeded {MAX_HOPS} tool hops; handing off"))
     _emit(on_step, "output", "Hop limit reached — handing off to a human teammate")
     msg = _handoff_message(input_list, system, rec)
@@ -1166,9 +1191,9 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
         session["transcript"].append({"role": "assistant", "content": reply})
         ev = ("safe_mode", "engaged", "; ".join(session.get("safety_reasons", [])) or "kill switch")
         rec["guardrail"].append(ev)
-        rec["escalated"] = True
+        _set_escalation(rec, "safety_fallback", detail=ev[2])  # server-authored safety detail (H4)
         # Durably record the hand-off obligation NOW, before returning the promise.
-        _queue_escalation_live(conn, skey, ev[2])
+        _queue_escalation_live(conn, skey, rec.get("escalate_reason"))
         session["outcome"] = "escalated"
         _emit(on_step, "reply", reply)
         _finalize_if_terminal(session, conn)  # H3: persist + grade the hand-off now

@@ -51,5 +51,5 @@ def test_margin_floor_rejects_deep_discount_on_cheap_plan():
 
 
 def test_escalation_always_allowed():
-    v = policy.authorize("escalate_to_human", {"reason": "customer upset"}, COOLDOWN)
+    v = policy.authorize("escalate_to_human", {"reason_code": "explicit_human_request"}, COOLDOWN)
     assert v["allowed"] and v["action"] == "ok"

@@ -262,6 +262,32 @@ def test_terminal_escalation_survives_process_loss(conn, monkeypatch):
                         (conv["id"],)).fetchone()[0] == 1
 
 
+def test_escalation_reason_is_server_authored_from_the_code(conn, monkeypatch):
+    """H4: the persisted escalation reason is a SERVER-authored string derived from a
+    structured code — never the model's free text — so a customer name the model could copy
+    into a reason can't reach the durable escalation_requests store."""
+    def esc_agent(input_list, cid, sub, conn, rec, system=runtime.SYSTEM, on_step=None):
+        runtime._set_escalation(rec, "explicit_human_request")  # the tool path's effect
+        input_list.append({"role": "assistant", "content": "Connecting you with a teammate."})
+        return "Connecting you with a teammate."
+    monkeypatch.setattr(runtime, "_agent_turn", esc_agent)
+    s = runtime.new_session(1, conn)
+    s["_session_id"] = "sess-H4"
+    runtime.live_turn(s, "Alice Smith here, I want a person.", conn)
+    row = conn.execute("SELECT reason FROM escalation_requests WHERE session_key=?", ("sess-H4",)).fetchone()
+    assert row["reason"] == runtime._ESCALATION_DETAIL["explicit_human_request"]  # server text
+    assert "Alice" not in row["reason"]
+
+
+def test_set_escalation_rejects_unknown_code(conn):
+    """H4: an out-of-allowlist code (e.g. model free text smuggled as a code) falls back to
+    'other' — the durable reason can never be model-authored prose."""
+    rec = runtime._new_rec()
+    runtime._set_escalation(rec, "Alice Smith wants a refund now")
+    assert rec["escalate_reason_code"] == "other"
+    assert rec["escalate_reason"] == runtime._ESCALATION_DETAIL["other"] and "Alice" not in rec["escalate_reason"]
+
+
 def test_queue_escalation_live_redacts_the_model_authored_reason(conn):
     """R10-F4: the escalation reason is model-authored free text and can carry PII no regex
     reliably catches — it must be redacted before landing in the durable queue, like every

@@ -424,12 +424,16 @@ def test_every_handoff_template_is_offer_and_fact_free():
 
 
 def test_handoff_message_matches_escalation_reason():
+    # H4: the hand-off template is keyed by the STRUCTURED escalation code, not free text.
     rec = _rec()
-    rec["escalate_reason"] = "refund requires human approval"
+    runtime._set_escalation(rec, "refund_request")
     assert runtime._handoff_message([], runtime.SYSTEM, rec) == runtime._HANDOFF_TEMPLATES["refund"]
     rec2 = _rec()
-    rec2["escalate_reason"] = "customer asked for a person"
+    runtime._set_escalation(rec2, "explicit_human_request")
     assert runtime._handoff_message([], runtime.SYSTEM, rec2) == runtime._HANDOFF_TEMPLATES["human"]
+    rec3 = _rec()
+    runtime._set_escalation(rec3, "consequential_change")
+    assert runtime._handoff_message([], runtime.SYSTEM, rec3) == runtime._HANDOFF_TEMPLATES["consequential"]
 
 
 # --- malformed offers rejected ---------------------------------------------

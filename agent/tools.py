@@ -45,8 +45,10 @@ TOOL_SCHEMAS = [
      "description": "Decline a refund the customer requested. Consequential (legal/financial effect) — requires human approval.",
      "parameters": _obj({"reason": {"type": "string"}}, ["reason"])},
     {"type": "function", "name": "escalate_to_human",
-     "description": "Hand the conversation to a human agent. Use when uncertain or the customer needs a person.",
-     "parameters": _obj({"reason": {"type": "string"}}, ["reason"])},
+     "description": "Hand the conversation to a human agent. Use when uncertain or the customer needs a "
+                    "person. Pick the reason_code that fits; do NOT write free text (it is not stored).",
+     "parameters": _obj({"reason_code": {"type": "string", "enum": [
+         "explicit_human_request", "refund_request", "consequential_change", "other"]}}, ["reason_code"])},
 ]
 
 # Strict function-calling: the API validates arguments against each schema (required +
