@@ -72,6 +72,17 @@ def test_name_pattern_still_redacts_real_names_after_the_guard():
         assert "REDACTED_NAME" in out and "name" in types, text
 
 
+def test_weak_cue_single_name_is_lexicon_gated():
+    """R11: a single first name after a weak cue ('I'm John') is redacted via the first-name
+    lexicon — closing the single-name leak the F3 split introduced — WITHOUT re-scrubbing a
+    non-name ('I'm Disappointed', 'This is Comcast')."""
+    for redacted in ["I'm John", "I am Michael and I want to cancel", "This is Sarah"]:
+        out, types = guardrails.redact_pii(redacted)
+        assert "REDACTED_NAME" in out and "name" in types, redacted
+    for kept in ["I'm Disappointed", "This is Comcast", "I am Furious about this"]:
+        assert "REDACTED_NAME" not in guardrails.redact_pii(kept)[0], kept
+
+
 def test_name_redaction_catches_realistic_phrasings():
     """M4: the name arm covers the common ways a customer gives a name, not only
     'my name is' — intro cues, name-first, and a sign-off."""

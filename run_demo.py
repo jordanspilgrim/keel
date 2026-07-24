@@ -346,6 +346,13 @@ def run_median(k: int = 5) -> int:
     the committed headline is the median run, never the max. This is the honest fix for a
     high-variance single-run estimator — not cherry-picking. If any run bails structurally
     the whole estimate aborts (no partial median over fewer than k)."""
+    # k MUST be odd: the committed run is the real run whose lift EQUALS the median, which
+    # only exists for odd k. For even k the median is interpolated (a value no single run
+    # need equal), so manifest.json (a real committed run) would disagree with the reported
+    # aggregate median. Reject rather than silently ship divergent artifacts.
+    if k % 2 == 0 or k < 1:
+        raise SystemExit(f"--k must be a positive ODD integer (got {k}); an even k has no real "
+                         f"median run, so the committed manifest and the aggregate median would diverge")
     conn = db.connect()
     runs: list[dict] = []          # each is {"manifest": ..., "data": ...} from run_once
     try:

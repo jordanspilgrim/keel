@@ -42,8 +42,11 @@ _PII_PATTERNS = [
     (re.compile(r"\b(?i:(my name is|name's|name is|i'm called|call me|they call me))"
                 r"\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b"),
      r"\1 [REDACTED_NAME]", "name"),
-    #  (a2) WEAK cue ("i am"/"i'm"/"this is") — REQUIRE a two-word name, or "I'm Disappointed"
-    #  and "This is Comcast" would be scrubbed as names, corrupting the churn/theme signal.
+    #  (a2) WEAK cue ("i am"/"i'm"/"this is") + a TWO-word name. A single Titlecase word after
+    #  a weak cue is ambiguous ("I'm Disappointed", "This is Comcast"), so the one-word case is
+    #  handled separately below, gated on a common-first-name lexicon — catching "I'm John"
+    #  without scrubbing "I'm Disappointed". (An uncommon single first name after a weak cue can
+    #  still slip; the deterministic action layer + fact allowlist are the real backstops.)
     (re.compile(r"\b(?i:(i am|i'm|this is))\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b"),
      r"\1 [REDACTED_NAME]", "name"),
     #  (b) "it's/it is <First Last>" — require a two-word name so "it's Friday" isn't caught
@@ -64,6 +67,28 @@ _SENSITIVE_TERMS = re.compile(
     re.IGNORECASE,
 )
 
+# A single Titlecase word after a WEAK cue ("i'm John") is redacted only if it's a known
+# first name — so "I'm John" is scrubbed but "I'm Disappointed" / "This is Comcast" are not.
+# Best-effort common-name lexicon (not exhaustive); the fact allowlist is the real backstop.
+_COMMON_FIRST_NAMES = frozenset("""
+james john robert michael william david richard joseph thomas charles christopher daniel
+matthew anthony mark donald steven paul andrew joshua kenneth kevin brian george edward
+ronald timothy jason jeffrey ryan jacob gary nicholas eric jonathan stephen larry justin
+scott brandon frank benjamin gregory samuel raymond patrick alexander jack dennis jerry
+tyler aaron jose adam henry nathan douglas peter zachary kyle walter ethan jeremy harold
+carl keith roger gerald arthur terry sean christian austin noah jesse bryan luke
+mary patricia jennifer linda elizabeth barbara susan jessica sarah karen nancy lisa betty
+margaret sandra ashley kimberly emily donna michelle carol amanda dorothy melissa deborah
+stephanie rebecca sharon laura cynthia kathleen amy angela shirley anna brenda pamela emma
+nicole helen samantha katherine christine debra rachel carolyn janet maria catherine heather
+diane olivia julie joyce victoria kelly christina joan evelyn lauren judith megan andrea
+cheryl hannah jacqueline martha gloria teresa ann sara madison frances kathryn janice jean
+abigail alice julia judy sophia grace denise amber danielle marilyn beverly charlotte natalie
+""".split())
+
+_WEAK_CUE_SINGLE_NAME = re.compile(
+    r"\b(?i:(i am|i'm|this is))\s+([A-Z][a-z]+)\b(?!\s+[A-Z][a-z]+)")  # exactly ONE Titlecase word
+
 
 def redact_pii(text: str) -> tuple[str, list[str]]:
     """Return (redacted_text, sorted_unique_field_types). Deterministic."""
@@ -73,6 +98,14 @@ def redact_pii(text: str) -> tuple[str, list[str]]:
         if rx.search(out):
             out = rx.sub(repl, out)
             types.add(kind)
+
+    # Weak-cue single name, gated on the first-name lexicon (see note above).
+    def _sub_weak_single(m: re.Match) -> str:
+        if m.group(2).lower() in _COMMON_FIRST_NAMES:
+            types.add("name")
+            return f"{m.group(1)} [REDACTED_NAME]"
+        return m.group(0)
+    out = _WEAK_CUE_SINGLE_NAME.sub(_sub_weak_single, out)
     if _SENSITIVE_TERMS.search(out):
         out = _SENSITIVE_TERMS.sub("[REDACTED_SENSITIVE]", out)
         types.add("sensitive")

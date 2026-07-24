@@ -178,6 +178,19 @@ def test_run_median_reports_median_not_max_and_keeps_low_draws(monkeypatch, tmp_
     assert exported["provenance"]["run_id"] == "run-7.0"
 
 
+def test_run_median_rejects_even_k(monkeypatch, tmp_path):
+    """R11: even k has no real median run, so the committed manifest would diverge from the
+    reported aggregate median — reject it rather than ship divergent artifacts."""
+    import pytest as _pytest
+    (tmp_path / "dashboard").mkdir()
+    monkeypatch.chdir(tmp_path)
+    called = {"n": 0}
+    monkeypatch.setattr(run_demo, "run_once", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+    with _pytest.raises(SystemExit):
+        run_demo.run_median(k=4)
+    assert called["n"] == 0  # rejected before running anything
+
+
 def test_run_median_aborts_if_any_run_bails(monkeypatch, tmp_path):
     """A structural bail in any run aborts the whole estimate — no partial median over
     fewer than k runs (which would silently change the denominator)."""
