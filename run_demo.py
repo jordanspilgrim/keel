@@ -184,10 +184,21 @@ def run_once(conn, run_id: str | None = None) -> dict | None:
                              run_id=run_id, phase="baseline")
     before = export.conversation_metrics(conn, run_id=run_id, phase="baseline")
 
-    # ---- LEARN: cluster the VoC, then CONSUME a structured intervention signal --
+    # ---- MEASURE GATES LEARN (H1): grade the BASELINE arm BEFORE any analytics, so the
+    # intervention is chosen only from conversations that PASSED the current eval spec — an
+    # ungraded/failed/hallucinating baseline conversation cannot steer the flywheel.
+    print("   grading the baseline arm (Measure) before Learn…")
+    run_evals.grade_all(conn, run_id=run_id, phase="baseline")
+
+    # ---- LEARN: cluster the VoC, then CONSUME an eval-governed intervention signal --
     themes.run_analytics(conn)  # embed → cluster → theme cards → ranked signals (persisted)
-    signal = themes.recommend_intervention(conn)  # structured: segment + lever + confidence + evidence
-    print("③ LEARN — structured intervention signal (analytics proposes what to do):")
+    signal = themes.recommend_intervention(  # eval-eligible baseline only (H1)
+        conn, run_id=run_id, phase="baseline", eligible_only=True)
+    print("③ LEARN — structured intervention signal (from eval-eligible baseline conversations):")
+    _el = signal.get("eval_eligibility") or {}
+    if _el:
+        print(f"     eligibility: {_el['eligible']}/{_el['total']} baseline conversations passed the "
+              f"current eval spec (coverage {_el['coverage']*100:.0f}%); rule: {_el['rule']}")
     for s in signal["evidence"].get("segment_ranking", []):
         print(f"     {s['reason']:<22} save {s['save_rate']*100:>3.0f}%  ·  n={s['n']}  ·  loss={s['loss']}")
     print(f"   signal: segment='{signal['segment']}' · lever={signal['recommended_lever']} · "
@@ -233,8 +244,11 @@ def run_once(conn, run_id: str | None = None) -> dict | None:
     after_seg = _segment_metrics(conn, target, run_id, "after")
     print(f"   overall save {after['save_rate']*100:.0f}%  ·  price-sensitive save {after_seg['save_rate']*100:.0f}%")
 
-    print("   grading every conversation + re-clustering…")
-    m = run_evals.grade_all(conn)
+    # Grade the AFTER arm (the baseline was already graded before Learn); together the two
+    # phase-scoped grades cover every conversation exactly once. The manifest's "after"
+    # eval metrics therefore describe the after arm specifically.
+    print("   grading the after arm + re-clustering…")
+    m = run_evals.grade_all(conn, run_id=run_id, phase="after")
     themes.run_analytics(conn)
     counts, catch_rate = _redteam(conn)
     counts["over_limit"] = conn.execute(

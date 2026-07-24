@@ -17,6 +17,7 @@ import db
 import economics
 import llm
 from analytics import cluster, embed
+from evals import judge
 
 _LABEL_SCHEMA = {
     "type": "object",
@@ -40,16 +41,39 @@ def _offer_type(offer_made: str | None) -> str:
     return "other"
 
 
-def build_conversation_views(conn) -> list[dict]:
+def _eligibility_join(eligible_only: bool, params: list) -> str:
+    """SQL fragment restricting to conversations that PASSED the CURRENT eval spec, so
+    Learn is governed by Measure (H1) — an ungraded/failed/error baseline conversation
+    cannot influence the intervention. Appends its bind param FIRST (the JOIN's ? precedes
+    any WHERE ?), so callers must append run_id/phase params AFTER calling this. Empty when
+    not gating (the dashboard and general views still see every conversation)."""
+    if not eligible_only:
+        return ""
+    params.append(judge.EVAL_SPEC_VERSION)
+    return " JOIN evals e ON e.conversation_id = c.id AND e.rubric_version = ? AND e.verdict = 'pass' "
+
+
+def build_conversation_views(conn, *, run_id: str | None = None, phase: str | None = None,
+                             eligible_only: bool = False) -> list[dict]:
     """One de-identified view per conversation. Summary is the customer's own
-    (already PII-redacted) words — we cluster on language, not on the label."""
-    rows = conn.execute(
+    (already PII-redacted) words — we cluster on language, not on the label.
+    Optionally scoped to a run_id/phase and gated on the current-spec eval verdict (H1)."""
+    params: list = []
+    join = _eligibility_join(eligible_only, params)
+    where: list[str] = []
+    if run_id is not None:
+        where.append("c.run_id = ?"); params.append(run_id)
+    if phase is not None:
+        where.append("c.phase = ?"); params.append(phase)
+    sql = (
         "SELECT c.id, c.transcript_json, c.disposition_json, c.outcome, c.offer_made, "
         # the price the customer was actually on at conversation time — immutable; the
         # live subscription price is only a fallback for pre-snapshot historical rows.
         "COALESCE(c.price_at_conversation, s.price) AS price "
-        "FROM conversations c JOIN subscriptions s ON s.customer_id = c.customer_id"
-    ).fetchall()
+        "FROM conversations c JOIN subscriptions s ON s.customer_id = c.customer_id" + join)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    rows = conn.execute(sql, params).fetchall()
     views = []
     for r in rows:
         transcript = json.loads(r["transcript_json"])
@@ -110,17 +134,25 @@ def offer_effectiveness(views: list[dict]) -> list[dict]:
     return sorted(out, key=lambda o: o["save_rate"], reverse=True)
 
 
-def rank_segments(conn) -> list[dict]:
+def rank_segments(conn, *, run_id: str | None = None, phase: str | None = None,
+                  eligible_only: bool = False) -> list[dict]:
     """Rank churn-reason segments by LOSS IMPACT (volume × miss rate) from the
     conversations recorded so far. This is the data-driven 'which segment is
     bleeding' signal — it tells the flywheel WHERE to intervene, instead of the
     target being assumed. Uses the scenario's ground-truth churn_reason (stable),
-    not the LLM-derived disposition label."""
+    not the LLM-derived disposition label. Optionally scoped to a run_id/phase and
+    gated on the current-spec eval verdict (H1: Learn is governed by Measure)."""
+    params: list = []
+    join = _eligibility_join(eligible_only, params)
+    where = ["sc.kind='churn'", "sc.churn_reason IS NOT NULL"]
+    if run_id is not None:
+        where.append("c.run_id = ?"); params.append(run_id)
+    if phase is not None:
+        where.append("c.phase = ?"); params.append(phase)
     rows = conn.execute(
         "SELECT sc.churn_reason AS reason, c.outcome FROM conversations c "
-        "JOIN scenarios sc ON sc.id = c.scenario_id "
-        "WHERE sc.kind='churn' AND sc.churn_reason IS NOT NULL"
-    ).fetchall()
+        "JOIN scenarios sc ON sc.id = c.scenario_id" + join +
+        " WHERE " + " AND ".join(where), params).fetchall()
     agg: dict[str, list[int]] = {}
     for r in rows:
         a = agg.setdefault(r["reason"], [0, 0])  # [n, saved]
@@ -143,20 +175,51 @@ def _lever_for(reason: str) -> str | None:
     return "discount" if reason == _DISCOUNT_LEVER_SEGMENT else None
 
 
-def recommend_intervention(conn) -> dict:
+def _eval_eligibility(conn, run_id: str | None, phase: str | None) -> dict:
+    """Coverage + eligible/excluded counts for the scoped churn conversations, so the
+    intervention signal RECORDS how much of the evidence was eval-eligible and the exact
+    rule used (H1). This is the provenance that makes 'Measure governs Learn' auditable."""
+    where = ["sc.kind='churn'", "sc.churn_reason IS NOT NULL"]
+    params: list = []
+    if run_id is not None:
+        where.append("c.run_id = ?"); params.append(run_id)
+    if phase is not None:
+        where.append("c.phase = ?"); params.append(phase)
+    base = "FROM conversations c JOIN scenarios sc ON sc.id = c.scenario_id WHERE " + " AND ".join(where)
+    ver = judge.EVAL_SPEC_VERSION
+    total = conn.execute("SELECT count(*) " + base, params).fetchone()[0]
+    graded = conn.execute(
+        "SELECT count(*) " + base + " AND EXISTS (SELECT 1 FROM evals e WHERE e.conversation_id=c.id "
+        "AND e.rubric_version=?)", params + [ver]).fetchone()[0]
+    eligible = conn.execute(
+        "SELECT count(*) " + base + " AND EXISTS (SELECT 1 FROM evals e WHERE e.conversation_id=c.id "
+        "AND e.rubric_version=? AND e.verdict='pass')", params + [ver]).fetchone()[0]
+    return {"rule": "current-spec eval verdict = pass", "spec_version": ver,
+            "total": total, "graded": graded, "eligible": eligible, "excluded": total - eligible,
+            "coverage": round(graded / total, 3) if total else 0.0}
+
+
+def recommend_intervention(conn, *, run_id: str | None = None, phase: str | None = None,
+                           eligible_only: bool = False) -> dict:
     """Build a STRUCTURED intervention signal from the baseline evidence. Analytics
     proposes WHAT to do, not just where: it ranks segments by loss impact and
     selects the highest-loss segment FOR WHICH AN AVAILABLE LEVER EXISTS — acting
     on the worst problem it can actually address, and transparently noting any
     higher-loss segment it has no lever for (rather than either hard-coding the
-    target or bailing whenever a lever-less segment happens to rank first)."""
-    segments = rank_segments(conn)
-    views = build_conversation_views(conn)
+    target or bailing whenever a lever-less segment happens to rank first).
+
+    When eligible_only is set (the money demo), only conversations that PASSED the current
+    eval spec influence the ranking — so a failed/ungraded/hallucinating baseline
+    conversation cannot steer the intervention (H1). The eligibility provenance is attached
+    to the signal."""
+    eligibility = _eval_eligibility(conn, run_id, phase) if eligible_only else None
+    segments = rank_segments(conn, run_id=run_id, phase=phase, eligible_only=eligible_only)
+    views = build_conversation_views(conn, run_id=run_id, phase=phase, eligible_only=eligible_only)
     offers = offer_effectiveness(views)
     if not segments:
         return {"segment": None, "recommended_lever": None, "lever_compatible": False,
                 "confidence": 0.0, "evidence": {}, "offer_effectiveness": offers,
-                "unaddressable_higher_loss": []}
+                "unaddressable_higher_loss": [], "eval_eligibility": eligibility}
     # the higher-loss segments we have NO lever for (surfaced, not hidden)
     unaddressable = []
     chosen = None
@@ -169,7 +232,8 @@ def recommend_intervention(conn) -> dict:
         return {"segment": segments[0]["reason"], "recommended_lever": None, "lever_compatible": False,
                 "recommended_action": "no available lever fits any at-risk segment",
                 "confidence": 0.0, "evidence": {"segment_ranking": segments[:3]},
-                "offer_effectiveness": offers, "unaddressable_higher_loss": unaddressable}
+                "offer_effectiveness": offers, "unaddressable_higher_loss": unaddressable,
+                "eval_eligibility": eligibility}
     lever = _lever_for(chosen["reason"])
     confidence = round(min(1.0, chosen["n"] / 8.0), 2)
     note = (f"enable the {lever} lever for the '{chosen['reason']}' segment"
@@ -185,6 +249,7 @@ def recommend_intervention(conn) -> dict:
                      "segment_ranking": segments[:3]},
         "offer_effectiveness": offers,
         "unaddressable_higher_loss": unaddressable,
+        "eval_eligibility": eligibility,
     }
 
 

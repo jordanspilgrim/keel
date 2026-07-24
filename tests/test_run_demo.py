@@ -218,6 +218,43 @@ def test_run_median_aborts_if_any_run_bails(monkeypatch, tmp_path):
     assert not (tmp_path / "dashboard" / "demo_aggregate.json").exists()  # no partial artifact written
 
 
+# --- H1: Measure governs Learn — only eval-eligible baseline steers the signal ---
+def test_recommend_intervention_gates_learn_on_eval_eligibility(conn):
+    """H1: an ungraded/failed/error baseline conversation must NOT influence the intervention
+    ranking — only conversations that PASSED the current eval spec count, and the signal
+    records that eligibility. Without gating, the failed/ungraded ones would count."""
+    from evals import judge
+    from agent import runtime
+    ver = judge.EVAL_SPEC_VERSION
+
+    def _mk():  # a baseline 'Price too high' conversation (scenario 1 = customer 1), all lost
+        runtime.persist_conversation(conn, {
+            "customer_id": 1, "scenario_id": 1,
+            "transcript": [{"role": "user", "content": "too expensive"}, {"role": "assistant", "content": "hi"}],
+            "disposition": {"outcome": "lost", "offer_made": None, "churn_reason": "Price too high"},
+            "outcome": "lost", "offer_made": None, "evidence": {},
+            "guardrail_events": [], "audit": [], "run_id": "R", "phase": "baseline"})
+        return conn.execute("SELECT id FROM conversations ORDER BY id DESC LIMIT 1").fetchone()["id"]
+
+    def _grade(cid, verdict):
+        conn.execute("INSERT INTO evals (conversation_id, scores_json, verdict, rubric_version, created_at) "
+                     "VALUES (?,?,?,?,?)", (cid, "{}", verdict, ver, "t"))
+
+    a, b, c, _d = _mk(), _mk(), _mk(), _mk()          # 4 baseline conversations; _d left UNGRADED
+    _grade(a, "pass"); _grade(b, "pass"); _grade(c, "fail")
+    conn.commit()
+
+    gated = themes.recommend_intervention(conn, run_id="R", phase="baseline", eligible_only=True)
+    assert gated["segment"] == "Price too high"
+    assert gated["evidence"]["n"] == 2                 # only the 2 PASSING conversations counted
+    el = gated["eval_eligibility"]
+    assert el["total"] == 4 and el["eligible"] == 2 and el["excluded"] == 2 and el["graded"] == 3
+    assert el["coverage"] == 0.75 and el["rule"] == "current-spec eval verdict = pass"
+
+    ungated = themes.recommend_intervention(conn, run_id="R", phase="baseline", eligible_only=False)
+    assert ungated["evidence"]["n"] == 4               # ungated, the failed + ungraded ones count too
+
+
 # --- M2: cited experiment signal survives a post-run re-cluster ------------
 def test_experiment_signal_survives_reclustering(conn):
     signal = {"segment": "Price too high", "recommended_lever": "discount", "evidence": {"loss": 4.2}}

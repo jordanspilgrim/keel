@@ -32,11 +32,21 @@ def _now() -> str:
 build_judge_input = judge.build_judge_input
 
 
-def grade_all(conn, *, max_workers: int = 8) -> dict:
+def grade_all(conn, *, max_workers: int = 8, run_id: str | None = None, phase: str | None = None) -> dict:
     """Judge every conversation from the persisted eval envelope; persist an eval
     row for EACH one — a judge failure records verdict='error' so coverage stays
-    honest, never a silent drop. Verdicts are derived mechanically from the scores."""
-    ids = [r["id"] for r in conn.execute("SELECT id FROM conversations").fetchall()]
+    honest, never a silent drop. Verdicts are derived mechanically from the scores.
+
+    Optionally scoped to a run_id/phase so the money demo can grade the BASELINE arm
+    BEFORE analytics selects an intervention (H1) — without re-judging it again when the
+    after arm is graded. The returned metrics then describe only the scoped subset."""
+    where, params = [], []
+    if run_id is not None:
+        where.append("run_id = ?"); params.append(run_id)
+    if phase is not None:
+        where.append("phase = ?"); params.append(phase)
+    q = "SELECT id FROM conversations" + (" WHERE " + " AND ".join(where) if where else "")
+    ids = [r["id"] for r in conn.execute(q, params).fetchall()]
     # Build each judge input on the MAIN thread (SQLite is not thread-safe), but wrap
     # EACH build so a single malformed legacy row records a coverage-miss for THAT
     # conversation rather than aborting the whole batch before any error row is written.
