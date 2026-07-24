@@ -1,10 +1,10 @@
 window.KEEL_DATA = {
   "kpis": {
-    "madj_save_rate": 0.3067,
-    "madj_delta_pp": 18.8,
-    "save_rate": 0.3833,
-    "save_delta_pp": 23.3,
-    "eval_pass_rate": 0.8,
+    "madj_save_rate": 0.2917,
+    "madj_delta_pp": 14.7,
+    "save_rate": 0.3667,
+    "save_delta_pp": 18.3,
+    "eval_pass_rate": 0.8313,
     "eval_coverage": 0.9938,
     "guardrail_catch_rate": 1.0,
     "compliance_coverage": 1.0
@@ -15,53 +15,53 @@ window.KEEL_DATA = {
       "After"
     ],
     "save": [
-      0.15,
-      0.3833
+      0.1833,
+      0.3667
     ],
     "madj": [
-      0.1185,
-      0.3067
+      0.1448,
+      0.2917
     ]
   },
   "drivers": [
     {
-      "label": "Price sensitivity",
-      "share": 34,
-      "save_rate": 0.418
+      "label": "Pricing Concern",
+      "share": 36,
+      "save_rate": 0.483
     },
     {
-      "label": "Price sensitivity",
-      "share": 25,
-      "save_rate": 0.25
+      "label": "Price-driven churn",
+      "share": 22,
+      "save_rate": 0.167
     },
     {
-      "label": "Price-related cancellation",
+      "label": "Price Concerns",
       "share": 18,
       "save_rate": 0.0
     },
     {
-      "label": "No longer using",
-      "share": 11,
-      "save_rate": 0.278
+      "label": "Switching to competitor",
+      "share": 12,
+      "save_rate": 0.158
     },
     {
-      "label": "Switching to competitor",
+      "label": "No longer using",
       "share": 11,
-      "save_rate": 0.056
+      "save_rate": 0.167
     }
   ],
   "offers": [
     {
-      "label": "discount",
-      "save_rate": 0.474,
-      "margin_cost": 29.69,
-      "rel_cost": 2.76
+      "label": "pause",
+      "save_rate": 0.351,
+      "margin_cost": 11.19,
+      "rel_cost": 1.0
     },
     {
-      "label": "pause",
-      "save_rate": 0.288,
-      "margin_cost": 10.76,
-      "rel_cost": 1.0
+      "label": "discount",
+      "save_rate": 0.231,
+      "margin_cost": 2.42,
+      "rel_cost": 0.22
     }
   ],
   "safety": {
@@ -75,8 +75,8 @@ window.KEEL_DATA = {
   "meta": {
     "conversations": 160,
     "provenance": {
-      "generated_at": "2026-07-23T22:32:20.565340+00:00",
-      "run_id": "run-20260723T222003",
+      "generated_at": "2026-07-24T00:01:19.239200+00:00",
+      "run_id": "run-20260723T234900",
       "cohort_size": 80,
       "cohort_scenario_ids": [
         1,
@@ -168,37 +168,37 @@ window.KEEL_DATA = {
       "intervention_signal": {
         "confidence": 1.0,
         "evidence": {
-          "loss": 51.0,
+          "loss": 49.0,
           "n": 60,
-          "save_rate": 0.15,
+          "save_rate": 0.183,
           "segment_ranking": [
             {
-              "loss": 51.0,
+              "loss": 49.0,
               "n": 60,
               "reason": "Price too high",
-              "save_rate": 0.15
+              "save_rate": 0.183
             },
             {
-              "loss": 8.0,
-              "n": 8,
-              "reason": "Switched to competitor",
-              "save_rate": 0.0
-            },
-            {
-              "loss": 5.0,
+              "loss": 6.0,
               "n": 9,
               "reason": "No longer needed",
-              "save_rate": 0.444
+              "save_rate": 0.333
+            },
+            {
+              "loss": 6.0,
+              "n": 8,
+              "reason": "Switched to competitor",
+              "save_rate": 0.25
             }
           ]
         },
         "lever_compatible": true,
         "offer_effectiveness": [
           {
-            "avg_margin_cost": 13.89,
+            "avg_margin_cost": 9.05,
             "n": 53,
             "offer": "pause",
-            "save_rate": 0.264
+            "save_rate": 0.302
           },
           {
             "avg_margin_cost": 0.0,
@@ -234,26 +234,26 @@ window.KEEL_DATA = {
         "playbook_sha": "add93744da2a",
         "conversations": 80,
         "starting_state_sha": "world-cc0b6f6f6e67",
-        "segment_save_rate": 0.15,
-        "overall_save_rate": 0.175
+        "segment_save_rate": 0.1833,
+        "overall_save_rate": 0.2
       },
       "after": {
         "policy": "discounts_enabled",
         "playbook_sha": "a68e48936007",
         "conversations": 80,
         "starting_state_sha": "world-cc0b6f6f6e67",
-        "segment_save_rate": 0.3833,
-        "overall_save_rate": 0.3125,
-        "eval_pass_rate": 0.8,
+        "segment_save_rate": 0.3667,
+        "overall_save_rate": 0.3,
+        "eval_pass_rate": 0.831,
         "eval_coverage": 0.994
       },
       "lift": {
-        "segment_save_pp": 23.3,
-        "segment_madj_pp": 18.8,
-        "overall_save_pp": 13.8
+        "segment_save_pp": 18.3,
+        "segment_madj_pp": 14.7,
+        "overall_save_pp": 10.0
       },
       "guardrail_catch_rate": 1.0,
-      "fairness_gap": 0.055,
+      "fairness_gap": 0.045,
       "note": "Paired before/after on identical seeded customers run from a byte-identical starting subscription state (same starting_state_sha in both arms \u2192 eligibility held constant). TWO variables changed together (discount policy + agent playbook), so this is a synthetic PAIRED demonstration of the flywheel on the treated (price-sensitive) segment \u2014 not an isolated causal estimate. Numbers vary run to run."
     }
   }

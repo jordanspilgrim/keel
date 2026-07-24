@@ -107,9 +107,9 @@ python economics.py
   <p class="proves">Proves: <b>Phase 0</b> — reproducible synthetic data (identical SHA across runs) and the unit-economics model reproducing the plan’s headline.</p>
 
   <div class="step"><div class="num">3</div><h2>Run the unit tests <span class="badge free">no API</span></h2></div>
-  <p>135 fast, deterministic tests over the policy layer, guardrails, the response-contract/offer-ledger, enforcement, the live-session state machine, the money-demo integrity properties, and the server — no network, ~1s.</p>
+  <p>152 fast, deterministic tests over the policy layer, guardrails, the response-contract/offer-ledger, enforcement, the live-session state machine, the money-demo integrity properties, and the server — no network, ~1s.</p>
   <pre>python -m pytest tests/ -q
-<span class="g"># .....................................................................  147 passed in ~1s</span></pre>
+<span class="g"># .....................................................................  152 passed in ~1s</span></pre>
   <table>
     <tr><th>File</th><th>Covers</th></tr>
     <tr><td class="s">test_policy.py</td><td>discount cap, save-offer cooldown, pause cap, margin floor, consequential → human, refund → human</td></tr>
@@ -159,24 +159,24 @@ Offer effectiveness: pause 56% @ $16.6 · discount 100% @ $19.8
   <p class="proves">Proves: the top churn drivers and the offer trade-off are computed <b>from clustered data</b>, not hard-coded.</p>
 
   <div class="step"><div class="num">8</div><h2>The money demo — the flywheel turning <span class="badge api">~cents</span></h2></div>
-  <p>The whole loop end to end: baseline → learn → act on the signal → re-measure → export the dashboard.</p>
-  <pre>python run_demo.py
-open dashboard/index.html   <span class="c"># shows the measured lift</span></pre>
-  <pre><span class="c"># abridged — a representative run; numbers vary run to run</span>
+  <p>The whole loop end to end: baseline → learn → act on the signal → re-measure → export the dashboard. A single run is high-variance, so the headline is a <b>pre-registered median of k=5 runs</b> (fixed seed, every run counted, median never the max).</p>
+  <pre>python run_demo.py --median --k=5
+open dashboard/index.html   <span class="c"># shows the committed median run</span></pre>
+  <pre><span class="c"># abridged — the pre-registered median-of-5 summary</span>
 ③ LEARN — structured intervention signal (worst lever-compatible segment):
-  Price too high  n=20 · loss=… · lever=discount   ← selected, persisted signal #1
-FLYWHEEL RESULT  (treated price-sensitive segment · single committed run · one run_id)
-  price-sensitive save:  15%  →  <span class="g">60%</span>   (+45 pp)
-  overall (context):     13%  →  47%   (+33 pp)
-  eval pass 92% (coverage 100%) · guardrail catch 100% · compliance 100% · paired cohort: True</pre>
-  <p class="proves">Proves the definition of done: on <b>identical seeded customers</b>, acting on the analytics signal (enable discounts for the price-sensitive segment) produced a measured lift <b>on the treated segment</b> — the flywheel visibly turning. The run requires a matched paired cohort and a strictly-positive treated-segment lift, and writes provenance to <code>dashboard/manifest.json</code>.</p>
+  Price too high  n=60 · loss=… · lever=discount   ← selected, persisted signal #1
+PRE-REGISTERED MEDIAN-OF-5  (treated price-sensitive segment · n=60)
+  segment save lift:  median <span class="g">+18.3 pp</span>   range [+3.3, +31.7] pp   (all 5 positive)
+  committed run:      run-20260723T234900   (18%  →  37%)
+  eval pass median 82% (range 80–84%) · guardrail catch 100% · compliance 100% · paired cohort: True</pre>
+  <p class="proves">Proves the definition of done: on <b>identical seeded customers</b>, acting on the analytics signal (enable discounts for the price-sensitive segment) produced a measured lift <b>on the treated segment</b> — the flywheel visibly turning. Single runs vary (the 5 spanned +3.3pp to +31.7pp), so the committed headline is the median; the run requires a matched paired cohort and a strictly-positive treated-segment lift, and writes the k=5 distribution to <code>dashboard/demo_aggregate.json</code> (+ the committed run to <code>dashboard/manifest.json</code>).</p>
 
   <h2>What each command proves, at a glance</h2>
   <table>
     <tr><th>Command</th><th>Phase</th><th>API</th><th>Proves</th></tr>
     <tr><td class="s">python synth.py</td><td>0</td><td>no</td><td>reproducible synthetic data</td></tr>
     <tr><td class="s">python economics.py</td><td>0</td><td>no</td><td>the cost-to-serve model</td></tr>
-    <tr><td class="s">pytest tests/</td><td>1–2</td><td>no</td><td>policy, guardrails, response-contract/ledger, enforcement, live session, money-demo, server (147 tests)</td></tr>
+    <tr><td class="s">pytest tests/</td><td>1–2</td><td>no</td><td>policy, guardrails, response-contract/ledger, enforcement, live session, money-demo, server (152 tests)</td></tr>
     <tr><td class="s">-m scripts.phase1_accept</td><td>1</td><td>yes</td><td>save / let-churn behavior end-to-end</td></tr>
     <tr><td class="s">-m scripts.phase2_accept</td><td>2</td><td>yes</td><td>100% guardrail catch rate + compliance paths</td></tr>
     <tr><td class="s">-m scripts.phase3_accept</td><td>3</td><td>yes</td><td>grade 100% + judge calibration + known-bad conversation caught</td></tr>

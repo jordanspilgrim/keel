@@ -190,6 +190,28 @@ def test_live_escalation_is_durable_before_resolve(conn):
     assert row is not None and row["status"] == "pending_human" and row["conversation_id"] is None
 
 
+def test_queue_escalation_live_redacts_the_model_authored_reason(conn):
+    """R10-F4: the escalation reason is model-authored free text and can carry PII no regex
+    reliably catches — it must be redacted before landing in the durable queue, like every
+    other durable free-text store."""
+    runtime._queue_escalation_live(conn, "sess-PII", "Customer jane.doe@example.com is furious, threatening legal action")
+    row = conn.execute("SELECT reason FROM escalation_requests WHERE session_key=?", ("sess-PII",)).fetchone()
+    assert "jane.doe@example.com" not in row["reason"] and "[REDACTED_EMAIL]" in row["reason"]
+
+
+def test_escalation_self_heal_uses_rec_reason_not_session(conn):
+    """R10-F7: the terminal-re-entry self-heal must source the reason from `rec` (where it
+    is actually set), not `session` (where it never is) — otherwise the recovery-path row
+    silently loses its reason."""
+    s = runtime.new_session(1, conn)
+    s["_session_id"] = "sess-HEAL"
+    s["rec"]["escalated"] = True
+    s["rec"]["escalate_reason"] = "needs a human on contact jane@example.com"
+    runtime.live_turn(s, "are you there?", conn)   # terminal re-entry → self-heal
+    row = conn.execute("SELECT reason FROM escalation_requests WHERE session_key=?", ("sess-HEAL",)).fetchone()
+    assert row is not None and row["reason"] and "jane@example.com" not in row["reason"]  # threaded + redacted
+
+
 def test_cancellation_self_heals_on_retry_after_write_failure(conn, monkeypatch):
     """L1: if the durable cancellation write fails, the session is not left terminal with
     an obligation in no table — a retry hits the terminal re-entry and idempotently

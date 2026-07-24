@@ -637,9 +637,13 @@ def _queue_escalation_live(conn, session_key: str | None, reason: str | None) ->
     comes. Idempotent on the session key; linked to its conversation at persist."""
     if not session_key:
         return
+    # The reason is MODEL-authored free text and can carry customer PII no regex reliably
+    # catches — redact it before it lands in a durable store, exactly as the transcript,
+    # churn_reason, and evidence envelope are scrubbed on their durable write paths.
+    safe_reason = guardrails.redact_pii(reason)[0][:200] if reason else None
     conn.execute(
         "INSERT OR IGNORE INTO escalation_requests (session_key, reason, status, created_at) "
-        "VALUES (?,?,?,?)", (session_key, (reason or "")[:200], "pending_human", _now()))
+        "VALUES (?,?,?,?)", (session_key, safe_reason, "pending_human", _now()))
     conn.commit()
 
 
@@ -923,7 +927,9 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
     return {"customer_id": cid, "scenario_id": scenario["id"], "transcript": transcript,
             "disposition": disp, "outcome": outcome, "offer_made": _offer_made(rec),
             "evidence": _evidence(rec), "guardrail_events": rec["guardrail"],
-            "audit": rec["audit"], "cancellation_routed": rec.get("cancellation_routed", False)}
+            "audit": rec["audit"], "cancellation_routed": rec.get("cancellation_routed", False),
+            # so a batch-persisted escalation carries its reason (parity with the live path)
+            "escalate_reason": rec.get("escalate_reason")}
 
 
 def persist_conversation(conn, record: dict) -> int:
@@ -999,9 +1005,11 @@ def persist_conversation(conn, record: dict) -> int:
                 "UPDATE escalation_requests SET conversation_id=? WHERE session_key=? AND conversation_id IS NULL",
                 (conv_id, skey)).rowcount if skey else 0
             if not linked:
+                _er = record.get("escalate_reason")
+                _er = guardrails.redact_pii(_er)[0][:200] if _er else None  # model free-text → redact
                 conn.execute(
                     "INSERT INTO escalation_requests (conversation_id, reason, status, created_at) "
-                    "VALUES (?,?,?,?)", (conv_id, record.get("escalate_reason"), "pending_human", _now()))
+                    "VALUES (?,?,?,?)", (conv_id, _er, "pending_human", _now()))
         # Persist cooldown state: extending a save offer starts the 90-day clock, so a
         # later conversation for the same customer won't immediately offer again.
         if record.get("offer_made"):
@@ -1065,7 +1073,7 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
     # batch path, which stops on escalation). No more model turns after hand-off.
     skey = session.get("_session_id")
     if session.get("outcome") == "escalated" or rec.get("escalated"):
-        _queue_escalation_live(conn, skey, session.get("escalate_reason"))  # self-heal a failed prior write
+        _queue_escalation_live(conn, skey, rec.get("escalate_reason"))  # self-heal a failed prior write
         session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
         session["transcript"].append({"role": "assistant", "content": _ESCALATED_REPLY})
         _emit(on_step, "guardrail", "Session already escalated — not running the agent", gtype="escalated")

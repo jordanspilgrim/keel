@@ -50,6 +50,28 @@ def test_name_pattern_does_not_over_redact():
         assert "REDACTED_NAME" not in guardrails.redact_pii(keep)[0]
 
 
+def test_name_pattern_does_not_over_redact_domain_titlecase():
+    """R10-F3: a weak intro cue ('i'm'/'i am'/'this is') + a SINGLE Titlecase word, and
+    common e-mail sign-offs, must NOT be scrubbed as names — over-redaction corrupts the
+    churn/theme signal in exactly the frustrated-customer population this product serves."""
+    for keep in ["I'm Disappointed with the price and cancelling.",
+                 "This is Comcast calling about my bill.",
+                 "I am Frustrated with support.",
+                 "Please cancel.\n- Best Regards",
+                 "Cancel it.\n- Many Thanks"]:
+        assert "REDACTED_NAME" not in guardrails.redact_pii(keep)[0], keep
+
+
+def test_name_pattern_still_redacts_real_names_after_the_guard():
+    """R10-F3: tightening pattern (a) must not stop catching actual self-identified names."""
+    for text in ["I'm John Smith and I want to cancel.",   # weak cue + two words
+                 "my name is Jane",                          # strong cue + one word
+                 "call me Bob",                              # strong cue + one word
+                 "Please cancel.\n- Michael Brown"]:         # a genuine sign-off name
+        out, types = guardrails.redact_pii(text)
+        assert "REDACTED_NAME" in out and "name" in types, text
+
+
 def test_name_redaction_catches_realistic_phrasings():
     """M4: the name arm covers the common ways a customer gives a name, not only
     'my name is' — intro cues, name-first, and a sign-off."""

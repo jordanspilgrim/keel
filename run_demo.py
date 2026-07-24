@@ -313,18 +313,22 @@ def run_once(conn, run_id: str | None = None) -> dict | None:
           else "did NOT meet the bar (needs a matched paired cohort AND a strictly positive treated-segment lift).")
     # NOTE: a non-positive lift is still a valid draw and is RETURNED (only the single-run
     # main() translates it to a nonzero exit code). The median-of-k estimator must see it.
-    return manifest
+    # Return the export `data` alongside the manifest: in --median mode each run resets the
+    # DB, so the committed run's rows are gone by the end — the ONLY way to re-render the
+    # dashboard from the committed (median) run is to keep its export payload in memory.
+    return {"manifest": manifest, "data": data}
 
 
 def main() -> int:
     """Single honest run (kept for `python run_demo.py`)."""
     conn = db.connect()
     try:
-        manifest = run_once(conn)
+        ret = run_once(conn)
     finally:
         conn.close()
-    if manifest is None:
+    if ret is None:
         return 1
+    manifest = ret["manifest"]
     return 0 if (manifest["paired_cohort"] and manifest["lift"]["segment_save_pp"] > 0) else 1
 
 
@@ -343,44 +347,47 @@ def run_median(k: int = 5) -> int:
     high-variance single-run estimator — not cherry-picking. If any run bails structurally
     the whole estimate aborts (no partial median over fewer than k)."""
     conn = db.connect()
-    runs: list[dict] = []
+    runs: list[dict] = []          # each is {"manifest": ..., "data": ...} from run_once
     try:
         for i in range(k):
             print(f"\n{'#' * 20} PRE-REGISTERED RUN {i + 1}/{k} {'#' * 20}")
-            m = run_once(conn)
-            if m is None:
+            ret = run_once(conn)
+            if ret is None:
                 raise SystemExit(f"run {i + 1}/{k} bailed structurally — aborting the median "
                                  f"(an honest estimate cannot be computed over fewer than k runs)")
-            runs.append(m)
+            runs.append(ret)
     finally:
         conn.close()
 
+    manifests = [r["manifest"] for r in runs]
+
     def _dist(path_a: str, path_b: str) -> dict:
-        vals = [r[path_a][path_b] for r in runs]
+        vals = [mf[path_a][path_b] for mf in manifests]
         return {"median": _median(vals), "min": min(vals), "max": max(vals), "values": vals}
 
-    seg_vals = [r["lift"]["segment_save_pp"] for r in runs]
+    seg_vals = [mf["lift"]["segment_save_pp"] for mf in manifests]
     median_seg = _median(seg_vals)
     # The committed run is a REAL run whose segment lift equals the median (odd k → exists),
     # so dashboard/manifest.json stays a single self-consistent artifact that IS the median.
-    committed = min(runs, key=lambda r: abs(r["lift"]["segment_save_pp"] - median_seg))
+    committed_ret = min(runs, key=lambda r: abs(r["manifest"]["lift"]["segment_save_pp"] - median_seg))
+    committed = committed_ret["manifest"]
     aggregate = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "method": ("pre-registered median of k paired runs; fixed seed (identical world), so the "
                    "variance measured is the LLM-draw variance a re-run actually sees; every run "
                    "included; committed headline is the median run, not the max"),
         "k": k, "seed": config.SYNTH_SEED, "treated_cohort_n": committed["treated_cohort_n"],
-        "run_ids": [r["run_id"] for r in runs],
+        "run_ids": [mf["run_id"] for mf in manifests],
         "committed_run_id": committed["run_id"],
         "segment_save_pp": _dist("lift", "segment_save_pp"),
         "segment_madj_pp": _dist("lift", "segment_madj_pp"),
         "overall_save_pp": _dist("lift", "overall_save_pp"),
-        "eval_pass_rate": {"median": _median([r["after"]["eval_pass_rate"] for r in runs]),
-                           "min": min(r["after"]["eval_pass_rate"] for r in runs),
-                           "max": max(r["after"]["eval_pass_rate"] for r in runs)},
-        "fairness_gap": {"median": _median([r["fairness_gap"] for r in runs]),
-                         "min": min(r["fairness_gap"] for r in runs),
-                         "max": max(r["fairness_gap"] for r in runs)},
+        "eval_pass_rate": {"median": _median([mf["after"]["eval_pass_rate"] for mf in manifests]),
+                           "min": min(mf["after"]["eval_pass_rate"] for mf in manifests),
+                           "max": max(mf["after"]["eval_pass_rate"] for mf in manifests)},
+        "fairness_gap": {"median": _median([mf["fairness_gap"] for mf in manifests]),
+                         "min": min(mf["fairness_gap"] for mf in manifests),
+                         "max": max(mf["fairness_gap"] for mf in manifests)},
     }
     with open("dashboard/demo_aggregate.json", "w") as f:
         json.dump(aggregate, f, indent=2)
@@ -388,6 +395,11 @@ def run_median(k: int = 5) -> int:
     # artifact equal to the reported median headline.
     with open("dashboard/manifest.json", "w") as f:
         json.dump(committed, f, indent=2)
+    # Re-render the dashboard's data.js/data.json from the COMMITTED (median) run's export
+    # payload. Without this the dashboard would show whatever run happened to run LAST (its
+    # rows are the only ones left in the DB after the final reset) — which would let the
+    # flagship visible surface display an above-median lift while the docs claim the median.
+    export.write_data(committed_ret["data"])
 
     sp = aggregate["segment_save_pp"]
     print("\n" + "=" * 72)

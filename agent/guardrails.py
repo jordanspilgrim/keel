@@ -37,9 +37,14 @@ _PII_PATTERNS = [
     # phrasings a customer uses to give a name. Titlecase is required, so lowercase or
     # all-caps names can still slip through; honestly scoped as such (the deterministic
     # action layer and the customer-facing fact allowlist are the real backstops).
-    #  (a) intro cue + Titlecase name: "my name is Jane Doe", "I'm John Smith", "call me Bob Lee"
-    (re.compile(r"\b(?i:(my name is|name's|name is|i am|i'm called|i'm|call me|this is|they call me))"
+    #  (a1) STRONG, explicit name-declaration cue + 1-3 Titlecase words: "my name is Jane",
+    #  "call me Bob Lee". These cues are unambiguous, so a single Titlecase word is a name.
+    (re.compile(r"\b(?i:(my name is|name's|name is|i'm called|call me|they call me))"
                 r"\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b"),
+     r"\1 [REDACTED_NAME]", "name"),
+    #  (a2) WEAK cue ("i am"/"i'm"/"this is") — REQUIRE a two-word name, or "I'm Disappointed"
+    #  and "This is Comcast" would be scrubbed as names, corrupting the churn/theme signal.
+    (re.compile(r"\b(?i:(i am|i'm|this is))\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b"),
      r"\1 [REDACTED_NAME]", "name"),
     #  (b) "it's/it is <First Last>" — require a two-word name so "it's Friday" isn't caught
     (re.compile(r"\b(?i:(it's|it is))\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b"),
@@ -47,8 +52,11 @@ _PII_PATTERNS = [
     #  (c) "<First Last> here/speaking" (name-first introduction)
     (re.compile(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+(?=\s+(?:here|speaking)\b)"),
      "[REDACTED_NAME]", "name"),
-    #  (d) a sign-off "- First Last" at the end of a line
-    (re.compile(r"(?m)([-–—])\s*[A-Z][a-z]+\s+[A-Z][a-z]+\s*$"),
+    #  (d) a sign-off "- First Last" at line end — but NOT a common closing ("- Best Regards",
+    #  "- Many Thanks", "- Kind Regards", "- Take Care"), which are not names.
+    (re.compile(r"(?m)([-–—])\s*(?!(?:Best|Kind|Many|Warm|Warmest|Thank|Thanks|Regards|Sincerely|"
+                r"Cheers|Yours|Take|Talk|Much|All|Good|Have|Speak)\b)"
+                r"[A-Z][a-z]+\s+[A-Z][a-z]+\s*$"),
      r"\1 [REDACTED_NAME]", "name"),
 ]
 _SENSITIVE_TERMS = re.compile(

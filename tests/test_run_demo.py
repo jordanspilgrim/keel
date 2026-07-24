@@ -152,15 +152,18 @@ def test_run_median_reports_median_not_max_and_keeps_low_draws(monkeypatch, tmp_
 
     def fake_run_once(conn, run_id=None):
         v = next(seq)
-        return {"run_id": f"run-{v}", "treated_cohort_n": 60,
-                "baseline": {"segment_save_rate": 0.27, "overall_save_rate": 0.26},
-                "after": {"segment_save_rate": round(0.27 + v / 100, 4), "overall_save_rate": 0.29,
-                          "eval_pass_rate": 0.85},
-                "lift": {"segment_save_pp": v, "segment_madj_pp": round(v * 0.8, 1), "overall_save_pp": 2.0},
-                "fairness_gap": 0.02}
+        man = {"run_id": f"run-{v}", "treated_cohort_n": 60,
+               "baseline": {"segment_save_rate": 0.27, "overall_save_rate": 0.26},
+               "after": {"segment_save_rate": round(0.27 + v / 100, 4), "overall_save_rate": 0.29,
+                         "eval_pass_rate": 0.85},
+               "lift": {"segment_save_pp": v, "segment_madj_pp": round(v * 0.8, 1), "overall_save_pp": 2.0},
+               "fairness_gap": 0.02}
+        return {"manifest": man, "data": {"provenance": {"run_id": man["run_id"]}}}
 
+    exported = {}  # capture what the dashboard is re-rendered from
     _real_connect = db.connect
     monkeypatch.setattr(run_demo, "run_once", fake_run_once)
+    monkeypatch.setattr(run_demo.export, "write_data", lambda data, **k: exported.update(data))
     monkeypatch.setattr(run_demo.db, "connect", lambda *a, **k: _real_connect(str(tmp_path / "m.db")))
     assert run_demo.run_median(k=5) == 0
 
@@ -171,6 +174,8 @@ def test_run_median_reports_median_not_max_and_keeps_low_draws(monkeypatch, tmp_
     assert agg["committed_run_id"] == "run-7.0" and agg["k"] == 5
     man = json.loads((tmp_path / "dashboard" / "manifest.json").read_text())
     assert man["lift"]["segment_save_pp"] == 7.0                         # committed manifest IS the median run
+    # the dashboard is re-rendered from the COMMITTED (median) run — not whatever ran last
+    assert exported["provenance"]["run_id"] == "run-7.0"
 
 
 def test_run_median_aborts_if_any_run_bails(monkeypatch, tmp_path):
@@ -183,11 +188,14 @@ def test_run_median_aborts_if_any_run_bails(monkeypatch, tmp_path):
 
     def fake_run_once(conn, run_id=None):
         calls["n"] += 1
-        return None if calls["n"] == 3 else {"run_id": "r", "treated_cohort_n": 60,
-                "baseline": {"segment_save_rate": 0.27, "overall_save_rate": 0.26},
-                "after": {"segment_save_rate": 0.30, "overall_save_rate": 0.29, "eval_pass_rate": 0.85},
-                "lift": {"segment_save_pp": 3.0, "segment_madj_pp": 2.0, "overall_save_pp": 2.0},
-                "fairness_gap": 0.02}
+        if calls["n"] == 3:
+            return None
+        man = {"run_id": "r", "treated_cohort_n": 60,
+               "baseline": {"segment_save_rate": 0.27, "overall_save_rate": 0.26},
+               "after": {"segment_save_rate": 0.30, "overall_save_rate": 0.29, "eval_pass_rate": 0.85},
+               "lift": {"segment_save_pp": 3.0, "segment_madj_pp": 2.0, "overall_save_pp": 2.0},
+               "fairness_gap": 0.02}
+        return {"manifest": man, "data": {"provenance": {"run_id": "r"}}}
 
     _real_connect = db.connect
     monkeypatch.setattr(run_demo, "run_once", fake_run_once)

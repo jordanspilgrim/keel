@@ -34,7 +34,11 @@ def test_docs_state_the_actual_test_count():
     actual = _actual_test_count()
     for rel in ("README.md", "docs/testing.html"):
         text = _read(rel)
-        claims = {int(m) for m in re.findall(r"(\d+)\s+(?:offline |fast )?(?:tests|passed)\b", text)}
+        # a number then an OPTIONAL comma-separated adjective list then tests/passed, so
+        # "152 fast, deterministic tests" is caught as well as "152 tests" / "152 passed" —
+        # but NOT a stray "0 and the unit tests" (connectives aren't a comma-list).
+        claims = {int(m) for m in re.findall(
+            r"(\d+)\s+(?:[A-Za-z]+(?:,\s+[A-Za-z]+)*\s+)?(?:tests|passed)\b", text)}
         assert claims, f"{rel} states no test count"
         assert claims == {actual}, f"{rel} claims {claims}, actual is {actual}"
 
@@ -81,6 +85,18 @@ def test_readme_cites_the_pre_registered_median_and_range():
     # the concrete committed median run's before/after is also cited
     sb, sa = round(man["baseline"]["segment_save_rate"] * 100), round(man["after"]["segment_save_rate"] * 100)
     assert f"{sb}%" in readme and f"{sa}%" in readme, f"README must cite the median run's {sb}% -> {sa}%"
+
+
+def test_dashboard_data_renders_the_committed_median_run():
+    """R10-F1: the dashboard (window.KEEL_DATA / data.json) is the flagship visible surface —
+    it must render the SAME committed (median) run as the manifest, not whatever ran LAST in
+    the k-loop. run_median re-exports data.js from the committed run to guarantee this."""
+    man = json.loads(_read("dashboard/manifest.json"))
+    data = json.loads(_read("dashboard/data.json"))
+    assert data["meta"]["provenance"]["run_id"] == man["run_id"], \
+        "dashboard renders a different run than the committed manifest — the primary surface overstates the headline"
+    assert round(data["kpis"]["save_delta_pp"], 1) == man["lift"]["segment_save_pp"], \
+        "dashboard headline lift != committed manifest lift"
 
 
 def test_html_demo_docs_cite_the_pre_registered_median():
