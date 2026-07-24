@@ -117,7 +117,7 @@ def test_authorized_terms_survive_persistence_and_reload(conn):
                               "result": {"plan": "Pro", "price": 99.0}})
     rec["policy_decisions"].append({"tool": "offer_discount", "action": "ok",
                                     "args": {"pct": 10}, "reason": "within policy"})
-    record = {"customer_id": 1, "scenario_id": None, "transcript": [{"role": "assistant", "content": "hi"}],
+    record = {"customer_id": 1, "scenario_id": None, "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "assistant", "content": "hi"}],
               "disposition": {"outcome": "saved", "offer_made": "10% discount"}, "outcome": "saved",
               "offer_made": runtime._offer_made(rec), "evidence": runtime._evidence(rec),
               "guardrail_events": [], "audit": []}
@@ -198,7 +198,7 @@ def test_judge_prompt_includes_policy_decisions(monkeypatch):
     monkeypatch.setattr(judge.llm, "structured",
                         lambda model, instr, user, schema, name, **k: captured.setdefault("user", user)
                         or {"scores": {d: 4 for d in judge.RUBRIC}, "rationale": "x", "fairness_flag": False})
-    convo = {"transcript": [{"role": "assistant", "content": "hi"}], "disposition": {"outcome": "saved"},
+    convo = {"transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "assistant", "content": "hi"}], "disposition": {"outcome": "saved"},
              "offers": [], "tool_facts": [],
              "policy_decisions": [{"tool": "extend_offer", "action": "adjust",
                                    "args": {"pct": 20}, "reason": "capped to ceiling"}]}
@@ -230,7 +230,7 @@ def test_run_phase_scoped_metrics(conn):
     from dashboard import export
 
     def _persist(outcome, phase, offer):
-        rec = {"customer_id": 1, "scenario_id": None, "transcript": [{"role": "assistant", "content": "hi"}],
+        rec = {"customer_id": 1, "scenario_id": None, "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "assistant", "content": "hi"}],
                "disposition": {"outcome": outcome, "offer_made": offer}, "outcome": outcome,
                "offer_made": offer, "evidence": {}, "guardrail_events": [], "audit": [],
                "run_id": "run-X", "phase": phase}
@@ -267,7 +267,7 @@ def test_batch_rejects_in_memory_connection():
 # --- persistence defensively redacts EVERY role (terminal sim reply included) -
 def test_persistence_redacts_all_roles(conn):
     record = {"customer_id": 1, "scenario_id": None,
-              "transcript": [{"role": "user", "content": "my card is 4111 1111 1111 1111"},
+              "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "user", "content": "my card is 4111 1111 1111 1111"},
                              {"role": "assistant", "content": "noted"}],
               "disposition": {"outcome": "lost", "offer_made": None}, "outcome": "lost",
               "offer_made": None, "evidence": {}, "guardrail_events": [], "audit": []}
@@ -290,7 +290,7 @@ def test_persisted_evidence_is_deidentified(conn):
         {"tool": "offer_discount", "action": "ok", "args": {"pct": 20}, "reason": "Within policy."},
         {"tool": "deny_refund", "action": "needs_human",
          "args": {"reason": "Refund for account holder Robert Johnson, email bob@x.com"}, "reason": "needs human"}]
-    record = {"customer_id": 1, "scenario_id": None, "transcript": [{"role": "user", "content": "hi"}],
+    record = {"customer_id": 1, "scenario_id": None, "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "user", "content": "hi"}],
               "disposition": {"outcome": "lost", "offer_made": None, "churn_reason": "It's Maria Garcia, too pricey"},
               "outcome": "lost", "offer_made": None, "evidence": runtime._evidence(rec),
               "guardrail_events": [], "audit": []}

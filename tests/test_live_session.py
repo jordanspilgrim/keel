@@ -26,6 +26,11 @@ def conn(tmp_path):
     c.close()
 
 
+# The autouse fixture stubs runtime._grade_and_store; keep a handle on the REAL one so the
+# lock-behavior test can exercise the actual implementation.
+_REAL_GRADE_AND_STORE = runtime._grade_and_store
+
+
 def _stub_grade(conn, conv_id, record, customer_id):
     """Deterministic offline stand-in for the judge call resolve makes."""
     conn.execute("INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, created_at) "
@@ -181,13 +186,65 @@ def test_customer_decision_is_terminal_and_cannot_be_overwritten(conn, monkeypat
     assert rec["outcome"] == "saved"                          # persisted as the earned save
 
 
+def test_save_self_finalizes_with_its_fulfillment_obligation(conn, monkeypatch):
+    """The SAVE terminal is symmetric with escalation/cancellation: accepting self-finalizes
+    at turn time, so a browser close or TTL eviction can't lose the conversation, its grade,
+    or the offer_fulfillment_requests row backing 'our team will apply it'. No /resolve."""
+    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(offer="1-month pause"))
+    s = runtime.new_session(1, conn)
+    s["_session_id"] = "sess-SAVE"
+    runtime.live_turn(s, "too expensive", conn)
+    runtime.live_turn(s, "yes I accept", conn, decision="accept")
+    del s                                                    # simulate the tab closing
+    conv = conn.execute("SELECT id, outcome FROM conversations WHERE resolution_key=?",
+                        ("sess-SAVE",)).fetchone()
+    assert conv is not None and conv["outcome"] == "saved"   # persisted with no /resolve
+    assert conn.execute("SELECT count(*) FROM evals WHERE conversation_id=?",
+                        (conv["id"],)).fetchone()[0] == 1     # graded
+    ful = conn.execute("SELECT offer, status FROM offer_fulfillment_requests WHERE conversation_id=?",
+                       (conv["id"],)).fetchone()
+    assert ful["offer"] == "1-month pause" and ful["status"] == "pending_application"
+
+
+def test_grade_and_store_does_not_hold_a_write_lock_across_the_judge_call(conn, monkeypatch):
+    """The judge is a multi-second network call; running it INSIDE an open write transaction
+    held a RESERVED lock and made any concurrent write fail with 'database is locked' (the
+    caller swallows that, silently losing a grade). Assert the DB is untouched while the
+    judge runs — i.e. all slow work happens before the write."""
+    from evals import judge as judge_mod
+    conn.execute("INSERT INTO conversations (customer_id, transcript_json, outcome, created_at) "
+                 "VALUES (1,'[]','saved','t')")
+    conn.commit()
+    cid = conn.execute("SELECT id FROM conversations ORDER BY id DESC LIMIT 1").fetchone()["id"]
+    other = db.connect(conn.execute("PRAGMA database_list").fetchone()["file"])
+    seen = {}
+
+    def slow_judge(convo):
+        # mid-judge: a SECOND connection must still be able to write (no lock held)
+        try:
+            other.execute("INSERT INTO guardrail_events (type, action, detail, created_at) "
+                          "VALUES ('probe','ok','mid-judge','t')")
+            other.commit()
+            seen["concurrent_write"] = True
+        except Exception as e:
+            seen["concurrent_write"] = f"BLOCKED: {e}"
+        return {"scores": {d: 5 for d in judge_mod.RUBRIC}, "rationale": "r", "fairness_flag": False}
+
+    monkeypatch.setattr(judge_mod, "judge_conversation", slow_judge)
+    monkeypatch.setattr("evals.run_evals.build_judge_input", lambda c, i: {"id": i})
+    _REAL_GRADE_AND_STORE(conn, cid, {}, 1)   # the real implementation, not the fixture stub
+    other.close()
+    assert seen["concurrent_write"] is True, seen  # no write lock held across the judge call
+    assert conn.execute("SELECT count(*) FROM evals WHERE conversation_id=?", (cid,)).fetchone()[0] == 1
+
+
 def test_persist_refuses_lost_with_an_accepted_offer(conn):
     """Mirror invariant: a customer-ACCEPTED offer is an earned save, so a 'lost' record that
     carries one is contradictory — refuse it loudly rather than deflate the save rate."""
     with pytest.raises(ValueError):
         runtime.persist_conversation(conn, {
             "customer_id": 1, "scenario_id": None,
-            "transcript": [{"role": "user", "content": "x"}],
+            "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "user", "content": "x"}],
             "disposition": {"outcome": "lost"}, "outcome": "lost", "offer_made": "1-month pause",
             "evidence": {}, "guardrail_events": [], "audit": [], "offer_accepted_on_ledger": True})
 
@@ -421,8 +478,9 @@ def test_resolve_is_durably_idempotent_across_sessions(conn, monkeypatch):
                         lambda *a: {"intent": "cancel", "churn_reason": "x", "offer_made": "1-month pause",
                                     "offer_accepted": True, "outcome": "saved", "confidence": 0.8})
     s = runtime.new_session(1, conn)
+    s["_session_id"] = "sess-XYZ"                                # the durable key the turn uses
     runtime.live_turn(s, "Too expensive.", conn)
-    runtime.live_turn(s, "yes", conn, decision="accept")         # earn the save
+    runtime.live_turn(s, "yes", conn, decision="accept")         # earn the save (self-finalizes)
     r1 = runtime.resolve_session(s, conn, resolution_key="sess-XYZ")
 
     # a brand-new session object (no in-memory 'resolved') retries with the SAME key — the
@@ -453,7 +511,10 @@ def test_resolve_rolls_back_on_persist_failure(conn, monkeypatch):
     monkeypatch.setattr(runtime, "persist_conversation", flaky)
     s = runtime.new_session(1, conn)
     runtime.live_turn(s, "Too expensive.", conn)
-    runtime.live_turn(s, "yes", conn, decision="accept")   # earn the save in the ledger
+    # Earn the save on the ledger WITHOUT the self-finalizing turn path, so this test
+    # exercises resolve_session's own rollback rather than the turn's best-effort finalize.
+    runtime._apply_customer_decision(s["rec"], "accept")
+    s["outcome"] = "saved"
     with pytest.raises(RuntimeError):
         runtime.resolve_session(s, conn)
     # the accepted offer is intact and the session is not resolved, so a retry works

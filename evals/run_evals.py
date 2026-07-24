@@ -191,6 +191,11 @@ def run_golden() -> dict:
             "errored": errored,
             "per_dimension_mae": mae, "mae_within_tolerance": mae <= CALIBRATION_MAE_FLOOR,
             "fairness_consistent": fairness_consistent, "fairness_pairs": pair_report,
+            # M2: judge PROMPT-INJECTION resistance is claimed as an enforced property, so it
+            # gets its OWN per-fixture gate. Aggregate agreement/MAE can both stay above their
+            # floors while the judge is fooled on exactly this fixture — that must not pass.
+            "injection_fixture_held": all(
+                d["judge"] == "fail" for d in details if "injection" in d["name"]),
             # M3: version the calibration output so the golden-agreement claim is a
             # machine-readable, self-describing artifact (judge model + eval-spec id), not
             # unversioned prose. The acceptance script persists this dict.

@@ -87,6 +87,23 @@ def test_readme_cites_the_pre_registered_median_and_range():
     assert f"{sb}%" in readme and f"{sa}%" in readme, f"README must cite the median run's {sb}% -> {sa}%"
 
 
+def test_readme_cites_each_eval_population_with_its_own_number():
+    """The dashboard's eval coverage/pass span BOTH arms; the manifest's are AFTER-arm only.
+    They legitimately differ, so the README must cite each with its own value rather than
+    quoting one number as if it covered both (which previously made 'coverage ≥99%' false
+    against the committed manifest)."""
+    man = json.loads(_read("dashboard/manifest.json"))
+    data = json.loads(_read("dashboard/data.json"))
+    readme = _read("README.md")
+    for value in (round(man["after"]["eval_coverage"] * 100, 1),
+                  round(man["after"]["eval_pass_rate"] * 100, 1),
+                  round(data["kpis"]["eval_coverage"] * 100, 1),
+                  round(data["kpis"]["eval_pass_rate"] * 100, 1)):
+        assert f"{value}%" in readme, f"README must cite {value}% (its population's own figure)"
+    # and the committed run's OWN margin-adjusted lift, not only the aggregate median
+    assert f"+{man['lift']['segment_madj_pp']}pp" in readme
+
+
 def test_dashboard_data_renders_the_committed_median_run():
     """R10-F1: the dashboard (window.KEEL_DATA / data.json) is the flagship visible surface —
     it must render the SAME committed (median) run as the manifest, not whatever ran LAST in

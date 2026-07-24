@@ -92,7 +92,7 @@ def test_economics_rejects_out_of_range_inputs():
 def _persist(conn, outcome, offer, phase="baseline", run="run-A"):
     from agent import runtime
     runtime.persist_conversation(conn, {
-        "customer_id": 1, "scenario_id": None, "transcript": [{"role": "assistant", "content": "hi"}],
+        "customer_id": 1, "scenario_id": None, "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "assistant", "content": "hi"}],
         "disposition": {"outcome": outcome, "offer_made": offer}, "outcome": outcome,
         "offer_made": offer, "evidence": {}, "guardrail_events": [], "audit": [],
         "run_id": run, "phase": phase})

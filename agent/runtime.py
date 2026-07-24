@@ -103,6 +103,17 @@ def _tool_result_strings(rec: dict) -> list[str]:
     return [json.dumps(f["result"]) for f in rec["tool_facts"]]
 
 
+def _authorized_ceiling(rec: dict) -> dict:
+    """The HIGHEST terms policy authorized this conversation, per kind — what a
+    customer-visible commitment is reconciled against by the supplemental promise check."""
+    disc = [o.authorized_terms.get("pct") for o in rec["offers"]
+            if o.kind == "discount" and o.authorized_terms.get("pct") is not None]
+    pause = [o.authorized_terms.get("months") for o in rec["offers"]
+             if o.kind == "pause" and o.authorized_terms.get("months") is not None]
+    return {"discount_pct": max(disc) if disc else None,
+            "pause_months": max(pause) if pause else None}
+
+
 def _offer_made(rec: dict) -> str | None:
     """The canonical single-offer string, derived from the ledger (accepted first,
     else presented). Replaces the old last-write `offer_made`."""
@@ -210,7 +221,10 @@ def _screen_input(text: str, rec: dict, *, classify_scope: bool = True, on_step=
         _emit(on_step, "guardrail", "Jailbreak / injection blocked — not forwarded to the model", gtype="jailbreak")
         return {"action": "block", "shown": shown, "reply": _JAILBREAK_REPLY}
     if s["off_scope"]:
-        rec["guardrail"].append(("off_scope", "bounded", s["scope_reason"]))
+        # The scope reason is MODEL-derived text about the customer's message and lands in a
+        # durable store (guardrail_events.detail, served by the API) — redact it like every
+        # other model-derived durable write (transcript, disposition, escalation reason).
+        rec["guardrail"].append(("off_scope", "bounded", guardrails.redact_pii(s["scope_reason"])[0]))
         _emit(on_step, "guardrail", "Off-topic — bounded, not free-formed", gtype="off_scope")
         # `shown` goes in the human-visible transcript for fidelity, but the model
         # context gets only a neutral marker — off-scope (possibly adversarial)
@@ -707,6 +721,19 @@ def _screen_contract(input_list: list, system: str, rec: dict, corrective: str) 
     if tone.get("degraded"):
         rec["guardrail"].append(("tone", "degraded", "moderation unavailable — output not delivered"))
         return False, "moderation unavailable — cannot verify output tone", contract, ""
+    # SUPPLEMENTAL cross-check on the SERVER-RENDERED text (the contract validator remains
+    # the primary boundary). These were documented as a supplemental check but had no caller
+    # in the live path, so their ~15 unit tests were manufacturing green coverage for wiring
+    # that did not exist. Now they actually run: a rendered reply that overstates the
+    # authorized terms or states money with no tool data FAILS CLOSED, exactly like tone.
+    promise = guardrails.check_promise(rendered, authorized=_authorized_ceiling(rec))
+    if promise["flagged"]:
+        rec["guardrail"].append(("promise", "blocked", promise["reason"]))
+        return False, f"output cross-check: {promise['reason']}", contract, ""
+    grounding = guardrails.check_grounding(rendered, _tool_result_strings(rec))
+    if grounding["flagged"]:
+        rec["guardrail"].append(("grounding", "blocked", grounding["reason"]))
+        return False, f"output cross-check: {grounding['reason']}", contract, ""
     return True, "", contract, rendered
 
 
@@ -967,6 +994,12 @@ def persist_conversation(conn, record: dict) -> int:
     # Refuse it loudly rather than silently deflate the save rate with a corrupted record.
     if record.get("outcome") == "lost" and record.get("offer_accepted_on_ledger"):
         raise ValueError("invariant violation: a conversation cannot be 'lost' with an accepted offer on the ledger")
+    # AI-Act Art. 50 disclosure is an ENFORCED gate, not merely prepended by construction:
+    # a transcript whose first assistant turn is not the disclosure never reaches the store.
+    # (Previously has_disclosure() had no caller in the request path, so a new channel adapter
+    # that forgot to prepend would have shipped a silently non-disclosing agent.)
+    if record.get("transcript") and not disclosure.has_disclosure(record["transcript"]):
+        raise ValueError("compliance violation: transcript is missing the mandatory AI disclosure turn")
     # De-identify before storage/embedding: redact EVERY role defensively (data
     # minimization). User turns are normally redacted at input, but the terminal
     # simulator reply and any assistant turn that echoes account PII must also be
@@ -1156,12 +1189,14 @@ def _finalize_if_terminal(session: dict, conn) -> None:
     for a manual /resolve that a browser close or TTL eviction may never send. Escalations
     and routed cancellations were previously only QUEUED, so the conversation, transcript,
     audit trail, and grade never existed unless someone clicked End; those are exactly the
-    cases a safety/quality team most needs to inspect. Scoped to escalation/cancellation — a
-    customer accept/reject stays a MANUAL /resolve (the operator confirms the recorded
-    decision). Best-effort: a failure here never breaks the turn (the durable queue row +
+    cases a safety/quality team most needs to inspect. EVERY terminal self-finalizes — a
+    customer accept/reject included: the save is the flagship outcome, and leaving it to a
+    manual /resolve meant a browser close or TTL eviction silently lost the conversation, its
+    grade, AND the offer_fulfillment_requests row backing the "our team will apply it"
+    promise. Best-effort: a failure here never breaks the turn (the durable queue row +
     grade_all reconcile), but on the happy path the record and its eval exist immediately."""
     rec = session["rec"]
-    terminal = (session.get("outcome") in ("escalated", "cancelled")
+    terminal = (session.get("outcome") in ("escalated", "cancelled", "saved", "lost")
                 or rec.get("escalated") or rec.get("cancellation_routed"))
     if not terminal or session.get("resolved"):
         return
@@ -1246,7 +1281,10 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
             reply = _SAVED_REPLY if outcome == "saved" else _DECLINED_REPLY
             session["transcript"].append({"role": "assistant", "content": reply})
             _emit(on_step, "decision", f"customer {d}ed the {presented.kind} offer → {outcome}")
-            return _turn_result(session, reply, [])  # save/lost is finalized by a manual /resolve (H2)
+            # A customer decision is terminal — finalize it NOW (persist + grade + queue the
+            # fulfillment obligation) rather than waiting for a /resolve a closed tab never sends.
+            _finalize_if_terminal(session, conn)
+            return _turn_result(session, reply, [])
     before = len(rec["guardrail"])
     reply = _advance(user_text, session["transcript"], session["input_list"],
                      session["customer_id"], session["sub"], conn, rec, on_step=on_step)
@@ -1367,22 +1405,27 @@ def _grade_and_store(conn, conv_id: int, record: dict, customer_id: int) -> None
     coverage-miss eval (verdict 'error') rather than silently leaving it ungraded."""
     from evals import judge, run_evals  # local import avoids any load-order cycle
     ver = judge.EVAL_SPEC_VERSION  # SAME content-hashed spec id the batch path stamps
-    # idempotent: a retry replaces this conversation's row for the current spec
-    conn.execute("DELETE FROM evals WHERE conversation_id=? AND rubric_version=?", (conv_id, ver))
+    # Do ALL the slow work (envelope build + the judge LLM call) BEFORE touching the write
+    # path. Writing first would open a transaction (RESERVED lock) and hold it across a
+    # multi-second network call, so any concurrent write hits `database is locked` — and the
+    # caller swallows that, silently losing a grade. This mirrors the batch runner, which
+    # likewise judges everything first and then writes in one fast transaction.
+    row, err = None, None
     try:
         # build_judge_input is INSIDE the grading boundary: an envelope/format failure
         # records a coverage-miss 'error' row like any judge failure, rather than raising
         # out of resolve_session after the conversation is already durably committed.
         convo = run_evals.build_judge_input(conn, conv_id)
         v = judge.judge_conversation(convo)
-        verdict = judge.derive_verdict(v["scores"])
-        conn.execute(
-            "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, rubric_version, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (conv_id, db.dumps(v["scores"]), verdict, v["rationale"], int(v["fairness_flag"]), ver, _now()))
+        row = (conv_id, db.dumps(v["scores"]), judge.derive_verdict(v["scores"]),
+               v["rationale"], int(v["fairness_flag"]), ver, _now())
     except Exception as e:
-        conn.execute(
-            "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, rubric_version, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (conv_id, db.dumps({}), "error", f"grading failed: {type(e).__name__}", 0, ver, _now()))
+        err = f"grading failed: {type(e).__name__}"
+    if row is None:
+        row = (conv_id, db.dumps({}), "error", err or "grading failed", 0, ver, _now())
+    # One short write transaction: idempotent replace of this conversation's current-spec row.
+    conn.execute("DELETE FROM evals WHERE conversation_id=? AND rubric_version=?", (conv_id, ver))
+    conn.execute(
+        "INSERT INTO evals (conversation_id, scores_json, verdict, rationale, fairness_flag, rubric_version, created_at) "
+        "VALUES (?,?,?,?,?,?,?)", row)
     conn.commit()

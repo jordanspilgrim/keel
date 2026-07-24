@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+import config
 import db
 import synth
 import run_demo
@@ -61,7 +62,7 @@ def test_persist_refuses_saved_plus_cancelled(conn):
     from agent import runtime
     with pytest.raises(ValueError):
         runtime.persist_conversation(conn, {
-            "customer_id": 1, "scenario_id": None, "transcript": [{"role": "user", "content": "x"}],
+            "customer_id": 1, "scenario_id": None, "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "user", "content": "x"}],
             "disposition": {"outcome": "saved"}, "outcome": "saved", "offer_made": "20% discount",
             "evidence": {}, "guardrail_events": [], "audit": [], "cancellation_routed": True})
 
@@ -111,7 +112,7 @@ def test_save_queues_a_durable_fulfillment_record(conn):
     from agent import runtime
     runtime.persist_conversation(conn, {
         "customer_id": 1, "scenario_id": None,
-        "transcript": [{"role": "user", "content": "too expensive"}, {"role": "assistant", "content": "ok"}],
+        "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "user", "content": "too expensive"}, {"role": "assistant", "content": "ok"}],
         "disposition": {"outcome": "saved", "offer_made": "3-month pause"},
         "outcome": "saved", "offer_made": "3-month pause", "evidence": {},
         "guardrail_events": [], "audit": []})
@@ -119,7 +120,7 @@ def test_save_queues_a_durable_fulfillment_record(conn):
     assert row is not None and row["offer"] == "3-month pause" and row["status"] == "pending_application"
     runtime.persist_conversation(conn, {
         "customer_id": 1, "scenario_id": None,
-        "transcript": [{"role": "user", "content": "bye"}], "disposition": {"outcome": "lost"},
+        "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "user", "content": "bye"}], "disposition": {"outcome": "lost"},
         "outcome": "lost", "offer_made": None, "evidence": {}, "guardrail_events": [], "audit": []})
     assert conn.execute("SELECT count(*) FROM offer_fulfillment_requests").fetchone()[0] == 1  # only the save
 
@@ -143,7 +144,7 @@ def _persist_saved(conn, scenario_id, run="run-M5", phase="baseline"):
     from agent import runtime
     runtime.persist_conversation(conn, {
         "customer_id": 1, "scenario_id": scenario_id,
-        "transcript": [{"role": "user", "content": "too expensive"}, {"role": "assistant", "content": "hi"}],
+        "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "user", "content": "too expensive"}, {"role": "assistant", "content": "hi"}],
         "disposition": {"outcome": "saved", "offer_made": "20% discount", "churn_reason": "Price too high"},
         "outcome": "saved", "offer_made": "20% discount", "evidence": {},
         "guardrail_events": [], "audit": [], "run_id": run, "phase": phase})
@@ -324,7 +325,7 @@ def test_recommend_intervention_gates_learn_on_eval_eligibility(conn):
     def _mk():  # a baseline 'Price too high' conversation (scenario 1 = customer 1), all lost
         runtime.persist_conversation(conn, {
             "customer_id": 1, "scenario_id": 1,
-            "transcript": [{"role": "user", "content": "too expensive"}, {"role": "assistant", "content": "hi"}],
+            "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "user", "content": "too expensive"}, {"role": "assistant", "content": "hi"}],
             "disposition": {"outcome": "lost", "offer_made": None, "churn_reason": "Price too high"},
             "outcome": "lost", "offer_made": None, "evidence": {},
             "guardrail_events": [], "audit": [], "run_id": "R", "phase": "baseline"})

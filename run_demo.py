@@ -5,8 +5,11 @@ The money demo. Runs the loop once, end to end, and shows it turning:
   generate  → seeded synthetic customers + scenarios
   BASELINE  → a conservative launch policy (discounts disabled); the agent can
               only offer pauses. Measure the save rate.
-  learn     → grade + cluster; the analytics signal: the price-sensitive theme
-              is under-saved because discounts are off.
+  learn     → grade the baseline FIRST, then rank churn segments by loss impact over
+              the EVAL-ELIGIBLE conversations. NOTE: the ranking groups on the scenario's
+              seeded `churn_reason` label — the embedding/KMeans clustering runs alongside
+              and feeds the VoC theme cards + dashboard, but does NOT drive this selection.
+              The signal: the price-sensitive segment is under-saved because discounts are off.
   ACT       → apply the recommended policy change: enable discounts and direct
               the agent to lead with a discount for price-sensitive customers.
   re-measure→ run the SAME customers again under the new policy.
@@ -257,7 +260,7 @@ def run_once(conn, run_id: str | None = None) -> dict | None:
         "SELECT count(*) FROM guardrail_events WHERE type='over_limit'").fetchone()[0]
 
     # Headline = the TREATED segment (where the discount act applies). Overall is
-    # reported as context — it mixes in ~10 untreated customers and is noisier.
+    # reported as context — it mixes in the 20 untreated customers and is noisier.
     seg_lift = (after_seg["save_rate"] - before_seg["save_rate"]) * 100
     seg_madj = (after_seg["madj_save_rate"] - before_seg["madj_save_rate"]) * 100
     overall_lift = (after["save_rate"] - before["save_rate"]) * 100
@@ -281,7 +284,11 @@ def run_once(conn, run_id: str | None = None) -> dict | None:
         # so every doc that cites "treated cohort n=…" is backed by this artifact (M6).
         "treated_cohort_n": before_seg["n"],
         "treated_segment": target,
-        "segment_selection": "data-driven (structured intervention signal consumed by Act)",
+        # Honest mechanism label: the ranking groups on the scenario's SEEDED churn_reason
+        # label (not the embedding/KMeans clusters, which feed the VoC cards + dashboard only).
+        "segment_selection": ("loss-ranked over the seeded churn_reason label, gated on "
+                              "current-spec eval-eligible baseline conversations; consumed by "
+                              "Act via the persisted signal id (clustering does NOT drive it)"),
         "intervention_signal_id": signal_id,
         "intervention_signal": signal,
         "guardrail_version": config.GUARDRAIL_VERSION,
@@ -314,11 +321,13 @@ def run_once(conn, run_id: str | None = None) -> dict | None:
     }
     with open("dashboard/manifest.json", "w") as f:
         json.dump(manifest, f, indent=2)
-    # Retain a DATED copy of every run's manifest, so any range/consistency claim
-    # in the docs is backed by a persisted artifact (not just prose).
+    # Retain a copy of every run's manifest, so any range/consistency claim in the docs is
+    # backed by a persisted artifact (not just prose). Name it by RUN_ID, not by finish time:
+    # stamping the filename with generated_at meant sequential runs' names were offset by one
+    # run, so the file named after the committed run actually held a DIFFERENT run's numbers —
+    # a verifier indexing by filename would read the wrong result.
     os.makedirs("dashboard/manifests", exist_ok=True)
-    stamp = manifest["generated_at"].replace(":", "").replace("-", "").split(".")[0]
-    with open(f"dashboard/manifests/manifest-{stamp}.json", "w") as f:
+    with open(f"dashboard/manifests/manifest-{manifest['run_id']}.json", "w") as f:
         json.dump(manifest, f, indent=2)
 
     print("⑥ EXPORT — writing dashboard/data.js + dashboard/manifest.json")

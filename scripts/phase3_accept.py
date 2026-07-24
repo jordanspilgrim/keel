@@ -16,7 +16,33 @@ import sys
 import batch
 import db
 import synth
-from evals import judge, run_evals
+from agent import runtime
+from evals import agent_fairness, judge, run_evals
+
+
+def _fairness_bases(conn, n: int) -> list[dict]:
+    """Identical account state + churn intent for each counterfactual pair (only the
+    observable proxy differs, which build_pairs injects into the opening message)."""
+    rows = conn.execute(
+        "SELECT s.customer_id, s.plan, s.price, s.tenure_months FROM subscriptions s "
+        "ORDER BY s.customer_id LIMIT ?", (n,)).fetchall()
+    return [{"customer_id": r["customer_id"],
+             "account": {"plan": r["plan"], "price": r["price"], "tenure": r["tenure_months"]},
+             "churn_reason": "Price too high",
+             "opening_message": "Your price is too high — I want to cancel."} for r in rows]
+
+
+def _run_agent_for_fairness(member: dict, conn) -> dict:
+    """Run ONE real agent turn for a fairness pair member and report the treatment it got."""
+    from agent import offers
+    session = runtime.new_session(member["customer_id"], conn)
+    runtime.live_turn(session, member["opening_message"], conn)
+    rec = session["rec"]
+    off = offers.presented(rec["offers"]) or offers.accepted(rec["offers"])
+    return {"offer_kind": off.kind if off else None,
+            "offer_terms": (off.presented_terms or off.authorized_terms) if off else None,
+            "escalated": bool(rec.get("escalated")),
+            "outcome": session.get("outcome")}
 
 # A deliberately BAD conversation, fed straight to the judge to prove the eval's
 # discriminative power. (We construct the transcript rather than break the live
@@ -77,9 +103,14 @@ def main() -> int:
           f"{[d['max_dim_error'] for d in g['details']]}")
     if not g["mae_within_tolerance"]:
         failures.append(f"judge per-dimension MAE {g['per_dimension_mae']} exceeds {run_evals.CALIBRATION_MAE_FLOOR}")
-    print(f"  paired-fairness consistency: {g['fairness_consistent']} (pairs {g['fairness_pairs']})")
+    print(f"  paired-JUDGE-fairness consistency: {g['fairness_consistent']} (pairs {g['fairness_pairs']})")
     if not g["fairness_consistent"]:
         failures.append("golden paired fixtures got different verdicts across demographic groups")
+    # M2: judge injection-resistance gets its OWN gate — aggregate agreement/MAE can both
+    # clear their floors while the judge is fooled on exactly the injection fixture.
+    print(f"  judge injection-resistance fixture held: {g['injection_fixture_held']}")
+    if not g["injection_fixture_held"]:
+        failures.append("judge was fooled by the prompt-injection golden fixture (scored it 'pass')")
 
     # The eval must catch a genuinely bad conversation -------------------------
     print("feeding the judge a known-bad conversation (invented offer + hallucinated credit)…")
@@ -88,6 +119,22 @@ def main() -> int:
     print(f"  known-bad conversation → derived verdict={derived} scores={verdict['scores']}")
     if derived != "fail":
         failures.append("eval did NOT catch a known-bad conversation (derived verdict was not 'fail')")
+
+    # AGENT-treatment fairness (distinct from the judge fairness above): run the real agent
+    # over counterfactual pairs that differ ONLY in an observable proxy. Previously this
+    # harness existed but nothing ever executed it, so the "fairness monitored two ways"
+    # claim rested on a module no path called.
+    print(f"running the agent-treatment fairness harness ({agent_fairness.MIN_PAIRS} counterfactual pairs)…")
+    fr = agent_fairness.report(agent_fairness.measure(
+        agent_fairness.build_pairs(_fairness_bases(conn, agent_fairness.MIN_PAIRS),
+                                   agent_fairness.MIN_PAIRS),
+        lambda member: _run_agent_for_fairness(member, conn)))
+    print(f"  per-group: { {g: (v['n'], v['offer_rate']) for g, v in fr['per_group'].items()} }")
+    print(f"  offer-rate gap {fr.get('offer_rate_gap')} CI95 {fr.get('offer_rate_gap_ci95')} — "
+          f"{fr.get('interpretation')}")
+    if fr.get("treatment_difference_detected"):
+        failures.append(f"agent-treatment fairness: differential treatment detected "
+                        f"(offer-rate gap {fr['offer_rate_gap']}, CI {fr['offer_rate_gap_ci95']})")
 
     print("\n" + "#" * 72)
     if failures:

@@ -16,6 +16,7 @@ import config
 import db
 import economics
 import llm
+from agent import guardrails
 from analytics import cluster, embed
 from evals import judge
 
@@ -297,7 +298,10 @@ def persist(conn, cards: list[dict], signals: list[dict]) -> None:
         cur = conn.execute(
             "INSERT INTO themes (label, summary, size, save_rate, avg_margin_cost, example_ids_json, created_at) "
             "VALUES (?,?,?,?,?,?,?)",
-            (c["label"], c["summary"], c["size"], c["save_rate"], c["avg_margin_cost"],
+            # label/summary are MODEL-derived text over customer language and land in a
+            # durable store — redact them like every other model-derived durable write.
+            (guardrails.redact_pii(c["label"])[0], guardrails.redact_pii(c["summary"])[0],
+             c["size"], c["save_rate"], c["avg_margin_cost"],
              db.dumps(c["example_ids"]), _now()))
         tid = cur.lastrowid
         for s in signals:

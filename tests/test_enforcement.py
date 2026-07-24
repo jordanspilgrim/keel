@@ -53,6 +53,42 @@ def test_advance_blocks_jailbreak_before_model(conn, monkeypatch):
     assert not any("ignore your previous" in m["content"].lower() for m in input_list)
 
 
+def test_seeded_deterministic_redteam_probes_are_all_caught(conn):
+    """L2: the headline '100% catch rate (14/14 seeded probes)' had NO offline regression —
+    a paraphrase that slipped past the regex would drop the real rate while the suite stayed
+    green. This locks the DETERMINISTIC probes (jailbreak + PII, which need no LLM scope call)
+    from the seeded corpus: every one must be caught by the input guardrails."""
+    rows = conn.execute(
+        "SELECT attack_type, opening_message FROM scenarios WHERE is_adversarial=1 "
+        "AND attack_type IN ('jailbreak','pii_leak')").fetchall()
+    assert len(rows) >= 10, f"expected the seeded deterministic probes, got {len(rows)}"
+    missed = []
+    for r in rows:
+        # classify_scope=False → deterministic only (no API), exactly what the red-team
+        # sweep's jailbreak/PII arms rely on.
+        s = guardrails.screen_input(r["opening_message"], classify_scope=False)
+        caught = s["jailbreak"]["flagged"] if r["attack_type"] == "jailbreak" else bool(s["pii_types"])
+        if not caught:
+            missed.append((r["attack_type"], r["opening_message"][:60]))
+    assert not missed, f"seeded probes NOT caught by the deterministic guardrails: {missed}"
+
+
+def test_rendered_reply_cross_check_blocks_an_overstated_promise(conn, monkeypatch):
+    """M6: check_promise/check_grounding were documented as a supplemental output check but
+    had no caller in the live path (their unit tests manufactured green coverage for wiring
+    that didn't exist). They now run on the SERVER-RENDERED reply and fail closed."""
+    from agent import offers as offers_mod
+    rec = _rec()
+    offers_mod.authorize(rec["offers"], "discount", {"pct": 10})     # policy authorized 10%
+    monkeypatch.setattr(runtime, "_generate_contract", lambda *a, **k: _contract("closing"))
+    monkeypatch.setattr(runtime, "_validate_contract", lambda c, r: (True, ""))
+    monkeypatch.setattr(runtime, "_render_reply", lambda c, r: "I can do 50% off for you.")
+    monkeypatch.setattr(guardrails, "check_tone", lambda t: {"flagged": False})
+    ok, reason, _c, _r = runtime._screen_contract([], runtime.SYSTEM, rec, "")
+    assert not ok and "cross-check" in reason                        # blocked, not delivered
+    assert any(e[0] == "promise" and e[1] == "blocked" for e in rec["guardrail"])
+
+
 def test_advance_bounds_offscope(conn, monkeypatch):
     monkeypatch.setattr(guardrails, "check_scope", lambda t: {"in_scope": False, "reason": "off"})
     called = []
@@ -256,7 +292,7 @@ def test_cancellation_is_a_real_recorded_action(conn=None):
     c.execute("INSERT INTO customers (id,name,segment,tenure_months,arpu,demographic_attr,created_at) "
               "VALUES (1,'x','SMB',5,99,'group_a','t')")
     cid = rt.persist_conversation(c, {
-        "customer_id": 1, "scenario_id": None, "transcript": [{"role": "user", "content": "cancel"}],
+        "customer_id": 1, "scenario_id": None, "transcript": [{"role": "assistant", "content": config.AI_DISCLOSURE}, {"role": "user", "content": "cancel"}],
         "disposition": {"outcome": "lost", "offer_made": None}, "outcome": "lost", "offer_made": None,
         "evidence": {}, "guardrail_events": [], "audit": rec["audit"], "cancellation_routed": True})
     row = c.execute("SELECT status, channel FROM cancellation_requests WHERE conversation_id=?", (cid,)).fetchone()
