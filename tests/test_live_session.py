@@ -38,6 +38,7 @@ def _no_api(monkeypatch):
     # the scope classifier + judge + disposition hit the API; stub them so the H3 terminal
     # self-finalize (which persists + grades) runs deterministically offline.
     monkeypatch.setattr(guardrails, "check_scope", lambda t: {"in_scope": True, "reason": "test"})
+    monkeypatch.setattr(guardrails, "classify_injection", lambda t: False)  # M4: no real API in tests
     monkeypatch.setattr(runtime, "_grade_and_store", _stub_grade)
     monkeypatch.setattr(runtime, "_disposition",
                         lambda transcript, scenario, rec, outcome, accepted: {

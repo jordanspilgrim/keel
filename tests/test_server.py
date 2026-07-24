@@ -27,6 +27,7 @@ def client(tmp_path, monkeypatch):
     c.close()
 
     monkeypatch.setattr(guardrails, "check_scope", lambda t: {"in_scope": True, "reason": "t"})
+    monkeypatch.setattr(guardrails, "classify_injection", lambda t: False)  # M4: no real API in tests
 
     def fake_agent(input_list, cid, sub, conn, rec, system=runtime.SYSTEM, on_step=None):
         if on_step:
