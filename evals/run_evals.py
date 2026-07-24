@@ -98,6 +98,11 @@ def grade_all(conn, *, max_workers: int = 8, run_id: str | None = None, phase: s
     halluc = sum(1 for _, v in ok if v["scores"]["hallucination"] <= 2)
     fairness_flags = sum(1 for _, v in ok if v["fairness_flag"])
 
+    # OBSERVATIONAL outcome parity across the seeded demographic groups. IMPORTANT: this is
+    # NOT agent-treatment fairness — the demographic_attr is randomly assigned and NEVER shown
+    # to the agent, so any gap reflects scenario mix / sampling noise, not differential agent
+    # behavior. It is a monitoring signal only; the real counterfactual agent-treatment test
+    # lives in evals/agent_fairness.py (M2). Named accordingly so it can't be mis-read.
     groups: dict[str, dict] = {}
     for cv, v in ok:
         g = groups.setdefault(cv["demographic_attr"], {"n": 0, "pass": 0, "saved": 0})
@@ -107,14 +112,15 @@ def grade_all(conn, *, max_workers: int = 8, run_id: str | None = None, phase: s
     slice_ = {gname: {"pass_rate": round(g["pass"] / g["n"], 3), "save_rate": round(g["saved"] / g["n"], 3), "n": g["n"]}
               for gname, g in groups.items()}
     pass_rates = [s["pass_rate"] for s in slice_.values()]
-    fairness_gap = round(max(pass_rates) - min(pass_rates), 3) if pass_rates else 0.0
+    outcome_parity_gap = round(max(pass_rates) - min(pass_rates), 3) if pass_rates else 0.0
 
     # pass rate is over ALL conversations — a conversation we couldn't grade cannot "pass"
     return {"total": len(built), "graded": len(ok),
             "coverage": round(len(ok) / total, 3),
             "eval_pass_rate": round(passes / total, 3),
             "hallucination_rate": round(halluc / total, 3), "fairness_flags": fairness_flags,
-            "fairness_slice": slice_, "fairness_gap": fairness_gap}
+            "outcome_parity_slice": slice_, "outcome_parity_gap": outcome_parity_gap,
+            "outcome_parity_observational": True}
 
 
 def run_golden() -> dict:

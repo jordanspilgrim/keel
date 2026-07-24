@@ -300,9 +300,12 @@ def run_once(conn, run_id: str | None = None) -> dict | None:
         "lift": {"segment_save_pp": round(seg_lift, 1), "segment_madj_pp": round(seg_madj, 1),
                  "overall_save_pp": round(overall_lift, 1)},
         "guardrail_catch_rate": round(catch_rate, 3),
-        # Persist the fairness gap the docs cite, so its number is backed by this run's
-        # artifact rather than living only in prose (L4).
-        "fairness_gap": m["fairness_gap"],
+        # OBSERVATIONAL outcome parity across seeded groups (NOT agent-treatment fairness —
+        # the agent never sees the attribute). Named honestly so the dashboard/docs can't
+        # present sampling noise as a fairness guarantee (M2). Real agent-treatment fairness
+        # is the counterfactual harness in evals/agent_fairness.py.
+        "outcome_parity_gap": m["outcome_parity_gap"],
+        "outcome_parity_observational": True,
         "note": ("Paired before/after on identical seeded customers run from a byte-identical starting "
                  "subscription state (same starting_state_sha in both arms → eligibility held constant). "
                  "TWO variables changed together (discount policy + agent playbook), so this is a synthetic "
@@ -330,7 +333,7 @@ def run_once(conn, run_id: str | None = None) -> dict | None:
     print(f"  overall (context):      {before['save_rate']*100:>5.0f}%  →  {after['save_rate']*100:>5.0f}%   ({overall_lift:+.0f} pp)")
     print(f"  eval pass rate:       {m['eval_pass_rate']*100:.0f}% (coverage {m['coverage']*100:.0f}%)   ·   "
           f"guardrail catch rate: {catch_rate*100:.0f}%   ·   compliance: {data['kpis']['compliance_coverage']*100:.0f}%")
-    print(f"  fairness gap:         {m['fairness_gap']}   ·   paired cohort: {paired}   ·   manifest: dashboard/manifest.json")
+    print(f"  outcome parity gap:   {m['outcome_parity_gap']} (observational)   ·   paired cohort: {paired}   ·   manifest: dashboard/manifest.json")
     print("=" * 72)
 
     ok = paired and seg_lift > 0 and data["meta"]["conversations"] > 0
@@ -433,9 +436,10 @@ def run_median(k: int = 5) -> int:
         "eval_pass_rate": {"median": _median([mf["after"]["eval_pass_rate"] for mf in manifests]),
                            "min": min(mf["after"]["eval_pass_rate"] for mf in manifests),
                            "max": max(mf["after"]["eval_pass_rate"] for mf in manifests)},
-        "fairness_gap": {"median": _median([mf["fairness_gap"] for mf in manifests]),
-                         "min": min(mf["fairness_gap"] for mf in manifests),
-                         "max": max(mf["fairness_gap"] for mf in manifests)},
+        "outcome_parity_gap": {"median": _median([mf["outcome_parity_gap"] for mf in manifests]),
+                               "min": min(mf["outcome_parity_gap"] for mf in manifests),
+                               "max": max(mf["outcome_parity_gap"] for mf in manifests),
+                               "observational": True},
     }
     with open("dashboard/demo_aggregate.json", "w") as f:
         json.dump(aggregate, f, indent=2)
@@ -469,7 +473,7 @@ def run_median(k: int = 5) -> int:
           f"({round(committed['baseline']['segment_save_rate']*100)}% → "
           f"{round(committed['after']['segment_save_rate']*100)}%)")
     print(f"  eval pass (median):  {aggregate['eval_pass_rate']['median']*100:.0f}%   ·   "
-          f"fairness gap (median): {aggregate['fairness_gap']['median']}")
+          f"outcome parity gap (median, observational): {aggregate['outcome_parity_gap']['median']}")
     print(f"  aggregate: dashboard/demo_aggregate.json   ·   committed manifest: dashboard/manifest.json")
     # H5: the demo's own definition of done requires a STRICTLY POSITIVE treated-segment
     # lift — return nonzero when the median is not positive, so CI / a demo script can't read

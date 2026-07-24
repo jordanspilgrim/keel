@@ -107,9 +107,9 @@ python economics.py
   <p class="proves">Proves: <b>Phase 0</b> — reproducible synthetic data (identical SHA across runs) and the unit-economics model reproducing the plan’s headline.</p>
 
   <div class="step"><div class="num">3</div><h2>Run the unit tests <span class="badge free">no API</span></h2></div>
-  <p>164 fast, deterministic tests over the policy layer, guardrails, the response-contract/offer-ledger, enforcement, the live-session state machine, the money-demo integrity properties, and the server — no network, ~1s.</p>
+  <p>168 fast, deterministic tests over the policy layer, guardrails, the response-contract/offer-ledger, enforcement, the live-session state machine, the money-demo integrity properties, and the server — no network, ~1s.</p>
   <pre>python -m pytest tests/ -q
-<span class="g"># .....................................................................  164 passed in ~1s</span></pre>
+<span class="g"># .....................................................................  168 passed in ~1s</span></pre>
   <table>
     <tr><th>File</th><th>Covers</th></tr>
     <tr><td class="s">test_policy.py</td><td>discount cap, save-offer cooldown, pause cap, margin floor, consequential → human, refund → human</td></tr>
@@ -176,7 +176,7 @@ PRE-REGISTERED MEDIAN-OF-5  (treated price-sensitive segment · n=60)
     <tr><th>Command</th><th>Phase</th><th>API</th><th>Proves</th></tr>
     <tr><td class="s">python synth.py</td><td>0</td><td>no</td><td>reproducible synthetic data</td></tr>
     <tr><td class="s">python economics.py</td><td>0</td><td>no</td><td>the cost-to-serve model</td></tr>
-    <tr><td class="s">pytest tests/</td><td>1–2</td><td>no</td><td>policy, guardrails, response-contract/ledger, enforcement, live session, money-demo, server (164 tests)</td></tr>
+    <tr><td class="s">pytest tests/</td><td>1–2</td><td>no</td><td>policy, guardrails, response-contract/ledger, enforcement, live session, money-demo, server (168 tests)</td></tr>
     <tr><td class="s">-m scripts.phase1_accept</td><td>1</td><td>yes</td><td>save / let-churn behavior end-to-end</td></tr>
     <tr><td class="s">-m scripts.phase2_accept</td><td>2</td><td>yes</td><td>100% guardrail catch rate + compliance paths</td></tr>
     <tr><td class="s">-m scripts.phase3_accept</td><td>3</td><td>yes</td><td>grade 100% + judge calibration + known-bad conversation caught</td></tr>

@@ -173,7 +173,7 @@ def test_run_median_reports_median_not_max_and_keeps_low_draws(monkeypatch, tmp_
                "after": {"segment_save_rate": round(0.27 + v / 100, 4), "overall_save_rate": 0.29,
                          "eval_pass_rate": 0.85},
                "lift": {"segment_save_pp": v, "segment_madj_pp": round(v * 0.8, 1), "overall_save_pp": 2.0},
-               "fairness_gap": 0.02}
+               "outcome_parity_gap": 0.02}
         return {"manifest": man, "data": {"provenance": {"run_id": man["run_id"]}}}
 
     exported = {}  # capture what the dashboard is re-rendered from
@@ -223,7 +223,7 @@ def test_run_median_returns_nonzero_on_nonpositive_median(monkeypatch, tmp_path)
                "after": {"segment_save_rate": round(0.30 + v / 100, 4), "overall_save_rate": 0.29,
                          "eval_pass_rate": 0.85},
                "lift": {"segment_save_pp": v, "segment_madj_pp": v, "overall_save_pp": v},
-               "fairness_gap": 0.02}
+               "outcome_parity_gap": 0.02}
         return {"manifest": man, "data": {"provenance": {"run_id": man["run_id"]}}}
 
     _real = db.connect
@@ -254,7 +254,7 @@ def test_run_median_restores_committed_run_as_canonical_db(monkeypatch, tmp_path
                "after": {"segment_save_rate": round(0.30 + v / 100, 4), "overall_save_rate": 0.31,
                          "eval_pass_rate": 0.85},
                "lift": {"segment_save_pp": v, "segment_madj_pp": v, "overall_save_pp": v},
-               "fairness_gap": 0.02}
+               "outcome_parity_gap": 0.02}
         return {"manifest": man, "data": {"provenance": {"run_id": rid}}}
 
     _real = db.connect
@@ -281,7 +281,7 @@ def test_run_median_aborts_if_any_run_bails(monkeypatch, tmp_path):
                "baseline": {"segment_save_rate": 0.27, "overall_save_rate": 0.26},
                "after": {"segment_save_rate": 0.30, "overall_save_rate": 0.29, "eval_pass_rate": 0.85},
                "lift": {"segment_save_pp": 3.0, "segment_madj_pp": 2.0, "overall_save_pp": 2.0},
-               "fairness_gap": 0.02}
+               "outcome_parity_gap": 0.02}
         return {"manifest": man, "data": {"provenance": {"run_id": "r"}}}
 
     _real_connect = db.connect
