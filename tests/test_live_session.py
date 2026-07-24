@@ -135,8 +135,9 @@ def test_resolve_persists_and_is_readable(conn, monkeypatch):
                             "intent": "cancel", "churn_reason": "price", "offer_made": runtime._offer_made(rec),
                             "offer_accepted": accepted, "outcome": outcome, "confidence": 0.8})
     s = runtime.new_session(1, conn)
-    runtime.live_turn(s, "Too expensive.", conn)
-    rec = runtime.resolve_session(s, "saved", conn)
+    runtime.live_turn(s, "Too expensive.", conn)                 # agent presents the 1-month pause
+    runtime.live_turn(s, "yes, I'll take it", conn, decision="accept")  # customer EARNS the save (H2)
+    rec = runtime.resolve_session(s, conn)                       # outcome derived from the ledger
     assert rec["conversation_id"]
     row = conn.execute("SELECT outcome, offer_made FROM conversations WHERE id=?",
                        (rec["conversation_id"],)).fetchone()
@@ -149,16 +150,57 @@ def test_resolve_persists_and_is_readable(conn, monkeypatch):
                         (rec["conversation_id"],)).fetchone()[0] == 1
 
 
-def test_saved_requires_an_authorized_offer(conn, monkeypatch):
-    # agent makes NO offer this conversation
-    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(reply="I understand, I'll process that."))
+def test_resolve_cannot_manufacture_a_save(conn, monkeypatch):
+    """H2: an operator cannot assert 'saved' on a conversation the customer never accepted —
+    the outcome is DERIVED from the ledger. With no accepted offer it resolves 'lost', and a
+    contradicting cross-check raises."""
+    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(offer="1-month pause"))
     monkeypatch.setattr(runtime, "_disposition",
-                        lambda *a: {"intent": "cancel", "churn_reason": "x", "offer_made": None,
+                        lambda *a: {"intent": "cancel", "churn_reason": "x", "offer_made": "1-month pause",
                                     "offer_accepted": False, "outcome": "lost", "confidence": 0.8})
     s = runtime.new_session(1, conn)
-    runtime.live_turn(s, "Just cancel me.", conn)
-    with pytest.raises(ValueError):  # cannot claim 'saved' with no offer on the table
-        runtime.resolve_session(s, "saved", conn)
+    runtime.live_turn(s, "Too expensive.", conn)         # offer PRESENTED but the customer never accepts
+    with pytest.raises(ValueError):                      # asserting 'saved' contradicts the earned state
+        runtime.resolve_session(s, conn, outcome="saved")
+    rec = runtime.resolve_session(s, conn)               # derives 'lost' honestly
+    assert rec["outcome"] == "lost"
+
+
+def test_live_reject_earns_lost_not_saved(conn, monkeypatch):
+    """H2: the customer rejecting the presented offer earns 'lost', and the reply is a
+    server-authored decline (never a save)."""
+    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(offer="20% discount"))
+    monkeypatch.setattr(runtime, "_disposition",
+                        lambda *a: {"intent": "cancel", "churn_reason": "x", "offer_made": "20% discount",
+                                    "offer_accepted": False, "outcome": "lost", "confidence": 0.8})
+    s = runtime.new_session(1, conn)
+    runtime.live_turn(s, "Too expensive.", conn)
+    res = runtime.live_turn(s, "no thanks, just cancel", conn, decision="reject")
+    assert s["outcome"] == "lost" and offers.presented(s["rec"]["offers"]) is None
+    rec = runtime.resolve_session(s, conn)
+    assert rec["outcome"] == "lost"
+
+
+def test_apply_customer_decision_is_the_shared_transition(conn):
+    """H2: accept earns a save only with a presented offer; accept with nothing on the table
+    is accepting cancellation (lost); reject declines; continue leaves the ledger untouched."""
+    rec = {"offers": []}
+    o = offers.authorize(rec["offers"], "discount", {"pct": 20}); o.state = "presented"
+    assert runtime._apply_customer_decision(rec, "accept") == ("saved", True)
+    assert offers.accepted(rec["offers"]) is not None
+    rec2 = {"offers": []}
+    p = offers.authorize(rec2["offers"], "pause", {"months": 1}); p.state = "presented"
+    assert runtime._apply_customer_decision(rec2, "reject") == ("lost", False)
+    assert runtime._apply_customer_decision({"offers": []}, "accept") == ("lost", False)   # nothing on the table
+    assert runtime._apply_customer_decision({"offers": []}, "continue") == (None, False)
+
+
+def test_classify_customer_decision_fails_safe_to_continue(monkeypatch):
+    """H2: a classifier error must NEVER fabricate an acceptance — it fails safe to 'continue'
+    so a live save can only ever come from an unambiguous accept."""
+    monkeypatch.setattr(runtime.llm, "structured",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no api")))
+    assert runtime.classify_customer_decision("yes please!", "20% discount") == "continue"
 
 
 def test_resolve_is_idempotent(conn, monkeypatch):
@@ -168,9 +210,10 @@ def test_resolve_is_idempotent(conn, monkeypatch):
                                     "offer_accepted": True, "outcome": "saved", "confidence": 0.8})
     s = runtime.new_session(1, conn)
     runtime.live_turn(s, "Too expensive.", conn)
-    r1 = runtime.resolve_session(s, "saved", conn)
+    runtime.live_turn(s, "yes", conn, decision="accept")         # earn the save
+    r1 = runtime.resolve_session(s, conn)
     # a second resolve returns the SAME persisted record (idempotent), not a new/duplicate one
-    r2 = runtime.resolve_session(s, "lost", conn)
+    r2 = runtime.resolve_session(s, conn)
     assert r2 is r1 and r1["conversation_id"]
     assert conn.execute("SELECT count(*) FROM conversations WHERE id=?",
                         (r1["conversation_id"],)).fetchone()[0] == 1
@@ -246,7 +289,7 @@ def test_cannot_assert_escalated_without_a_real_handoff(conn, monkeypatch):
     runtime.live_turn(s, "too pricey", conn)          # a normal turn — nothing escalated
     assert not s["rec"]["escalated"]
     with pytest.raises(ValueError):
-        runtime.resolve_session(s, "escalated", conn, resolution_key="sid-fake-esc")
+        runtime.resolve_session(s, conn, outcome="escalated", resolution_key="sid-fake-esc")
 
 
 def test_live_cancellation_is_durable_before_resolve(conn, monkeypatch):
@@ -268,7 +311,7 @@ def test_live_cancellation_is_durable_before_resolve(conn, monkeypatch):
                        "WHERE session_key=?", ("sess-DUR",)).fetchone()
     assert row is not None and row["status"] == "pending_human" and row["conversation_id"] is None
     # a later resolve LINKS that row to the conversation instead of double-inserting
-    runtime.resolve_session(s, "lost", conn, resolution_key="sess-DUR")
+    runtime.resolve_session(s, conn, resolution_key="sess-DUR")  # derives 'lost' (cancelled)
     rows = conn.execute("SELECT conversation_id FROM cancellation_requests WHERE session_key=?",
                         ("sess-DUR",)).fetchall()
     assert len(rows) == 1 and rows[0]["conversation_id"] is not None  # linked, not duplicated
@@ -284,12 +327,14 @@ def test_resolve_is_durably_idempotent_across_sessions(conn, monkeypatch):
                                     "offer_accepted": True, "outcome": "saved", "confidence": 0.8})
     s = runtime.new_session(1, conn)
     runtime.live_turn(s, "Too expensive.", conn)
-    r1 = runtime.resolve_session(s, "saved", conn, resolution_key="sess-XYZ")
+    runtime.live_turn(s, "yes", conn, decision="accept")         # earn the save
+    r1 = runtime.resolve_session(s, conn, resolution_key="sess-XYZ")
 
-    # a brand-new session object (no in-memory 'resolved') retries with the SAME key
+    # a brand-new session object (no in-memory 'resolved') retries with the SAME key — the
+    # durable record short-circuits before any outcome is re-derived
     s2 = runtime.new_session(1, conn)
     runtime.live_turn(s2, "Too expensive.", conn)
-    r2 = runtime.resolve_session(s2, "saved", conn, resolution_key="sess-XYZ")
+    r2 = runtime.resolve_session(s2, conn, resolution_key="sess-XYZ")
     assert r2["conversation_id"] == r1["conversation_id"]  # same durable record
     # exactly ONE conversation carries that resolution key — no double-persist
     assert conn.execute("SELECT count(*) FROM conversations WHERE resolution_key=?",
@@ -313,9 +358,10 @@ def test_resolve_rolls_back_on_persist_failure(conn, monkeypatch):
     monkeypatch.setattr(runtime, "persist_conversation", flaky)
     s = runtime.new_session(1, conn)
     runtime.live_turn(s, "Too expensive.", conn)
+    runtime.live_turn(s, "yes", conn, decision="accept")   # earn the save in the ledger
     with pytest.raises(RuntimeError):
-        runtime.resolve_session(s, "saved", conn)
-    # the offer transition was ROLLED BACK — it's presented again, so a retry works
-    assert offers.presented(s["rec"]["offers"]) is not None and not s.get("resolved")
-    r = runtime.resolve_session(s, "saved", conn)  # retry succeeds
-    assert r["conversation_id"]
+        runtime.resolve_session(s, conn)
+    # the accepted offer is intact and the session is not resolved, so a retry works
+    assert offers.accepted(s["rec"]["offers"]) is not None and not s.get("resolved")
+    r = runtime.resolve_session(s, conn)  # retry succeeds
+    assert r["conversation_id"] and r["outcome"] == "saved"

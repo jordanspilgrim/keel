@@ -58,11 +58,14 @@ class StartReq(BaseModel):
 class TurnReq(BaseModel):
     session_id: str
     message: str
+    decision: str | None = None  # optional Accept/Reject button (H2); else the reply is classified
 
 
 class ResolveReq(BaseModel):
     session_id: str
-    outcome: str = "lost"
+    # Optional cross-check only — the outcome is DERIVED from the earned ledger state; the
+    # server never manufactures a save from a caller-supplied value (H2).
+    outcome: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +164,8 @@ def chat_turn(req: TurnReq):
         result, error = None, None
         try:
             conn = db.connect()  # inside try — a connect failure surfaces, never hangs
-            result = runtime.live_turn(session, req.message, conn, on_step=_publish_step)
+            result = runtime.live_turn(session, req.message, conn, on_step=_publish_step,
+                                       decision=req.decision)
         except Exception as e:  # never hang — surface the error
             error = f"{type(e).__name__}: {e}"
         finally:
@@ -233,8 +237,9 @@ def chat_resolve(req: ResolveReq):
         conn = db.connect()  # inside try — a connect failure clears the claim, never sticks
         # Pass the session id as the durable resolution key: a retry (even after a
         # restart, on a fresh session object) returns the DB-persisted record.
-        record = runtime.resolve_session(session, req.outcome, conn, resolution_key=req.session_id)
-    except ValueError as e:  # invalid transition (e.g. 'saved' with no accepted offer)
+        # The outcome is DERIVED from the earned ledger state; req.outcome is only a cross-check.
+        record = runtime.resolve_session(session, conn, outcome=req.outcome, resolution_key=req.session_id)
+    except ValueError as e:  # a caller-asserted outcome that contradicts the earned state
         raise HTTPException(422, str(e))
     finally:
         if conn is not None:

@@ -75,7 +75,12 @@ def test_full_chat_flow(client):
     assert st["result"]["reply"] == "How about a 1-month pause?"
     assert any(s["kind"] == "tool" for s in st["steps"])  # the legibility trace populated
 
-    res = client.post("/api/chat/resolve", json={"session_id": start["session_id"], "outcome": "saved"}).json()
+    # the customer accepts via the explicit decision (the Accept button) — earns the save (H2)
+    acc = client.post("/api/chat/turn",
+                      json={"session_id": start["session_id"], "message": "yes, I'll take it", "decision": "accept"})
+    _drain_turn(client, acc.json()["turn_id"])
+
+    res = client.post("/api/chat/resolve", json={"session_id": start["session_id"]}).json()  # derived
     assert res["outcome"] == "saved" and res["conversation_id"]
 
     # it now shows up in the explorer and the detail is readable

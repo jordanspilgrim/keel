@@ -909,15 +909,10 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
             # (the judge and disposition read the full turn, not a truncation).
             if cust.get("reply"):
                 transcript.append({"role": "user", "content": cust["reply"]})
-            if cust["decision"] == "accept":
-                # A save requires an accepted *presented* offer. "Yes, cancel me"
-                # with nothing on the table is the customer accepting cancellation.
-                # Acceptance is bound to the specific presented offer in the ledger.
-                accepted = offers.mark_accepted(rec["offers"])
-                outcome, offer_accepted = ("saved", True) if accepted else ("lost", False)
-            else:  # rejected — transition the presented offer to 'rejected'
-                offers.mark_rejected(rec["offers"])
-                outcome = "lost"
+            # Same customer-decision transition the LIVE path uses (H2): a save requires an
+            # accepted *presented* offer; "yes, cancel me" with nothing on the table is the
+            # customer accepting cancellation; a reject declines the presented offer.
+            outcome, offer_accepted = _apply_customer_decision(rec, cust["decision"])
             break
         pending = cust["reply"]  # screened by _advance on the next iteration
     if outcome is None:
@@ -1063,10 +1058,63 @@ _CANCELLED_REPLY = ("Your cancellation is already with our team to process — y
                     "confirmation once it's complete. I'll leave it in their hands.")
 
 
-def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
+_SAVED_REPLY = ("Wonderful — I've noted that you'd like to accept. Our team will apply it to your "
+                "account and send a confirmation shortly. Thanks for staying with us!")
+_DECLINED_REPLY = ("Understood — no problem at all, and thanks for hearing me out. I've noted your "
+                   "decision; if anything changes down the line, we're here to help.")
+
+_DECISION_SCHEMA = {
+    "type": "object",
+    "properties": {"decision": {"type": "string", "enum": ["accept", "reject", "continue"]}},
+    "required": ["decision"], "additionalProperties": False,
+}
+
+
+def _apply_customer_decision(rec: dict, decision: str) -> tuple[str | None, bool]:
+    """Apply a customer's accept/reject/continue decision to the offer ledger — the SINGLE
+    transition BOTH the batch simulator and the live classifier drive, so a 'saved' outcome
+    is always EARNED from the customer, never asserted by an operator (H2). 'accept' with a
+    presented offer earns a save; 'accept' with nothing on the table is the customer
+    accepting cancellation (lost); 'reject' declines the presented offer (lost); 'continue'
+    leaves the ledger untouched (the conversation goes on)."""
+    if decision == "accept":
+        accepted = offers.mark_accepted(rec["offers"])
+        return ("saved", True) if accepted else ("lost", False)
+    if decision == "reject":
+        offers.mark_rejected(rec["offers"])
+        return "lost", False
+    return None, False  # continue
+
+
+def classify_customer_decision(message: str, offer_summary: str) -> str:
+    """Classify a live customer's reply to a PRESENTED retention offer into accept / reject /
+    continue — the live analogue of the batch simulator's structured decision (H2), so a
+    live save is earned from the customer's words rather than an operator button. Fails SAFE
+    to 'continue' (an LLM error must never fabricate an acceptance)."""
+    try:
+        r = llm.structured(
+            config.MINI_MODEL,
+            "Classify the customer's reply to a retention offer. Return 'accept' only if they "
+            "clearly agree to take the offer; 'reject' if they decline it or want to go ahead "
+            "with cancelling; 'continue' if they are asking a question, negotiating, or haven't "
+            "decided. When unsure, return 'continue'.",
+            f"Offer on the table: {offer_summary}\nCustomer reply: {message}",
+            _DECISION_SCHEMA, "customer_decision", reasoning_effort="minimal", max_output_tokens=50)
+        d = r.get("decision")
+        return d if d in ("accept", "reject", "continue") else "continue"
+    except Exception:
+        return "continue"  # fail safe — never manufacture a save from a classifier failure
+
+
+def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: str | None = None) -> dict:
     """Advance one live turn using the SAME shared core (_advance) as the batch
     runner: a jailbreak is blocked before the model, off-scope is bounded,
-    otherwise the agent runs; a needs-human or output violation escalates."""
+    otherwise the agent runs; a needs-human or output violation escalates.
+
+    When a retention offer is on the table, the customer's reply is first classified into
+    accept/reject/continue (or taken from an explicit `decision`, the console's Accept/Reject
+    buttons) and applied to the ledger BEFORE the agent replies — so a live 'saved' is earned
+    from the customer, exactly as in the batch path (H2). `decision` bypasses the classifier."""
     rec = session["rec"]
     # Escalation is a TERMINAL state: once the conversation has been handed to a
     # human, the autonomous agent does not run again on this session (mirrors the
@@ -1103,6 +1151,23 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None) -> dict:
         session["outcome"] = "escalated"
         _emit(on_step, "reply", reply)
         return _turn_result(session, reply, [ev])
+    # H2 — CUSTOMER-EARNED ACCEPTANCE. If a retention offer is on the table, classify the
+    # customer's reply (or use an explicit button `decision`) and apply it to the ledger
+    # BEFORE the agent runs. accept/reject are TERMINAL customer decisions (as in the batch
+    # path, where the simulated customer's decision breaks the loop) and get a server-authored
+    # close, so a 'saved' can only come from a real acceptance — never an operator button.
+    presented = offers.presented(rec["offers"])
+    if presented is not None:
+        d = decision if decision in ("accept", "reject", "continue") \
+            else classify_customer_decision(user_text, offers.human_terms(presented))
+        if d in ("accept", "reject"):
+            session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
+            outcome, _acc = _apply_customer_decision(rec, d)
+            session["outcome"] = outcome  # 'saved' or 'lost' — a customer-EARNED terminal
+            reply = _SAVED_REPLY if outcome == "saved" else _DECLINED_REPLY
+            session["transcript"].append({"role": "assistant", "content": reply})
+            _emit(on_step, "decision", f"customer {d}ed the {presented.kind} offer → {outcome}")
+            return _turn_result(session, reply, [])
     before = len(rec["guardrail"])
     reply = _advance(user_text, session["transcript"], session["input_list"],
                      session["customer_id"], session["sub"], conn, rec, on_step=on_step)
@@ -1134,12 +1199,28 @@ def _load_resolved_record(conn, resolution_key: str | None) -> dict | None:
             "disposition": json.loads(row["disposition_json"])}
 
 
-def resolve_session(session: dict, outcome: str, conn, *, resolution_key: str | None = None) -> dict:
-    """End a live conversation: VALIDATE the outcome, persist it, and GRADE it (so the
-    live path also grades 100%). Idempotent at TWO levels: the in-memory 'resolved'
-    flag AND a durable `resolution_key` uniquely indexed in the DB — a retry (even from
-    a fresh session object after a restart) returns the already-persisted record instead
-    of double-committing. Raises ValueError only on a genuinely invalid transition."""
+def _earned_outcome(session: dict) -> str:
+    """DERIVE the live outcome from the EARNED ledger/session state — never from a caller
+    assertion (H2). Escalation and routed cancellation are terminal; a save requires an
+    offer the customer actually ACCEPTED in the ledger; everything else is lost."""
+    rec = session["rec"]
+    if session.get("outcome") == "escalated" or rec.get("escalated"):
+        return "escalated"
+    if session.get("outcome") == "cancelled" or rec.get("cancellation_routed"):
+        return "lost"  # a routed cancellation resolves as a lost customer
+    if offers.accepted(rec["offers"]) is not None:
+        return "saved"  # a real, customer-accepted offer is on the ledger
+    return "lost"
+
+
+def resolve_session(session: dict, conn, *, outcome: str | None = None,
+                    resolution_key: str | None = None) -> dict:
+    """FINALIZE a live conversation: persist and GRADE the EARNED outcome (so the live path
+    also grades 100%). The outcome is DERIVED from the ledger — resolve never manufactures a
+    save; a caller may pass `outcome` only as a cross-check and it must match the earned
+    state or ValueError is raised (H2). Idempotent at TWO levels: the in-memory 'resolved'
+    flag AND a durable `resolution_key` uniquely indexed in the DB — a retry (even from a
+    fresh session object after a restart) returns the already-persisted record."""
     rec = session["rec"]
     if session.get("resolved"):
         return session["_record"]
@@ -1148,29 +1229,23 @@ def resolve_session(session: dict, outcome: str, conn, *, resolution_key: str | 
     if existing is not None:
         session.update(resolved=True, _record=existing, conversation_id=existing["conversation_id"])
         return existing
-    if session["outcome"] == "escalated":
-        outcome = "escalated"
-    elif session.get("outcome") == "cancelled" or rec.get("cancellation_routed"):
-        outcome = "lost"  # a routed cancellation resolves as a lost customer
-    if outcome not in ("saved", "lost", "escalated"):
-        raise ValueError("outcome must be saved, lost, or escalated")
-    # Validate WITHOUT mutating the ledger yet. Each terminal must be EARNED, not merely
-    # asserted by the caller — the loop is the source of truth, mirroring the batch path:
-    # a save needs a presented offer, and an escalation needs an actual hand-off in the
-    # record (so a stray outcome='escalated' can't fabricate a compliance/safety KPI).
-    if outcome == "saved" and offers.presented(rec["offers"]) is None:
-        raise ValueError("cannot mark 'saved' without a presented retention offer")
-    if outcome == "escalated" and not (rec.get("escalated") or session.get("outcome") == "escalated"):
-        raise ValueError("cannot mark 'escalated' without an actual hand-off (rec['escalated'] is not set)")
+    earned = _earned_outcome(session)
+    # A caller may assert an EXPECTED outcome, but it can never override what was earned — an
+    # operator cannot click 'Saved' on a conversation the customer never accepted.
+    if outcome is not None and outcome != earned:
+        raise ValueError(f"resolve cannot manufacture an outcome: the ledger earned '{earned}', "
+                         f"caller asserted '{outcome}'")
+    outcome = earned
     offer_accepted = outcome == "saved"
     scenario = {"id": None, "customer_id": session["customer_id"], "churn_reason": "live session"}
     # Snapshot the ledger states so a persistence failure can be rolled back and the
     # resolve retried cleanly (don't leave the session half-resolved).
     snapshot = [(o, o.state) for o in rec["offers"]]
     try:
-        if outcome == "saved":
-            offers.mark_accepted(rec["offers"])
-        elif outcome == "lost":  # a presented-but-declined offer transitions to 'rejected'
+        # Acceptance was already earned DURING the conversation (the live classifier /
+        # button, mirroring the batch simulator) — resolve does NOT mark_accepted here. A
+        # lost close still transitions any dangling presented offer to 'rejected'.
+        if outcome == "lost" and offers.presented(rec["offers"]) is not None:
             offers.mark_rejected(rec["offers"])
         disp = _disposition(session["transcript"], scenario, rec, outcome, offer_accepted)
         record = {"customer_id": session["customer_id"], "scenario_id": None,

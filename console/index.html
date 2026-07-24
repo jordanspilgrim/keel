@@ -183,13 +183,17 @@
           <div id="glist"><div class="sec" style="font-size:12.5px;margin-top:6px">None yet.</div></div>
         </div>
         <div id="endRow" class="hidden">
-          <h4>End &amp; log outcome</h4>
+          <h4>Customer decision</h4>
           <div class="endbtns" style="margin-top:8px">
-            <button class="ghost" data-outcome="saved">✅ Saved</button>
-            <button class="ghost" data-outcome="lost">❌ Lost</button>
-            <button class="ghost" data-outcome="escalated">↗ Escalated</button>
+            <button class="ghost" data-decision="accept">✅ Accept offer</button>
+            <button class="ghost" data-decision="reject">❌ Decline offer</button>
           </div>
-          <p class="sec" style="font-size:12px;margin:8px 0 0">Logs the conversation to the DB — it then appears in the Explorer and moves the metrics.</p>
+          <p class="sec" style="font-size:12px;margin:8px 0 0">Or the customer just types their reply — it's classified into accept / reject / continue. A <b>save is only recorded when the customer actually accepts</b> — it can't be asserted.</p>
+          <h4 style="margin-top:14px">End conversation</h4>
+          <div class="endbtns" style="margin-top:8px">
+            <button class="ghost" id="endBtn">🏁 End &amp; log outcome</button>
+          </div>
+          <p class="sec" style="font-size:12px;margin:8px 0 0">Finalizes the <b>earned</b> outcome (derived from the offer ledger) and logs it to the DB — it then appears in the Explorer.</p>
         </div>
         <details class="legend">
           <summary>What the tags mean</summary>
@@ -301,17 +305,19 @@ function friendlyTrace(proc){
   for(const s of proc){ const f=FRIENDLY[s.kind]||"Working…"; if(f!==last){out.push(f);last=f;} }
   return out.map((t,i)=>`<div class="step${i===out.length-1?' live':''}"><span class="dot"></span><span>${esc(t)}</span></div>`).join('');
 }
-async function sendMessage(){
+async function sendMessage(forceText,decision){
   if(!sessionId||ended) return;
-  const text=$('#msgBox').value.trim(); if(!text) return;
-  $('#msgBox').value=''; $('#sendBtn').disabled=true; $('#msgBox').disabled=true;
+  const text=(forceText!==undefined?forceText:$('#msgBox').value.trim()); if(!text) return;
+  if(forceText===undefined) $('#msgBox').value='';
+  $('#sendBtn').disabled=true; $('#msgBox').disabled=true;
   addMsg('user',text);
   const traceWrap=document.createElement('div'); traceWrap.className='msg agent';
   traceWrap.innerHTML=`<div class="who">Agent</div><div class="trace" id="liveTrace"></div>`;
   $('#thread').appendChild(traceWrap); $('#thread').scrollTop=$('#thread').scrollHeight;
   let seen=0;
   try{
-    const {turn_id}=await api('/api/chat/turn',{method:'POST',body:JSON.stringify({session_id:sessionId,message:text})});
+    const body={session_id:sessionId,message:text}; if(decision) body.decision=decision;
+    const {turn_id}=await api('/api/chat/turn',{method:'POST',body:JSON.stringify(body)});
     while(true){
       await new Promise(r=>setTimeout(r,350));
       const st=await api('/api/turn/'+turn_id);
@@ -343,14 +349,23 @@ function updateSide(res){
 }
 $('#sendBtn').onclick=sendMessage;
 $('#msgBox').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();} });
-$$('#endRow button').forEach(b=>b.onclick=async()=>{
+// Accept/Reject buttons are an explicit high-confidence customer decision — they send a
+// turn with `decision`, which transitions the offer ledger (a save is EARNED, never asserted).
+$$('#endRow button[data-decision]').forEach(b=>b.onclick=async()=>{
+  if(!sessionId||ended){return;}
+  const d=b.dataset.decision;
+  await sendMessage(d==='accept'?'Yes, I accept the offer.':'No thanks, please cancel.', d);
+});
+// End finalizes the EARNED outcome — the server derives it from the ledger; the console
+// never asserts an outcome (H2).
+$('#endBtn').onclick=async()=>{
   if(!sessionId){return;}
   try{
-    const r=await api('/api/chat/resolve',{method:'POST',body:JSON.stringify({session_id:sessionId,outcome:b.dataset.outcome})});
+    const r=await api('/api/chat/resolve',{method:'POST',body:JSON.stringify({session_id:sessionId})});
     toast(`Logged as ${r.outcome} → conversation #${r.conversation_id}. See it in the Explorer.`);
     ended=true; $('#sendBtn').disabled=true; $('#msgBox').disabled=true;
   }catch(e){toast('Could not log: '+e.message);}
-});
+};
 
 /* ---------- explorer ---------- */
 const KPI_DEFS={
