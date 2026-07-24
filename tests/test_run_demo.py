@@ -191,6 +191,64 @@ def test_run_median_rejects_even_k(monkeypatch, tmp_path):
     assert called["n"] == 0  # rejected before running anything
 
 
+def test_run_median_returns_nonzero_on_nonpositive_median(monkeypatch, tmp_path):
+    """H5: a flat/negative median is NOT success — run_median returns a nonzero exit code so
+    CI or a demo script can't read a dead flywheel as a pass. Every draw is still recorded."""
+    import json
+    (tmp_path / "dashboard").mkdir()
+    monkeypatch.chdir(tmp_path)
+    draws = [-5.0, -4.0, -3.0, -2.0, -1.0]      # median -3.0
+    seq = iter(draws)
+
+    def fake_run_once(conn, run_id=None):
+        v = next(seq)
+        man = {"run_id": f"run-{v}", "treated_cohort_n": 60,
+               "baseline": {"segment_save_rate": 0.30, "overall_save_rate": 0.30},
+               "after": {"segment_save_rate": round(0.30 + v / 100, 4), "overall_save_rate": 0.29,
+                         "eval_pass_rate": 0.85},
+               "lift": {"segment_save_pp": v, "segment_madj_pp": v, "overall_save_pp": v},
+               "fairness_gap": 0.02}
+        return {"manifest": man, "data": {"provenance": {"run_id": man["run_id"]}}}
+
+    _real = db.connect
+    monkeypatch.setattr(run_demo, "run_once", fake_run_once)
+    monkeypatch.setattr(run_demo.export, "write_data", lambda *a, **k: None)
+    monkeypatch.setattr(run_demo.db, "connect", lambda *a, **k: _real(str(tmp_path / "m.db")))
+    assert run_demo.run_median(k=5) == 1                             # nonpositive median → nonzero exit
+    agg = json.loads((tmp_path / "dashboard" / "demo_aggregate.json").read_text())
+    assert agg["segment_save_pp"]["median"] == -3.0 and agg["segment_save_pp"]["values"] == draws  # honest
+
+
+def test_run_median_restores_committed_run_as_canonical_db(monkeypatch, tmp_path):
+    """H5: the committed (median) run's DB is restored as the canonical Explorer/API database,
+    so the live surfaces read the SAME run the dashboard renders — not whichever ran LAST."""
+    canonical = tmp_path / "canonical.db"
+    monkeypatch.setattr(run_demo.config, "DB_PATH", str(canonical))
+    (tmp_path / "dashboard").mkdir()
+    monkeypatch.chdir(tmp_path)
+    draws = [5.0, 1.0, 9.0]                     # median 5.0 → committed run-5.0; LAST run is run-9.0
+    seq = iter(draws)
+
+    def fake_run_once(conn, run_id=None):
+        v = next(seq)
+        rid = f"run-{v}"
+        canonical.write_text(rid)               # each run leaves its id as the DB "content"
+        man = {"run_id": rid, "treated_cohort_n": 60,
+               "baseline": {"segment_save_rate": 0.30, "overall_save_rate": 0.30},
+               "after": {"segment_save_rate": round(0.30 + v / 100, 4), "overall_save_rate": 0.31,
+                         "eval_pass_rate": 0.85},
+               "lift": {"segment_save_pp": v, "segment_madj_pp": v, "overall_save_pp": v},
+               "fairness_gap": 0.02}
+        return {"manifest": man, "data": {"provenance": {"run_id": rid}}}
+
+    _real = db.connect
+    monkeypatch.setattr(run_demo, "run_once", fake_run_once)
+    monkeypatch.setattr(run_demo.export, "write_data", lambda *a, **k: None)
+    monkeypatch.setattr(run_demo.db, "connect", lambda *a, **k: _real(str(tmp_path / "m.db")))
+    run_demo.run_median(k=3)
+    assert canonical.read_text() == "run-5.0"   # canonical DB = committed (median), not the last (run-9.0)
+
+
 def test_run_median_aborts_if_any_run_bails(monkeypatch, tmp_path):
     """A structural bail in any run aborts the whole estimate — no partial median over
     fewer than k runs (which would silently change the denominator)."""

@@ -25,7 +25,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 import batch
@@ -261,6 +263,15 @@ def run_once(conn, run_id: str | None = None) -> dict | None:
     overall_lift = (after["save_rate"] - before["save_rate"]) * 100
     paired = (cohort_ids == cohort2_ids and len(recs_a) == len(cohort)
               and len(recs_b) == len(cohort2) and identical_start)
+    # H5: an UNPAIRED run (cohort mismatch, arm-count mismatch, treated-n mismatch, or zero
+    # coverage) is STRUCTURALLY invalid — it cannot yield an honest paired lift. Abort it
+    # (return None) rather than write artifacts or let it count toward a median; the demo's
+    # own definition of done requires a matched pair.
+    if not paired or before_seg["n"] != after_seg["n"] or after["n"] == 0:
+        print(f"\n   ⚠ structural failure (paired={paired}, treated_n {before_seg['n']}/{after_seg['n']}, "
+              f"after_convs {after['n']}) — aborting this run rather than report a "
+              f"confounded or empty result.")
+        return None
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -369,6 +380,21 @@ def run_median(k: int = 5) -> int:
                          f"median run, so the committed manifest and the aggregate median would diverge")
     conn = db.connect()
     runs: list[dict] = []          # each is {"manifest": ..., "data": ...} from run_once
+    snap_dir = tempfile.mkdtemp(prefix="keel-demo-db-")  # ephemeral per-run DB snapshots (H5)
+    db_snapshots: dict[str, str] = {}                    # run_id -> snapshot db path
+
+    def _snapshot_db(run_id: str) -> None:
+        # Snapshot the just-finished run's DB before the next run resets it, so the committed
+        # (median) run can be restored as the canonical Explorer/API database — otherwise the
+        # live surfaces would read whichever run happened to execute LAST (H5). Best-effort.
+        try:
+            conn.execute("PRAGMA wal_checkpoint(FULL)")
+            snap = os.path.join(snap_dir, f"{run_id}.db")
+            shutil.copy(config.DB_PATH, snap)
+            db_snapshots[run_id] = snap
+        except Exception:
+            pass
+
     try:
         for i in range(k):
             print(f"\n{'#' * 20} PRE-REGISTERED RUN {i + 1}/{k} {'#' * 20}")
@@ -377,6 +403,7 @@ def run_median(k: int = 5) -> int:
                 raise SystemExit(f"run {i + 1}/{k} bailed structurally — aborting the median "
                                  f"(an honest estimate cannot be computed over fewer than k runs)")
             runs.append(ret)
+            _snapshot_db(ret["manifest"]["run_id"])
     finally:
         conn.close()
 
@@ -421,6 +448,17 @@ def run_median(k: int = 5) -> int:
     # rows are the only ones left in the DB after the final reset) — which would let the
     # flagship visible surface display an above-median lift while the docs claim the median.
     export.write_data(committed_ret["data"])
+    # Restore the committed (median) run's DB as the CANONICAL Explorer/API database (H5), so
+    # the live surfaces describe the SAME run the dashboard renders — not the last one run.
+    committed_snap = db_snapshots.get(committed["run_id"])
+    if committed_snap and os.path.exists(committed_snap):
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.remove(config.DB_PATH + ext)
+            except OSError:
+                pass
+        shutil.copy(committed_snap, config.DB_PATH)
+    shutil.rmtree(snap_dir, ignore_errors=True)
 
     sp = aggregate["segment_save_pp"]
     print("\n" + "=" * 72)
@@ -433,8 +471,13 @@ def run_median(k: int = 5) -> int:
     print(f"  eval pass (median):  {aggregate['eval_pass_rate']['median']*100:.0f}%   ·   "
           f"fairness gap (median): {aggregate['fairness_gap']['median']}")
     print(f"  aggregate: dashboard/demo_aggregate.json   ·   committed manifest: dashboard/manifest.json")
+    # H5: the demo's own definition of done requires a STRICTLY POSITIVE treated-segment
+    # lift — return nonzero when the median is not positive, so CI / a demo script can't read
+    # a flat or negative flywheel as success.
+    ok = sp["median"] > 0
+    print(f"  RESULT: {'the flywheel turned (median lift positive)' if ok else 'did NOT meet the bar (median lift not positive)'}")
     print("=" * 72)
-    return 0
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
