@@ -57,9 +57,9 @@ def main() -> int:
     n_evals = conn.execute("SELECT count(*) FROM evals").fetchone()[0]
     print(f"  graded {m['graded']}/{n_convos}  ·  eval pass rate {m['eval_pass_rate']*100:.0f}%  ·  "
           f"hallucination rate {m['hallucination_rate']*100:.0f}%")
-    print(f"  fairness slice (pass rate by group): "
-          f"{ {g: s['pass_rate'] for g, s in m['fairness_slice'].items()} }  gap={m['fairness_gap']}  "
-          f"flags={m['fairness_flags']}")
+    print(f"  outcome parity slice (observational — pass rate by group): "
+          f"{ {g: s['pass_rate'] for g, s in m['outcome_parity_slice'].items()} }  "
+          f"gap={m['outcome_parity_gap']}  flags={m['fairness_flags']}")
     if n_evals != n_convos:
         failures.append(f"not every conversation graded ({n_evals}/{n_convos})")
 

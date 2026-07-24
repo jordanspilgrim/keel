@@ -156,6 +156,42 @@ def test_resolve_persists_and_is_readable(conn, monkeypatch):
                         (rec["conversation_id"],)).fetchone()[0] == 1
 
 
+def test_customer_decision_is_terminal_and_cannot_be_overwritten(conn, monkeypatch):
+    """A customer decision is TERMINAL (as in the batch path). A later message must NOT
+    re-enter the autonomous agent — otherwise an agent that then routed a cancellation would
+    flip an EARNED save to a durable 'lost' with the accepted offer still on the ledger."""
+    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent(offer="1-month pause"))
+    s = runtime.new_session(1, conn)
+    s["_session_id"] = "sess-TERM"
+    runtime.live_turn(s, "too expensive", conn)
+    runtime.live_turn(s, "yes I accept", conn, decision="accept")
+    assert s["outcome"] == "saved" and offers.accepted(s["rec"]["offers"]) is not None
+
+    called = []
+    def _cancel_agent(input_list, cid, sub, conn, rec, system=runtime.SYSTEM, on_step=None):
+        called.append(1)
+        runtime._route_cancellation(rec)
+        return "cancelling"
+    monkeypatch.setattr(runtime, "_agent_turn", _cancel_agent)
+    runtime.live_turn(s, "actually cancel me", conn)          # re-entry on a closed conversation
+    assert called == []                                       # the agent did NOT run again
+    assert s["outcome"] == "saved"                            # the earned save is intact
+    assert runtime._earned_outcome(s) == "saved"
+    rec = runtime.resolve_session(s, conn, resolution_key="sess-TERM")
+    assert rec["outcome"] == "saved"                          # persisted as the earned save
+
+
+def test_persist_refuses_lost_with_an_accepted_offer(conn):
+    """Mirror invariant: a customer-ACCEPTED offer is an earned save, so a 'lost' record that
+    carries one is contradictory — refuse it loudly rather than deflate the save rate."""
+    with pytest.raises(ValueError):
+        runtime.persist_conversation(conn, {
+            "customer_id": 1, "scenario_id": None,
+            "transcript": [{"role": "user", "content": "x"}],
+            "disposition": {"outcome": "lost"}, "outcome": "lost", "offer_made": "1-month pause",
+            "evidence": {}, "guardrail_events": [], "audit": [], "offer_accepted_on_ledger": True})
+
+
 def test_resolve_cannot_manufacture_a_save(conn, monkeypatch):
     """H2: an operator cannot assert 'saved' on a conversation the customer never accepted —
     the outcome is DERIVED from the ledger. With no accepted offer it resolves 'lost', and a

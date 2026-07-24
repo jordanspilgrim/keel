@@ -948,6 +948,8 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
             "disposition": disp, "outcome": outcome, "offer_made": _offer_made(rec),
             "evidence": _evidence(rec), "guardrail_events": rec["guardrail"],
             "audit": rec["audit"], "cancellation_routed": rec.get("cancellation_routed", False),
+            # ledger truth for the mirror invariant (a 'lost' record cannot carry an accepted offer)
+            "offer_accepted_on_ledger": offers.accepted(rec["offers"]) is not None,
             # so a batch-persisted escalation carries its reason (parity with the live path)
             "escalate_reason": rec.get("escalate_reason")}
 
@@ -960,6 +962,11 @@ def persist_conversation(conn, record: dict) -> int:
     # rather than let a logically impossible record reach the metrics or the judge.
     if record.get("outcome") == "saved" and record.get("cancellation_routed"):
         raise ValueError("invariant violation: a conversation cannot be both saved and cancellation-routed")
+    # The MIRROR invariant: a customer-ACCEPTED offer is an earned save, so a record that
+    # claims 'lost' while an accepted offer sits on the ledger is equally contradictory.
+    # Refuse it loudly rather than silently deflate the save rate with a corrupted record.
+    if record.get("outcome") == "lost" and record.get("offer_accepted_on_ledger"):
+        raise ValueError("invariant violation: a conversation cannot be 'lost' with an accepted offer on the ledger")
     # De-identify before storage/embedding: redact EVERY role defensively (data
     # minimization). User turns are normally redacted at input, but the terminal
     # simulator reply and any assistant turn that echoes account PII must also be
@@ -1094,6 +1101,11 @@ _SAVED_REPLY = ("Wonderful — I've noted that you'd like to accept. Our team wi
                 "account and send a confirmation shortly. Thanks for staying with us!")
 _DECLINED_REPLY = ("Understood — no problem at all, and thanks for hearing me out. I've noted your "
                    "decision; if anything changes down the line, we're here to help.")
+# Server-authored closes for a RE-ENTRY on an already-decided conversation (terminal).
+_SAVED_CLOSED_REPLY = ("You're all set — your acceptance is already recorded and our team will apply it. "
+                       "If you need anything else, a teammate can pick it up from here.")
+_DECLINED_CLOSED_REPLY = ("Your decision is already recorded on this conversation. If you'd like to "
+                          "revisit it, a teammate can pick it up from here.")
 
 _DECISION_SCHEMA = {
     "type": "object",
@@ -1188,6 +1200,19 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
         session["transcript"].append({"role": "assistant", "content": _CANCELLED_REPLY})
         _emit(on_step, "guardrail", "Cancellation already routed — not running the agent", gtype="cancelled")
         return _turn_result(session, _CANCELLED_REPLY, [])
+    # A CUSTOMER DECISION is terminal too — exactly as in the batch path, where the
+    # simulated customer's accept/reject BREAKS the loop. Without this guard a later message
+    # re-entered the autonomous agent on an already-closed conversation, and an agent that
+    # then routed a cancellation would flip an EARNED save to a durable 'lost' while the
+    # accepted offer was still on the ledger (a customer-facing data corruption, and exactly
+    # the live-vs-batch divergence the customer-earned-acceptance work exists to eliminate).
+    if session.get("outcome") in ("saved", "lost"):
+        reply = _SAVED_CLOSED_REPLY if session["outcome"] == "saved" else _DECLINED_CLOSED_REPLY
+        session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
+        session["transcript"].append({"role": "assistant", "content": reply})
+        _emit(on_step, "guardrail", f"Conversation already closed as '{session['outcome']}' — "
+              f"not running the agent", gtype="closed")
+        return _turn_result(session, reply, [])
     # Kill switch: if the program is in safe mode, disclose + route to a human
     # instead of running the agent autonomously.
     if session.get("safe_mode"):
@@ -1308,7 +1333,8 @@ def resolve_session(session: dict, conn, *, outcome: str | None = None,
                   "offer_made": _offer_made(rec), "evidence": _evidence(rec),
                   "guardrail_events": rec["guardrail"], "audit": rec["audit"],
                   "resolution_key": resolution_key,
-                  "cancellation_routed": rec.get("cancellation_routed", False)}
+                  "cancellation_routed": rec.get("cancellation_routed", False),
+                  "offer_accepted_on_ledger": offers.accepted(rec["offers"]) is not None}
         persist_conversation(conn, record)  # transactional durable commit (rolls back on failure)
     except sqlite3.IntegrityError:
         # Lost a race — another resolve for this SAME key committed first. Roll back our

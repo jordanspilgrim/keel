@@ -29,6 +29,9 @@ def conn(tmp_path):
 @pytest.fixture(autouse=True)
 def _no_scope_api(monkeypatch):
     monkeypatch.setattr(guardrails, "check_scope", lambda t: {"in_scope": True, "reason": "t"})
+    # M4: screen_input now calls the injection classifier when the regex misses — stub it,
+    # or a benign in-scope probe makes a REAL billed API call (the offline suite is no-network).
+    monkeypatch.setattr(guardrails, "classify_injection", lambda t: False)
 
 
 def _rec():

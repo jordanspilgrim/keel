@@ -144,6 +144,11 @@ def chat_turn(req: TurnReq):
             raise HTTPException(400, "this conversation has already ended")
         if session.get("outcome") == "escalated":
             raise HTTPException(409, "this conversation was escalated to a human — no more agent turns")
+        if session.get("outcome") in ("saved", "lost"):
+            # A customer decision is TERMINAL (as in the batch path) — re-entering the agent
+            # could otherwise overwrite an earned save with a contradictory outcome.
+            raise HTTPException(409, f"this conversation is already closed as '{session['outcome']}' "
+                                     f"— no more agent turns")
         if session.get("_busy"):
             raise HTTPException(409, "a turn is already in progress")
         session["_busy"] = True
