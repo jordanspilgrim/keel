@@ -9,6 +9,13 @@ swallows exceptions, so nothing surfaced the violation.
 This makes the invariant STRUCTURAL: any outbound socket connect during the offline suite
 fails loudly with the offending address. Tests that legitimately need a socket (the real
 two-thread race test uses loopback) are unaffected — only non-local addresses are blocked.
+
+The tripwire raises a BaseException subclass ON PURPOSE. Production code is full of
+deliberate fail-safe handlers (`except Exception: return "continue"` in the decision
+classifier, `except Exception: pass` around telemetry), and every one of them would
+CATCH a tripwire that derived from Exception — turning a leaked, billed network call
+back into a silent pass, which is exactly the failure this file exists to prevent.
+BaseException passes straight through those handlers, as KeyboardInterrupt does.
 """
 
 from __future__ import annotations
@@ -20,6 +27,10 @@ import pytest
 _ALLOWED_HOSTS = {"127.0.0.1", "::1", "localhost", ""}
 
 
+class OfflineSuiteNetworkCall(BaseException):
+    """Deliberately NOT an Exception — see the module docstring."""
+
+
 @pytest.fixture(autouse=True)
 def _no_outbound_network(monkeypatch):
     real_connect = socket.socket.connect
@@ -27,7 +38,7 @@ def _no_outbound_network(monkeypatch):
     def guarded(self, address, *a, **k):
         host = address[0] if isinstance(address, tuple) else address
         if isinstance(host, str) and host not in _ALLOWED_HOSTS:
-            raise AssertionError(
+            raise OfflineSuiteNetworkCall(
                 f"offline test suite attempted a NETWORK call to {host!r} — the suite must be "
                 f"no-network. Stub the LLM entry point (e.g. guardrails.check_scope, "
                 f"guardrails.classify_injection, llm.structured) in this module's fixture."

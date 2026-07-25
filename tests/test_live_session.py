@@ -29,6 +29,21 @@ def conn(tmp_path):
 # The autouse fixture stubs runtime._grade_and_store; keep a handle on the REAL one so the
 # lock-behavior test can exercise the actual implementation.
 _REAL_GRADE_AND_STORE = runtime._grade_and_store
+# Same idiom for the decision classifier: it is a MODEL call, so the autouse fixture stubs
+# it, but the raw-PII test must exercise the REAL one to see the payload it builds.
+_REAL_CLASSIFY = runtime.classify_customer_decision
+
+
+def _keyword_decision(message: str, offer_summary: str) -> str:
+    """Offline stand-in for the classifier — reads the customer's words the way the real
+    one is asked to. Tests that assert conflict behavior rely on this being a real read of
+    the message, not a constant."""
+    m = message.lower()
+    if any(w in m for w in ("no thanks", "no, ", "cancel me", "just cancel", "not interested", "decline")):
+        return "reject"
+    if any(w in m for w in ("yes", "i accept", "i'll take", "ok", "sounds good", "deal")):
+        return "accept"
+    return "continue"
 
 
 def _stub_grade(conn, conv_id, record, customer_id):
@@ -45,6 +60,7 @@ def _no_api(monkeypatch):
     monkeypatch.setattr(guardrails, "check_scope", lambda t: {"in_scope": True, "reason": "test"})
     monkeypatch.setattr(guardrails, "classify_injection", lambda t: False)  # M4: no real API in tests
     monkeypatch.setattr(runtime, "_grade_and_store", _stub_grade)
+    monkeypatch.setattr(runtime, "classify_customer_decision", _keyword_decision)
     monkeypatch.setattr(runtime, "_disposition",
                         lambda transcript, scenario, rec, outcome, accepted: {
                             "intent": "cancel", "churn_reason": "price", "offer_made": runtime._offer_made(rec),
@@ -299,7 +315,7 @@ def test_classify_customer_decision_fails_safe_to_continue(monkeypatch):
     so a live save can only ever come from an unambiguous accept."""
     monkeypatch.setattr(runtime.llm, "structured",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no api")))
-    assert runtime.classify_customer_decision("yes please!", "20% discount") == "continue"
+    assert _REAL_CLASSIFY("yes please!", "20% discount") == "continue"
 
 
 def test_resolve_is_idempotent(conn, monkeypatch):
@@ -533,9 +549,10 @@ def test_customer_decision_classifier_never_receives_raw_pii(conn, monkeypatch):
     seen = []
     monkeypatch.setattr(runtime.llm, "structured",
                         lambda *a, **k: seen.append(a[2]) or {"decision": "accept"})
+    monkeypatch.setattr(runtime, "classify_customer_decision", _REAL_CLASSIFY)
     monkeypatch.setattr(runtime, "_agent_turn", _fake_agent())
     s = runtime.new_session(1, conn)
-    runtime._present(s["rec"], "1-month pause") if hasattr(runtime, "_present") else _present(s["rec"], "1-month pause")
+    _present(s["rec"], "1-month pause")
     raw = "yes ok — I'm Jane Doe, card 4111 1111 1111 1111, jane.doe@example.com, SSN 123-45-6789"
     runtime.live_turn(s, raw, conn)   # no `decision=` → the CLASSIFIER path
 

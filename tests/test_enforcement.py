@@ -8,13 +8,15 @@ actions transition to a human, and that malformed offers are rejected — the
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import config
 import db
 import llm
 import synth
-from agent import guardrails, policy, runtime
+from agent import guardrails, offers, policy, runtime
 from evals import judge
 
 
@@ -513,3 +515,108 @@ def test_promise_catches_spelled_and_future_bypasses():
     assert guardrails.check_promise("I have applied that discount to your account")["flagged"]
     # alternate completion language
     assert guardrails.check_promise("Your discount is active now")["flagged"]
+
+
+# --- R12-A: live-path policy bypasses ------------------------------------------
+def test_hop_limit_presents_an_authorized_offer_instead_of_escalating(conn, monkeypatch):
+    """E2E#2 ROOT FIX. `for hop in range(MAX_HOPS)` exited with no final reply, so an offer
+    policy had already AUTHORIZED on the last hop was never presented and the conversation
+    escalated. That discards work the customer was entitled to see, and does it
+    ASYMMETRICALLY: an arm whose policy REJECTS a tool spends extra hops retrying, so a
+    paired A/B across such arms measures the hop budget as much as the policy change."""
+    import types
+    call = types.SimpleNamespace(type="function_call", call_id="c1",
+                                 name="get_subscription", arguments="{}")
+    fake = types.SimpleNamespace(output=[call])
+    monkeypatch.setattr(runtime.llm, "client",
+                        lambda: types.SimpleNamespace(
+                            responses=types.SimpleNamespace(create=lambda **k: fake)))
+    finalized = []
+    monkeypatch.setattr(runtime, "_finalize_output",
+                        lambda rec, il, sysmsg, on_step: finalized.append(1) or "presented reply")
+    rec = _rec()
+    offers.authorize(rec["offers"], "pause", {"months": 1})   # authorized, never presented
+
+    reply = runtime._agent_turn([], 1, {"price": 29.0}, conn, rec)
+
+    assert finalized == [1], "the reserved finalize hop must run"
+    assert reply == "presented reply"
+    assert not rec["escalated"], "an authorized-but-unpresented offer must not escalate"
+    assert any(e[0] == "max_hops" and e[1] == "finalized" for e in rec["guardrail"])
+
+
+def test_hop_limit_still_escalates_when_there_is_nothing_to_present(conn, monkeypatch):
+    """The finalize hop is not a blanket escape from the budget: with no pending offer the
+    hop limit is still a real escalation."""
+    import types
+    call = types.SimpleNamespace(type="function_call", call_id="c1",
+                                 name="get_subscription", arguments="{}")
+    fake = types.SimpleNamespace(output=[call])
+    monkeypatch.setattr(runtime.llm, "client",
+                        lambda: types.SimpleNamespace(
+                            responses=types.SimpleNamespace(create=lambda **k: fake)))
+    monkeypatch.setattr(runtime, "_handoff_message", lambda il, sysmsg, rec: "handing off")
+    rec = _rec()
+    runtime._agent_turn([], 1, {"price": 29.0}, conn, rec)
+    assert rec["escalated"]
+    assert any(e[0] == "max_hops" and e[1] == "routed" for e in rec["guardrail"])
+
+
+def test_policy_reads_current_subscription_not_the_session_snapshot(conn, monkeypatch):
+    """RT2: `sub` is captured once at session start. A save granted mid-session left the
+    cooldown invisible to policy, so the same customer could be offered again inside the
+    window. Policy is only as authoritative as the state it is handed."""
+    stale = dict(conn.execute("SELECT * FROM subscriptions WHERE customer_id=1").fetchone())
+    stale["last_save_offer_days"] = None                       # snapshot: no cooldown
+    conn.execute("UPDATE subscriptions SET last_save_offer_days=0 WHERE customer_id=1")
+    conn.commit()                                              # reality: cooldown active
+
+    rec = _rec()
+    out = runtime._resolve_call("offer_discount", {"pct": 10}, 1, stale, conn, rec)
+    assert out["status"] == "rejected" and "days ago" in out["reason"]
+    assert any(e[0] == "cooldown" for e in rec["guardrail"])
+
+
+def test_ceiling_fallback_never_upgrades_the_offer(conn):
+    """RT12: the fallback used offer_of_kind(), the most RECENT live offer. With 10% and a
+    policy-capped 20% both authorized, two failed contracts handed the customer 20% — a
+    failure path worth MORE than the happy path. It must concede the least."""
+    rec = _rec()
+    offers.authorize(rec["offers"], "discount", {"pct": 10})
+    offers.authorize(rec["offers"], "discount", {"pct": 20})
+    text = runtime._ceiling_fallback(rec, "discount")
+    assert "10%" in text and "20%" not in text
+    assert offers.presented(rec["offers"]).presented_terms == {"pct": 10}
+
+
+def test_contract_cancellation_is_disposed_by_policy(conn, monkeypatch):
+    """RT3: process_cancellation routed the single most consequential action in the product
+    without ever calling policy.authorize — the one authority the repo claims disposes every
+    action. The decision must be RECORDED so it reaches the eval envelope."""
+    rec = _rec()
+    # an offer WAS attempted but policy rejected it, so conceding is legitimate here
+    rec["policy_decisions"] = [{"tool": "offer_pause", "action": "rejected", "reason": "policy"}]
+    ok, reason = runtime._validate_contract(
+        {"acknowledgement": "letting_go", "process_cancellation": True,
+         "offer": {"kind": "none"}, "account_facts": []}, rec)
+    assert ok, reason
+    pds = [p for p in rec["policy_decisions"] if p["tool"] == "cancel_subscription"]
+    assert len(pds) == 1 and pds[0]["action"] == "needs_human"
+    assert any(a[1] == "cancel_subscription:needs_human" for a in rec["audit"])
+
+
+def test_tool_results_are_redacted_before_reaching_the_model(conn):
+    """RT19: tool results were the one input channel into the model that was never screened.
+    Whatever a backing row held went to the API verbatim and into the grounded-fact corpus,
+    while the identical string typed by the customer was redacted."""
+    conn.execute("UPDATE customers SET name='Jane Doe' WHERE id=1")
+    conn.commit()
+    assert guardrails.redact_tool_result(
+        {"note": "card 4111 1111 1111 1111", "plan": "Pro", "n": 3}
+    ) == {"note": "card [REDACTED_CARD]", "plan": "Pro", "n": 3}
+    # a bare name has no cue for the pattern redactor, but on structured data the KEY is the cue
+    assert guardrails.redact_tool_result({"name": "Jane Doe"}) == {"name": "[REDACTED_NAME]"}
+
+    rec = _rec()
+    out = runtime._resolve_call("get_customer", {}, 1, {"price": 29.0}, conn, rec)
+    assert "Jane Doe" not in json.dumps(out)

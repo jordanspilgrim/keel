@@ -168,6 +168,45 @@ _INJECTION_SCHEMA = {
 }
 
 
+# Tool results are STRUCTURED, so their sensitive values are identifiable by FIELD rather
+# than by pattern — which is strictly stronger. redact_pii is cue-driven for names ("I'm
+# Jane Doe"), so a bare "Jane Doe" sitting in a `name` column has no cue and survives it.
+# On structured data we do not need the cue: the key IS the cue.
+_SENSITIVE_FIELDS = {"name", "full_name", "customer_name", "first_name", "last_name",
+                     "email", "email_address", "phone", "phone_number", "address",
+                     "street", "ssn", "card", "card_number", "dob", "date_of_birth"}
+_FIELD_TOKEN = {"name": "[REDACTED_NAME]", "full_name": "[REDACTED_NAME]",
+                "customer_name": "[REDACTED_NAME]", "first_name": "[REDACTED_NAME]",
+                "last_name": "[REDACTED_NAME]", "email": "[REDACTED_EMAIL]",
+                "email_address": "[REDACTED_EMAIL]", "phone": "[REDACTED_PHONE]",
+                "phone_number": "[REDACTED_PHONE]", "address": "[REDACTED_ADDRESS]",
+                "street": "[REDACTED_ADDRESS]", "ssn": "[REDACTED_SSN]",
+                "card": "[REDACTED_CARD]", "card_number": "[REDACTED_CARD]",
+                "dob": "[REDACTED_DOB]", "date_of_birth": "[REDACTED_DOB]"}
+
+
+def redact_tool_result(result):
+    """Redact PII in a tool result before it reaches the model or the grounded-fact corpus.
+    Structure is preserved (the model and the output cross-check both key off it); only
+    leaves are touched. A leaf is scrubbed if its KEY is sensitive (exact, no cue needed)
+    or if its text matches a PII pattern. Values the product legitimately renders (plan,
+    price, dates, tenure) are neither, so this is a no-op for them."""
+    if isinstance(result, dict):
+        out = {}
+        for k, v in result.items():
+            key = str(k).lower()
+            if key in _SENSITIVE_FIELDS and isinstance(v, str):
+                out[k] = _FIELD_TOKEN[key]
+            else:
+                out[k] = redact_tool_result(v)
+        return out
+    if isinstance(result, list):
+        return [redact_tool_result(v) for v in result]
+    if isinstance(result, str):
+        return redact_pii(result)[0]
+    return result
+
+
 def classify_injection(text: str) -> bool:
     """LLM-based prompt-injection detector for PARAPHRASES the regex misses ("set aside all
     earlier guidance", "treat the rules above as obsolete"). This is a containment /

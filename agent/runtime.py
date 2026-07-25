@@ -253,12 +253,24 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, *
     result is recorded as a grounded fact (with its call id); an authorized offer
     becomes a ledger entry. Writes audit_log rows."""
     if name in tools.READ_TOOLS:
-        result = tools.read(conn, name, cid)
+        # Tool results are an INPUT CHANNEL into the model and into durable stores, and were
+        # the only one not screened: whatever a backing row happens to hold (a card number in
+        # a free-text note, an SSN in a support field) went to the API verbatim and into the
+        # grounded-fact corpus, while the identical string typed by the customer was redacted.
+        # Redact here so every path into the model gets the same treatment.
+        result = guardrails.redact_tool_result(tools.read(conn, name, cid))
         rec["tool_facts"].append({"tool": name, "call_id": call_id, "result": result})
         _emit(on_step, "tool", f"{name} → {_compact(result)}")
         return result
 
-    verdict = policy.authorize(name, args, sub)
+    # Re-read the subscription from the DB before disposing an action. `sub` is captured
+    # once at session start (new_session / simulate_conversation) and never refreshed, so a
+    # long-running session disposed save offers against a STALE snapshot — most importantly
+    # `last_save_offer_days`, which is what the cooldown gate reads. A save granted during
+    # the session (or by another channel) left the cooldown invisible here, so the same
+    # customer could be offered again inside the cooldown window. Policy is only as
+    # authoritative as the state it is handed.
+    verdict = policy.authorize(name, args, _current_sub(conn, cid, sub))
     rec["audit"].append(("policy", f"{name}:{verdict['action']}", verdict["reason"]))
     # Keep the ADJUSTED args on the persisted decision so the eval envelope is
     # lossless (the batch judge must see 10% vs 20%, not just tool:action).
@@ -550,6 +562,19 @@ def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
             p.get("tool") in ("offer_discount", "offer_pause") for p in rec.get("policy_decisions", []))
         if not attempted:
             return False, "attempt a retention offer before conceding a cancellation — you haven't tried one yet"
+        # 2d) cancel_subscription is a CONSEQUENTIAL tool: config.CONSEQUENTIAL_TOOLS lists it
+        #     and policy.authorize returns needs_human for it. Routing a cancellation from
+        #     the contract flag alone let the single most consequential action in the product
+        #     skip the policy layer entirely — the one authority the repo claims disposes
+        #     every action. Dispose it here so the decision is RECORDED (it lands in
+        #     rec["policy_decisions"], and so in the eval envelope the judge grades) and so
+        #     an operator who tightens the policy actually binds this path.
+        pv = policy.authorize("cancel_subscription", {}, rec.get("_sub") or {})
+        rec.setdefault("policy_decisions", []).append(
+            {"tool": "cancel_subscription", "action": pv["action"], "reason": pv["reason"]})
+        rec["audit"].append(("policy", f"cancel_subscription:{pv['action']}", pv["reason"]))
+        if pv["allowed"]:
+            return False, "cancel_subscription must route to a human; it is never auto-executed"
     if kind in ("discount", "pause"):
         terms = {"pct": offer.get("pct")} if kind == "discount" else {"months": offer.get("months")}
         if (kind == "discount" and offer.get("pct") is None) or (kind == "pause" and offer.get("months") is None):
@@ -644,6 +669,17 @@ def _render_reply(contract: dict, rec: dict) -> str:
     return " ".join(p for p in parts if p)
 
 
+def _current_sub(conn, cid: int, fallback: dict) -> dict:
+    """The customer's subscription as it is RIGHT NOW. Policy decisions must not be made
+    against a snapshot taken at session start; re-read and fall back to the snapshot only
+    if the row has gone (never fail a turn on a read)."""
+    try:
+        cur = tools.get_subscription(conn, cid)
+        return cur if cur else fallback
+    except Exception:
+        return fallback
+
+
 def _route_cancellation(rec: dict) -> None:
     """A validated cancellation is a REAL, recorded action — not just a sentence. It
     writes a durable audit entry and flags the session terminal (so no further
@@ -692,7 +728,7 @@ def _apply_contract(contract: dict, rec: dict) -> None:
     presented with the exact offered terms (so outcome/economics use presented, not
     authorized, terms), and route a cancellation as a real terminal action."""
     if contract.get("process_cancellation"):
-        _route_cancellation(rec)
+        _route_cancellation(rec)  # policy-gated by _validate_contract before we get here
     offer = contract.get("offer") or {"kind": "none"}
     kind = offer.get("kind")
     if kind not in ("discount", "pause"):
@@ -759,7 +795,13 @@ def _ceiling_fallback(rec: dict, kind: str | None) -> str | None:
     and only a kind the model actually tried to present is a valid fallback target."""
     if kind is None:
         return None
-    off = offers.offer_of_kind(rec["offers"], kind)
+    # Pick the most CONSERVATIVE authorized offer of this kind, not the latest. This runs
+    # only after the model twice failed to produce a valid contract (or moderation was
+    # degraded), and offer_of_kind() returns the most RECENT live offer — so if the model
+    # proposed 10% and later proposed 50% (capped by policy to the 20% ceiling), a failure
+    # path would hand the customer 20%. A fallback must never deliver more value than the
+    # agent could deliver on the happy path: on a failure we concede the LEAST.
+    off = offers.cheapest_authorized_of_kind(rec["offers"], kind)
     if off is None:
         return None
     offers.present(rec["offers"], off, off.authorized_terms)
@@ -860,8 +902,23 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
             msg = _handoff_message(input_list, system, rec)
             input_list.append({"role": "assistant", "content": msg})
             return msg
-    # MAX_HOPS exhausted without a final reply — treat it as a real escalation
-    # (log it, transition state, hand off warmly), not a silent truncation.
+    # MAX_HOPS exhausted without a final reply. Do NOT escalate yet: the model may have
+    # already had an offer AUTHORIZED by policy and simply run out of hops before it could
+    # present it. Escalating here silently discards work the customer was entitled to see,
+    # and it does so ASYMMETRICALLY — an arm whose policy rejects a tool spends extra hops
+    # retrying, so a paired A/B comparing such arms measures the hop budget as much as the
+    # policy change. Spend one final, TOOL-FREE hop on the output contract instead; it is
+    # the same validated, server-rendered path as a normal reply and carries its own
+    # ceiling / present-before-abandon fallbacks. Only escalate if that also fails.
+    if offers.unpresented_candidates(rec["offers"]):
+        _emit(on_step, "output", "Hop limit reached with an authorized offer pending — presenting it")
+        rec["guardrail"].append(("max_hops", "finalized", f"exceeded {MAX_HOPS} tool hops; "
+                                 f"spent the reserved finalize hop presenting the authorized offer"))
+        text = _finalize_output(rec, input_list, system, on_step)
+        input_list.append({"role": "assistant", "content": text})
+        if not rec["escalated"]:
+            return text
+        return text
     _set_escalation(rec, "hop_limit")  # structured code (H4)
     rec["guardrail"].append(("max_hops", "routed", f"exceeded {MAX_HOPS} tool hops; handing off"))
     _emit(on_step, "output", "Hop limit reached — handing off to a human teammate")
@@ -1299,8 +1356,21 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
     # close, so a 'saved' can only come from a real acceptance — never an operator button.
     presented = offers.presented(rec["offers"])
     if presented is not None:
-        d = decision if decision in ("accept", "reject", "continue") \
-            else classify_customer_decision(shown, offers.human_terms(presented))
+        # H2 says a live save is EARNED from the customer's words, never asserted by an
+        # operator. A caller-supplied `decision` was previously taken on trust, so a POST
+        # with decision="accept" and a body of "no thanks, cancel me" durably persisted a
+        # 'saved' whose own transcript contradicted it. Classify the message regardless and
+        # let the CUSTOMER'S WORDS win any conflict; the button is a hint, not authority.
+        classified = classify_customer_decision(shown, offers.human_terms(presented))
+        d = classified
+        if decision in ("accept", "reject", "continue") and decision != classified:
+            if classified == "continue":
+                d = decision  # the words are merely ambiguous; the explicit click stands
+            else:
+                rec["guardrail"].append(("decision_conflict", "used_customer_words",
+                                         f"caller asserted '{decision}'; the message reads '{classified}'"))
+                _emit(on_step, "guardrail", f"Asserted decision '{decision}' contradicted the "
+                      f"customer's message — using the message", gtype="decision_conflict")
         if d in ("accept", "reject"):
             session["transcript"].append({"role": "user", "content": shown})
             outcome, _acc = _apply_customer_decision(rec, d)

@@ -44,6 +44,12 @@ def client(tmp_path, monkeypatch):
                             "intent": "cancel", "churn_reason": "price", "offer_made": runtime._offer_made(rec),
                             "offer_accepted": accepted, "outcome": outcome, "confidence": 0.8})
     monkeypatch.setattr(runtime, "_grade_and_store", lambda *a: None)  # no judge API in tests
+    # The customer-decision classifier is a MODEL call and now runs on EVERY decision turn
+    # (an explicit `decision` no longer bypasses it — the customer's words outrank the
+    # button), so it must be stubbed here or the offline suite makes a real, billed call.
+    monkeypatch.setattr(runtime, "classify_customer_decision",
+                        lambda message, offer_summary: "accept" if any(
+                            w in message.lower() for w in ("yes", "accept", "i'll take", "ok")) else "continue")
 
     import server
     return TestClient(server.app)

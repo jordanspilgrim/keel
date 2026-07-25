@@ -70,6 +70,21 @@ def offer_of_kind(offers: list[Offer], kind: str) -> Offer | None:
     return None
 
 
+def cheapest_authorized_of_kind(offers: list[Offer], kind: str) -> Offer | None:
+    """The LEAST valuable still-live offer of a kind (smallest discount pct / shortest
+    pause). Used only by the output-failure fallback: when the agent could not produce a
+    valid contract we still honour something it was authorized to give, but we concede the
+    minimum rather than whatever happened to be authorized most recently — a failure path
+    must never be worth MORE to the customer than the happy path."""
+    live = [o for o in offers if o.kind == kind and o.state in _LIVE_STATES]
+    if not live:
+        return None
+    def _value(o: Offer) -> float:
+        t = o.authorized_terms or {}
+        return float(t.get("pct", t.get("months", 0)) or 0)
+    return min(live, key=_value)
+
+
 def rejected_of_kind(offers: list[Offer], kind: str) -> Offer | None:
     """A REJECTED offer of a kind, if the customer has already declined one — so the
     agent doesn't loop by re-offering the same thing they just turned down."""
