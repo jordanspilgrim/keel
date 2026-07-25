@@ -871,13 +871,20 @@ def _agent_turn(input_list: list, cid: int, sub: dict, conn, rec: dict, system: 
 
 
 def _advance(text: str, transcript: list, input_list: list, cid: int, sub: dict, conn, rec: dict,
-             *, system: str = SYSTEM, on_step=None) -> str:
+             *, system: str = SYSTEM, on_step=None, screened: dict | None = None) -> str:
     """One agent response to one user message — the SHARED core of both the batch
     and live paths. Screens the input (block / bound / allow), then either
     short-circuits with a safe reply (model not called) or runs the agent turn.
     A blocked jailbreak is shown in the transcript but never enters the model
-    input. Returns the assistant reply."""
-    dec = _screen_input(text, rec, classify_scope=True, on_step=on_step)
+    input. Returns the assistant reply.
+
+    `screened` lets a caller that has ALREADY run `_screen_input` on this exact text pass
+    the decision in, so the turn is screened exactly ONCE. live_turn screens at the top of
+    the turn (before its branch dispatch) so that every live branch — not just this one —
+    is covered; re-screening here would double-count guardrail events and re-charge the
+    scope classifier. The batch path passes nothing and screens here, as before."""
+    dec = screened if screened is not None else \
+        _screen_input(text, rec, classify_scope=True, on_step=on_step)
     transcript.append({"role": "user", "content": dec["shown"]})
     if dec["action"] == "block":
         reply = dec["reply"]  # NOT added to input_list — the injection never reaches the model
@@ -1216,25 +1223,36 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
     buttons) and applied to the ledger BEFORE the agent replies — so a live 'saved' is earned
     from the customer, exactly as in the batch path (H2). `decision` bypasses the classifier."""
     rec = session["rec"]
+    before = len(rec["guardrail"])
+    # SCREEN FIRST, ALWAYS — before any branch dispatch. Every live branch below returns
+    # without reaching _advance, so screening inside _advance covered only the last one:
+    # a jailbreak or PII sent on a terminal, safe-mode, or customer-decision turn was
+    # neither blocked nor recorded, and the raw text was handed to the decision classifier
+    # (i.e. to the model) while only the transcript copy was redacted. Screening here makes
+    # the guarantee the docs state — no live turn reaches a model, or a durable store,
+    # unscreened — structurally true rather than true of one path. `shown` is the redacted
+    # text and is the ONLY form of the customer's message used from here down.
+    dec = _screen_input(user_text, rec, classify_scope=True, on_step=on_step)
+    shown = dec["shown"]
     # Escalation is a TERMINAL state: once the conversation has been handed to a
     # human, the autonomous agent does not run again on this session (mirrors the
     # batch path, which stops on escalation). No more model turns after hand-off.
     skey = session.get("_session_id")
     if session.get("outcome") == "escalated" or rec.get("escalated"):
         _queue_escalation_live(conn, skey, rec.get("escalate_reason"))  # self-heal a failed prior write
-        session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
+        session["transcript"].append({"role": "user", "content": shown})
         session["transcript"].append({"role": "assistant", "content": _ESCALATED_REPLY})
         _emit(on_step, "guardrail", "Session already escalated — not running the agent", gtype="escalated")
-        return _turn_result(session, _ESCALATED_REPLY, [])
+        return _turn_result(session, _ESCALATED_REPLY, rec["guardrail"][before:])
     # A routed cancellation is TERMINAL too — the agent has recorded the action, so a
     # later message does NOT silently re-enter the autonomous agent.
     if session.get("outcome") == "cancelled" or rec.get("cancellation_routed"):
         _queue_cancellation_live(conn, skey)  # idempotent self-heal (a prior write may have failed)
         session["outcome"] = "cancelled"
-        session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
+        session["transcript"].append({"role": "user", "content": shown})
         session["transcript"].append({"role": "assistant", "content": _CANCELLED_REPLY})
         _emit(on_step, "guardrail", "Cancellation already routed — not running the agent", gtype="cancelled")
-        return _turn_result(session, _CANCELLED_REPLY, [])
+        return _turn_result(session, _CANCELLED_REPLY, rec["guardrail"][before:])
     # A CUSTOMER DECISION is terminal too — exactly as in the batch path, where the
     # simulated customer's accept/reject BREAKS the loop. Without this guard a later message
     # re-entered the autonomous agent on an already-closed conversation, and an agent that
@@ -1243,16 +1261,16 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
     # the live-vs-batch divergence the customer-earned-acceptance work exists to eliminate).
     if session.get("outcome") in ("saved", "lost"):
         reply = _SAVED_CLOSED_REPLY if session["outcome"] == "saved" else _DECLINED_CLOSED_REPLY
-        session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
+        session["transcript"].append({"role": "user", "content": shown})
         session["transcript"].append({"role": "assistant", "content": reply})
         _emit(on_step, "guardrail", f"Conversation already closed as '{session['outcome']}' — "
               f"not running the agent", gtype="closed")
-        return _turn_result(session, reply, [])
+        return _turn_result(session, reply, rec["guardrail"][before:])
     # Kill switch: if the program is in safe mode, disclose + route to a human
     # instead of running the agent autonomously.
     if session.get("safe_mode"):
         _emit(on_step, "guardrail", "Safe mode active — routing to a human teammate", gtype="safe_mode")
-        session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
+        session["transcript"].append({"role": "user", "content": shown})
         reply = ("Thanks for reaching out. To make sure you get the best help right now, I'm "
                  "connecting you with a human teammate who can take it from here.")
         session["transcript"].append({"role": "assistant", "content": reply})
@@ -1264,7 +1282,16 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
         session["outcome"] = "escalated"
         _emit(on_step, "reply", reply)
         _finalize_if_terminal(session, conn)  # H3: persist + grade the hand-off now
-        return _turn_result(session, reply, [ev])
+        return _turn_result(session, reply, rec["guardrail"][before:])
+    # A recognized jailbreak/injection is BLOCKED here, before the decision classifier and
+    # before the agent — the input never reaches a model on any live path. (Terminal-state
+    # branches above still win, since their reply is a fact about the conversation, not a
+    # response to this message.)
+    if dec["action"] == "block":
+        session["transcript"].append({"role": "user", "content": shown})
+        session["transcript"].append({"role": "assistant", "content": dec["reply"]})
+        _emit(on_step, "reply", dec["reply"])
+        return _turn_result(session, dec["reply"], rec["guardrail"][before:])
     # H2 — CUSTOMER-EARNED ACCEPTANCE. If a retention offer is on the table, classify the
     # customer's reply (or use an explicit button `decision`) and apply it to the ledger
     # BEFORE the agent runs. accept/reject are TERMINAL customer decisions (as in the batch
@@ -1273,9 +1300,9 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
     presented = offers.presented(rec["offers"])
     if presented is not None:
         d = decision if decision in ("accept", "reject", "continue") \
-            else classify_customer_decision(user_text, offers.human_terms(presented))
+            else classify_customer_decision(shown, offers.human_terms(presented))
         if d in ("accept", "reject"):
-            session["transcript"].append({"role": "user", "content": guardrails.redact_pii(user_text)[0]})
+            session["transcript"].append({"role": "user", "content": shown})
             outcome, _acc = _apply_customer_decision(rec, d)
             session["outcome"] = outcome  # 'saved' or 'lost' — a customer-EARNED terminal
             reply = _SAVED_REPLY if outcome == "saved" else _DECLINED_REPLY
@@ -1284,10 +1311,10 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
             # A customer decision is terminal — finalize it NOW (persist + grade + queue the
             # fulfillment obligation) rather than waiting for a /resolve a closed tab never sends.
             _finalize_if_terminal(session, conn)
-            return _turn_result(session, reply, [])
-    before = len(rec["guardrail"])
+            return _turn_result(session, reply, rec["guardrail"][before:])
     reply = _advance(user_text, session["transcript"], session["input_list"],
-                     session["customer_id"], session["sub"], conn, rec, on_step=on_step)
+                     session["customer_id"], session["sub"], conn, rec, on_step=on_step,
+                     screened=dec)
     if rec["escalated"]:
         # Durably enqueue the hand-off NOW (keyed by session id), before the customer
         # receives the promise — parallel to the cancellation path; survives no /resolve.
