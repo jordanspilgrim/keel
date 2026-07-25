@@ -15,6 +15,7 @@ import sys
 
 import batch
 import db
+import run_demo
 import synth
 from agent import runtime
 from evals import agent_fairness, judge, run_evals
@@ -33,10 +34,24 @@ def _fairness_bases(conn, n: int) -> list[dict]:
 
 
 def _run_agent_for_fairness(member: dict, conn) -> dict:
-    """Run ONE real agent turn for a fairness pair member and report the treatment it got."""
+    """Run ONE real agent turn for a fairness pair member and report the treatment it got.
+
+    Both members of a pair share a customer_id, and _GROUP_NAMES is insertion-ordered so
+    group_a always ran FIRST — against the live DB. If group_a's turn was terminal with an
+    offer presented, persist_conversation writes `last_save_offer_days = 0` and
+    policy._cooldown_active then denies group_b any offer for 90 days. The harness would
+    have attributed to the demographic proxy a gap it created itself, and the direction is
+    always the same because the order always is. run_demo already solved exactly this class
+    (H3, _snapshot_world / _restore_world, with last_save_offer_days in _SNAPSHOT_COLS); this
+    module simply had not adopted it. Restore a byte-identical world around every member so
+    no member can influence the next."""
     from agent import offers
-    session = runtime.new_session(member["customer_id"], conn)
-    runtime.live_turn(session, member["opening_message"], conn)
+    snap = run_demo._snapshot_world(conn, [member["customer_id"]])
+    try:
+        session = runtime.new_session(member["customer_id"], conn)
+        runtime.live_turn(session, member["opening_message"], conn)
+    finally:
+        run_demo._restore_world(conn, snap)
     rec = session["rec"]
     off = offers.presented(rec["offers"]) or offers.accepted(rec["offers"])
     return {"offer_kind": off.kind if off else None,
@@ -130,8 +145,19 @@ def main() -> int:
                                    agent_fairness.MIN_PAIRS),
         lambda member: _run_agent_for_fairness(member, conn)))
     print(f"  per-group: { {g: (v['n'], v['offer_rate']) for g, v in fr['per_group'].items()} }")
-    print(f"  offer-rate gap {fr.get('offer_rate_gap')} CI95 {fr.get('offer_rate_gap_ci95')} — "
-          f"{fr.get('interpretation')}")
+    print(f"  offer-rate gap {fr.get('offer_rate_gap')} CI95 {fr.get('offer_rate_gap_ci95')}"
+          f"{' [degenerate: rates identical]' if fr.get('degenerate_offer_rate_ci') else ''}")
+    # Print ALL FOUR gaps. Only the offer rate was ever shown, so an agent with identical
+    # offer rates but very different offered TERMS looked clean on this surface.
+    print(f"  offered-value gap {fr.get('mean_offer_value_gap')} · "
+          f"escalation-rate gap {fr.get('escalation_rate_gap')} · "
+          f"save-rate gap {fr.get('save_rate_gap')}")
+    sym = agent_fairness.proxy_symmetry()
+    print(f"  proxy symmetry: {sym['redaction_rate']} — {sym['note']}")
+    print(f"  → {fr.get('interpretation')}")
+    if not sym["symmetric"]:
+        failures.append("fairness proxy is redacted asymmetrically across groups — "
+                        "the measured gap is an artifact, not agent behavior")
     if fr.get("treatment_difference_detected"):
         failures.append(f"agent-treatment fairness: differential treatment detected "
                         f"(offer-rate gap {fr['offer_rate_gap']}, CI {fr['offer_rate_gap_ci95']})")

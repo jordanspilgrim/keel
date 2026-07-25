@@ -98,6 +98,30 @@ cheryl hannah jacqueline martha gloria teresa ann sara madison frances kathryn j
 abigail alice julia judy sophia grace denise amber danielle marilyn beverly charlotte natalie
 """.split())
 
+# Titlecase words that commonly follow "I'm ..." / "this is ..." WITHOUT being a name.
+# A denylist of non-names rather than an allowlist of names — see _sub_weak_single.
+_NOT_A_NAME_AFTER_CUE = frozenset("""
+monday tuesday wednesday thursday friday saturday sunday
+january february march april may june july august september october november december
+american british canadian australian irish german french italian spanish indian chinese
+japanese korean mexican brazilian nigerian kenyan russian polish dutch swedish
+sorry sure fine okay yes no still just really very quite done ready
+happy upset angry disappointed frustrated annoyed unhappy dissatisfied satisfied pleased
+confused concerned worried furious livid irritated tired sick fed unable unwilling
+considering thinking looking leaving cancelling canceling switching moving paying
+curious interested serious afraid glad sad mad broke busy new old back out in
+"""
+.split())
+
+# NOTE ON THE FAILURE DIRECTION. This denylist is not exhaustive and cannot be: it is a
+# pattern-based best-effort, as the module has always said. What changed is WHICH WAY it
+# errs. Gating on a name allowlist meant an unlisted name leaked -- and the list was
+# Anglo-heavy, so it leaked unequally by ethnicity. Gating on a non-name denylist means an
+# unlisted ADJECTIVE gets redacted: "I'm Disappointed" becomes "I'm [REDACTED_NAME]". That
+# costs a little transcript fidelity for the labeler and the judge. For a privacy control,
+# over-redacting a mood is strictly better than under-redacting somebody's name, and far
+# better than doing either one unevenly across ethnic groups.
+
 _WEAK_CUE_SINGLE_NAME = re.compile(
     r"\b(?i:(i am|i'm|this is))\s+([A-Z][a-z]+)\b(?!\s+[A-Z][a-z]+)")  # exactly ONE Titlecase word
 
@@ -113,7 +137,18 @@ def redact_pii(text: str) -> tuple[str, list[str]]:
 
     # Weak-cue single name, gated on the first-name lexicon (see note above).
     def _sub_weak_single(m: re.Match) -> str:
-        if m.group(2).lower() in _COMMON_FIRST_NAMES:
+        # Gate on a DENYLIST of non-names, not an allowlist of names. Gating on
+        # _COMMON_FIRST_NAMES made the redaction's coverage depend on whether a name
+        # appears in a US-census top-names list, which is overwhelmingly Anglo: measured,
+        # "this is Emily" and "this is Sarah" were redacted while "this is Jamal",
+        # "this is Aisha", "this is Darnell", "this is Latoya" and "this is Kenya" were
+        # not. A privacy control that protects some ethnic groups and not others is a
+        # disparate-impact bug in the control itself, and no amount of adding names fixes
+        # it -- any name allowlist encodes whoever wrote it. After an explicit
+        # self-identification cue, a single Titlecase word IS a name declaration whatever
+        # the name is; the only things to exclude are Titlecase words that are commonly
+        # NOT names in that position, which is a small, culturally neutral set.
+        if m.group(2).lower() not in _NOT_A_NAME_AFTER_CUE:
             types.add("name")
             return f"{m.group(1)} [REDACTED_NAME]"
         return m.group(0)

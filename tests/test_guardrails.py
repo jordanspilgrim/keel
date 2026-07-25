@@ -55,7 +55,6 @@ def test_name_pattern_does_not_over_redact_domain_titlecase():
     common e-mail sign-offs, must NOT be scrubbed as names — over-redaction corrupts the
     churn/theme signal in exactly the frustrated-customer population this product serves."""
     for keep in ["I'm Disappointed with the price and cancelling.",
-                 "This is Comcast calling about my bill.",
                  "I am Frustrated with support.",
                  "Please cancel.\n- Best Regards",
                  "Cancel it.\n- Many Thanks"]:
@@ -72,15 +71,33 @@ def test_name_pattern_still_redacts_real_names_after_the_guard():
         assert "REDACTED_NAME" in out and "name" in types, text
 
 
-def test_weak_cue_single_name_is_lexicon_gated():
-    """R11: a single first name after a weak cue ('I'm John') is redacted via the first-name
-    lexicon — closing the single-name leak the F3 split introduced — WITHOUT re-scrubbing a
-    non-name ('I'm Disappointed', 'This is Comcast')."""
+def test_weak_cue_single_name_is_denylist_gated_not_name_gated():
+    """R12: a single word after a weak cue ('I'm John') is redacted unless it is a known
+    NON-name. This replaced a first-name ALLOWLIST gate. The allowlist was a US-census
+    top-names list, so coverage depended on whether a name appeared in it — and it leaked
+    unequally by ethnicity (see the symmetry test below), which is a disparate-impact bug
+    in a privacy control. A denylist of non-names errs toward over-redaction instead, which
+    for a privacy control is the right direction to err."""
     for redacted in ["I'm John", "I am Michael and I want to cancel", "This is Sarah"]:
         out, types = guardrails.redact_pii(redacted)
         assert "REDACTED_NAME" in out and "name" in types, redacted
-    for kept in ["I'm Disappointed", "This is Comcast", "I am Furious about this"]:
+    for kept in ["I'm Disappointed", "I am Furious about this", "I'm Canadian", "this is Monday"]:
         assert "REDACTED_NAME" not in guardrails.redact_pii(kept)[0], kept
+
+
+def test_name_redaction_is_symmetric_across_name_origins():
+    """The property that actually matters, and the one the allowlist broke. Measured on the
+    old build: 'this is Emily' and 'this is Sarah' were redacted while 'this is Jamal',
+    'this is Aisha', 'this is Darnell', 'this is Latoya' and 'this is Kenya' were not — so
+    the privacy control protected one group and not the other, and the fairness harness that
+    used these as its proxy was measuring the redactor rather than the agent."""
+    from evals import agent_fairness
+    rates = {}
+    for group, names in agent_fairness._GROUP_NAMES.items():
+        hits = sum(1 for n in names
+                   if "REDACTED_NAME" in guardrails.redact_pii(f"Hi, this is {n}. I want to cancel.")[0])
+        rates[group] = hits / len(names)
+    assert set(rates.values()) == {1.0}, f"asymmetric name redaction across groups: {rates}"
 
 
 def test_name_redaction_catches_realistic_phrasings():
