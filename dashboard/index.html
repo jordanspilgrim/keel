@@ -69,6 +69,7 @@
   .tip .row{display:flex;justify-content:space-between;gap:14px} .tip .mut{color:var(--text-secondary)}
   .foot{color:var(--muted);font-size:11.5px;margin-top:22px;text-align:center}
   .src{display:inline-block;font-size:11px;padding:2px 8px;border-radius:6px;background:var(--seq-track);color:var(--series-1);font-weight:600}
+  .pop{font-weight:500;font-size:11.5px;color:var(--muted);letter-spacing:.01em}
 </style>
 </head>
 <body>
@@ -83,10 +84,12 @@
 
   <section class="kpis" aria-label="Key metrics">
     <div class="tile hero">
-      <div class="lbl">Margin-adjusted save rate <span title="North star: saves net of margin given away">ⓘ</span></div>
+      <div class="lbl">Margin-adjusted save rate <span class="pop" id="k_madj_pop">—</span>
+        <span title="North star: saves net of margin given away">ⓘ</span></div>
       <div class="val" id="k_madj">—</div><div class="delta" id="k_madj_d"></div>
     </div>
-    <div class="tile"><div class="lbl">Save rate</div><div class="val" id="k_save">—</div><div class="delta" id="k_save_d"></div></div>
+    <div class="tile"><div class="lbl">Save rate <span class="pop" id="k_save_pop">—</span></div>
+      <div class="val" id="k_save">—</div><div class="delta" id="k_save_d"></div></div>
     <div class="tile"><div class="lbl">Eval pass rate</div><div class="val" id="k_eval">—</div><div class="delta flat" id="k_eval_cov">—</div></div>
     <div class="tile"><div class="lbl">Guardrail catch rate</div><div class="val" id="k_guard">—</div><div class="delta flat">red-team</div></div>
     <div class="tile"><div class="lbl">AI disclosure coverage</div><div class="val" id="k_comp">—</div><div class="delta good">● transcript-verified</div></div>
@@ -95,7 +98,8 @@
   <div class="grid">
     <div class="card">
       <h2>Save rate vs. margin-adjusted — before &amp; after the act</h2>
-      <p class="cap">The flywheel turning: an analytics signal was acted on; this is the measured lift.</p>
+      <p class="cap">The flywheel turning: an analytics signal was acted on; this is the measured lift.
+        <span class="pop" id="trendPop">—</span></p>
       <div class="legend">
         <span class="k"><span class="sw" style="background:var(--series-1)"></span>Save rate</span>
         <span class="k"><span class="sw" style="background:var(--series-2)"></span>Margin-adjusted</span>
@@ -122,7 +126,7 @@
       <div class="safetytiles">
         <div class="stile"><div class="n" id="s_jb">—</div><div class="t">Jailbreak attempts blocked</div></div>
         <div class="stile"><div class="n" id="s_os">—</div><div class="t">Off-scope questions bounded</div></div>
-        <div class="stile"><div class="n" id="s_ol">—</div><div class="t">Over-limit offers capped/rejected</div></div>
+        <div class="stile"><div class="n" id="s_ol">—</div><div class="t">Over-ceiling offers capped</div></div>
         <div class="stile"><div class="n" id="s_pii">—</div><div class="t">PII fields redacted pre-log</div></div>
       </div>
     </div>
@@ -175,7 +179,18 @@ function renderKPIs(){
   $('#m_comp').textContent=pct(D.safety.compliance); $('#m_comp_fill').style.width=pct(D.safety.compliance);
   $('#s_jb').textContent=D.safety.jailbreaks; $('#s_os').textContent=D.safety.off_scope;
   $('#s_ol').textContent=D.safety.over_limit; $('#s_pii').textContent=D.safety.pii;
-  $('#srcTag').textContent = window.KEEL_DATA ? (D.meta.conversations+' live conversations') : 'synthetic mock';
+  // POPULATION LABELS. save_rate / save_delta_pp / the trend are TREATED-SEGMENT figures
+  // (n = treated_cohort_n), while meta.conversations and the driver shares span the whole
+  // cohort. The tiles carried no population at all, so segment numbers read as if they
+  // described all 160 conversations. README/BUILD were already explicit about this; the
+  // flagship surface was not.
+  const segN = D.meta.treated_cohort_n, segLbl = segN ? `treated segment · n=${segN}` : '';
+  $('#k_save_pop').textContent = segLbl;
+  $('#k_madj_pop').textContent = segLbl;
+  $('#trendPop').textContent = segLbl;
+  $('#srcTag').textContent = window.KEEL_DATA
+    ? `${D.meta.conversations} live conversations · KPIs above are ${segLbl || 'segment-scoped'}`
+    : 'synthetic mock';
 }
 
 function lineChart(){

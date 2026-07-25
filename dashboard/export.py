@@ -117,7 +117,13 @@ def build_data(conn, *, before: dict, after: dict, guardrail_counts: dict, catch
         "offers": offer_points,
         "safety": {"catch_rate": round(catch_rate, 4),
                    "compliance": compliance, **guardrail_counts},
-        "meta": {"conversations": len(views), "provenance": provenance or {}},
+        # treated_cohort_n travels with the data so the dashboard can LABEL which population
+        # each KPI describes. save_rate / save_delta_pp / the trend are treated-segment
+        # figures while `conversations` and the driver shares span the whole cohort; without
+        # this the tiles rendered segment numbers under a whole-cohort tag.
+        "meta": {"conversations": len(views),
+                 "treated_cohort_n": (provenance or {}).get("treated_cohort_n"),
+                 "provenance": provenance or {}},
     }
 
 

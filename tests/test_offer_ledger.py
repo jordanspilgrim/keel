@@ -347,3 +347,45 @@ def test_two_offer_calls_authorize_both(conn):
         {"offer": {"kind": "pause", "pct": None, "months": 2}, "account_facts": []}, rec)
     presented = [o for o in rec["offers"] if o.state == "presented"]
     assert len(presented) == 1 and presented[0].kind == "pause"
+
+
+def test_batch_and_live_persist_identical_ledger_evidence_for_the_same_terminal():
+    """E2E#14 / RT22: resolve_session transitioned a dangling presented offer on a lost
+    close and simulate_conversation did not, so the two paths persisted DIFFERENT ledger
+    evidence for the identical terminal state — batch ('presented') vs live ('rejected').
+    _offer_ledger_line renders that string verbatim into the judge prompt, and `resolution`
+    and `offer_appropriateness` are exactly the dimensions that read it. Both paths now call
+    one shared transition."""
+    from agent import runtime
+    states = []
+    for _ in range(2):
+        rec = runtime._new_rec()
+        o = offers.authorize(rec["offers"], "pause", {"months": 1})
+        offers.present(rec["offers"], o, {"months": 1})
+        runtime._close_dangling_offer(rec, "lost")
+        states.append(rec["offers"][0].state)
+    assert states[0] == states[1] == "abandoned"
+
+
+def test_an_unanswered_offer_is_abandoned_not_rejected():
+    """'rejected' asserts a customer DECISION. A turn-limit exit, or a cancellation routed
+    while an offer sat on the table, is not the customer declining it — and the judge reads
+    that word."""
+    from agent import runtime
+    rec = runtime._new_rec()
+    o = offers.authorize(rec["offers"], "discount", {"pct": 10})
+    offers.present(rec["offers"], o, {"pct": 10})
+    runtime._close_dangling_offer(rec, "lost")
+    assert rec["offers"][0].state == "abandoned"
+    assert offers.rejected_of_kind(rec["offers"], "discount") is None, \
+        "an unanswered offer must not read as a customer rejection"
+
+
+def test_an_accepted_offer_is_never_reclassified_by_the_terminal_transition():
+    from agent import runtime
+    rec = runtime._new_rec()
+    o = offers.authorize(rec["offers"], "pause", {"months": 1})
+    offers.present(rec["offers"], o, {"months": 1})
+    offers.mark_accepted(rec["offers"])
+    runtime._close_dangling_offer(rec, "lost")
+    assert offers.accepted(rec["offers"]) is not None

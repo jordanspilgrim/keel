@@ -70,6 +70,21 @@ def offer_of_kind(offers: list[Offer], kind: str) -> Offer | None:
     return None
 
 
+def mark_abandoned(offers: list[Offer]) -> Offer | None:
+    """Close a still-PRESENTED offer that the customer never answered.
+
+    Distinct from 'rejected' on purpose. A conversation that hits the turn limit, or one
+    where the agent routed a cancellation while an offer sat on the table, is not a
+    customer DECLINING the offer — labelling it 'rejected' asserts a customer decision that
+    never happened, and that string is rendered verbatim into the judge prompt, where
+    `resolution` and `offer_appropriateness` read it. 'abandoned' says what actually
+    happened: presented, unanswered."""
+    o = presented(offers)
+    if o is not None:
+        o.state = "abandoned"
+    return o
+
+
 def cheapest_authorized_of_kind(offers: list[Offer], kind: str) -> Offer | None:
     """The LEAST valuable still-live offer of a kind (smallest discount pct / shortest
     pause). Used only by the output-failure fallback: when the agent could not produce a

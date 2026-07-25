@@ -194,9 +194,14 @@ def _eval_eligibility(conn, run_id: str | None, phase: str | None) -> dict:
     base = "FROM conversations c JOIN scenarios sc ON sc.id = c.scenario_id WHERE " + " AND ".join(where)
     ver = judge.EVAL_SPEC_VERSION
     total = conn.execute("SELECT count(*) " + base, params).fetchone()[0]
+    # A conversation counts as GRADED only with a real verdict. Both writers
+    # (run_evals.grade_all and runtime._grade_and_store) insert a verdict='error' row on a
+    # coverage MISS, so an unfiltered EXISTS made graded == total unconditionally and pinned
+    # coverage to 1.0 — the demo printed "coverage 100%" in the exact scenario where every
+    # judge call had failed and grade_all itself honestly reported 0.0.
     graded = conn.execute(
         "SELECT count(*) " + base + " AND EXISTS (SELECT 1 FROM evals e WHERE e.conversation_id=c.id "
-        "AND e.rubric_version=?)", params + [ver]).fetchone()[0]
+        "AND e.rubric_version=? AND e.verdict IN ('pass','fail'))", params + [ver]).fetchone()[0]
     eligible = conn.execute(
         "SELECT count(*) " + base + " AND EXISTS (SELECT 1 FROM evals e WHERE e.conversation_id=c.id "
         "AND e.rubric_version=? AND e.verdict='pass')", params + [ver]).fetchone()[0]

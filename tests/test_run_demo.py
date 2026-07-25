@@ -182,6 +182,7 @@ def test_run_median_reports_median_not_max_and_keeps_low_draws(monkeypatch, tmp_
     the best run would be exactly the metric-rigging the demo forbids. No network: run_once
     is stubbed with a fixed spread."""
     import json
+    import os
     (tmp_path / "dashboard").mkdir()
     monkeypatch.chdir(tmp_path)
     draws = [-4.0, 2.0, 7.0, 20.0, 33.0]          # median 7.0 — NOT the 33.0 max; incl a negative
@@ -199,10 +200,17 @@ def test_run_median_reports_median_not_max_and_keeps_low_draws(monkeypatch, tmp_
 
     exported = {}  # capture what the dashboard is re-rendered from
     _real_connect = db.connect
+    # Give the estimator a REAL database to snapshot and restore. Previously config.DB_PATH
+    # pointed outside the tmp cwd, every _snapshot_db call failed, and the test silently
+    # exercised the no-snapshot path — leaving the snapshot/restore block (which decides
+    # which run the live Explorer/API serves) with no coverage at all.
+    monkeypatch.setattr(run_demo.config, "DB_PATH", str(tmp_path / "keel.db"))
+    _real_connect(str(tmp_path / "keel.db")).close()
     monkeypatch.setattr(run_demo, "run_once", fake_run_once)
     monkeypatch.setattr(run_demo.export, "write_data", lambda data, **k: exported.update(data))
     monkeypatch.setattr(run_demo.db, "connect", lambda *a, **k: _real_connect(str(tmp_path / "m.db")))
     assert run_demo.run_median(k=5) == 0
+    assert os.path.exists(str(tmp_path / "keel.db")), "the committed run's DB must be restored"
 
     agg = json.loads((tmp_path / "dashboard" / "demo_aggregate.json").read_text())
     assert agg["segment_save_pp"]["median"] == 7.0                       # median, not the max
@@ -367,3 +375,65 @@ def test_experiment_signal_survives_reclustering(conn):
     assert reloaded is not None and reloaded["segment"] == "Price too high"
     assert conn.execute("SELECT count(*) FROM signals WHERE run_id IS NULL").fetchone()[0] >= 1
     assert conn.execute("SELECT count(*) FROM signals WHERE run_id='run-TEST'").fetchone()[0] == 1
+
+
+# --- R12-E: metrics honesty ------------------------------------------------------
+def test_a_failed_db_restore_is_a_run_failure_not_a_silent_skip(monkeypatch, tmp_path, capsys):
+    """RT16 / E2E#25: _snapshot_db swallowed every error and the restore was guarded by
+    `if committed_snap and exists(...)`, so on a snapshot miss keel.db kept whichever run
+    executed LAST while every artifact named the committed median run — the dashboard and
+    the live Explorer/API disagreeing, silently, with exit code 0."""
+    import json
+    import os
+    (tmp_path / "dashboard").mkdir()
+    monkeypatch.chdir(tmp_path)
+    seq = iter([5.0, 6.0, 7.0])
+
+    def fake_run_once(conn, run_id=None):
+        v = next(seq)
+        return {"manifest": {"run_id": f"run-{v}", "treated_cohort_n": 60,
+                             "baseline": {"segment_save_rate": 0.2, "overall_save_rate": 0.2},
+                             "after": {"segment_save_rate": 0.3, "overall_save_rate": 0.3,
+                                       "eval_pass_rate": 0.9},
+                             "lift": {"segment_save_pp": v, "segment_madj_pp": v,
+                                      "overall_save_pp": v},
+                             "outcome_parity_gap": 0.01},
+                "data": {"provenance": {}}}
+
+    _real_connect = db.connect
+    monkeypatch.setattr(run_demo.config, "DB_PATH", str(tmp_path / "missing.db"))  # nothing to snapshot
+    monkeypatch.setattr(run_demo, "run_once", fake_run_once)
+    monkeypatch.setattr(run_demo.export, "write_data", lambda data, **k: None)
+    monkeypatch.setattr(run_demo.db, "connect", lambda *a, **k: _real_connect(str(tmp_path / "m.db")))
+
+    rc = run_demo.run_median(k=3)
+    out = capsys.readouterr().out
+    assert rc == 1, "a positive median must NOT report success when the restore failed"
+    assert "could not restore" in out and "DISAGREE" in out
+    # the estimate itself is still written honestly — the failure is about which DB is live
+    assert json.loads((tmp_path / "dashboard" / "demo_aggregate.json").read_text())[
+        "segment_save_pp"]["median"] == 6.0
+
+
+def test_redteam_scores_a_probe_caught_by_any_layer(monkeypatch, tmp_path):
+    """E2E#9 / RT15 / RT21: the scorer required the SEEDED label to match the layer that
+    fired. screen_input short-circuits scope once a jailbreak layer fires, so an off_scope
+    probe caught by the injection classifier reported off_scope=False and scored UNCAUGHT
+    despite being BLOCKED — the stricter outcome. With 14 probes and a 0.95 floor one
+    crossover breaches it and drops the program into safe mode."""
+    conn = db.connect(str(tmp_path / "r.db"))
+    synth.generate(conn)
+    # a probe seeded off_scope, but caught by the jailbreak layer instead
+    monkeypatch.setattr(run_demo.guardrails, "screen_input",
+                        lambda text, classify_scope=True: {
+                            "redacted_text": text, "pii_types": [],
+                            "jailbreak": {"flagged": True, "reason": "injection classifier"},
+                            "off_scope": False, "scope_reason": ""})
+    conn.execute("DELETE FROM scenarios WHERE is_adversarial=1")
+    conn.execute("INSERT INTO scenarios (kind, opening_message, is_adversarial, attack_type, "
+                 "created_at) VALUES ('adversarial','x',1,'off_scope','t')")
+    conn.commit()
+    counts, rate = run_demo._redteam(conn)
+    assert rate == 1.0, "a probe BLOCKED by a stricter layer is caught, not a miss"
+    assert counts["jailbreaks"] == 1
+    conn.close()

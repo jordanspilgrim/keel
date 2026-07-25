@@ -296,6 +296,13 @@ def metrics():
         evalm = export.eval_metrics(conn)
         g = dict(conn.execute("SELECT type, count(*) FROM guardrail_events GROUP BY type").fetchall())
         return {
+            # SCOPE, stated. These are WHOLE-DB figures across every conversation in the
+            # database — both arms of a paired demo run, treated and untreated customers.
+            # The dashboard's headline tiles are TREATED-SEGMENT, AFTER-arm figures, so the
+            # two legitimately differ for the same DB; what was wrong was calling both
+            # "save_rate" with no scope, leaving a reader to assume they should match (and
+            # the dashboard's is the higher number).
+            "scope": "all conversations in the database (all runs, all phases, all arms)",
             "conversations": m["n"],
             "save_rate": m["save_rate"],
             "madj_save_rate": m["madj_save_rate"],

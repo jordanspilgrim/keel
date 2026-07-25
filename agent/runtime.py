@@ -307,8 +307,21 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, *
         return {"status": "needs_human", "reason": verdict["reason"],
                 "note": "This action needs a human — routing the customer to a teammate now."}
 
-    # rejected — classify the block for observability
-    gtype = "cooldown" if ("cooldown" in verdict["reason"].lower() or "save offer" in verdict["reason"].lower()) else "over_limit"
+    # rejected — classify the block for observability. Every non-cooldown rejection used to
+    # be bucketed as "over_limit", so the dashboard's "Over-limit offers capped/rejected"
+    # tile counted the baseline arm's own policy switch (DISCOUNTS_ENABLED=False), invalid
+    # arguments, and unknown tools. On the committed run all 54 were the policy switch and
+    # none were over-ceiling proposals — a number that moves with demo config sitting on the
+    # most persuasive safety tile. Emit distinct types so the tile can count only the real one.
+    _r = verdict["reason"].lower()
+    if "cooldown" in _r or "save offer" in _r:
+        gtype = "cooldown"
+    elif "disabled by the current retention policy" in _r:
+        gtype = "policy_disabled"
+    elif "must be a positive" in _r or "finite" in _r or "not a known" in _r or "unknown tool" in _r:
+        gtype = "invalid_args"
+    else:
+        gtype = "over_limit"
     rec["guardrail"].append((gtype, "rejected", verdict["reason"]))
     return {"status": "rejected", "reason": verdict["reason"]}
 
@@ -1018,6 +1031,20 @@ def _advance(text: str, transcript: list, input_list: list, cid: int, sub: dict,
     return reply
 
 
+def _close_dangling_offer(rec: dict, outcome: str) -> None:
+    """THE shared terminal ledger transition, called by BOTH the batch and the live path.
+
+    resolve_session applied this and simulate_conversation did not, so the two paths
+    persisted DIFFERENT ledger evidence for the identical terminal state: batch stored
+    ('off_1','pause','presented') where live stored ('off_1','pause','rejected'). That
+    string is rendered verbatim into the judge prompt by _offer_ledger_line, so the same
+    conversation could be graded on different evidence depending on which path produced it
+    — falsifying "one state machine, no drift" and the judge's "IDENTICAL evidence".
+    """
+    if outcome in ("lost", "cancelled") and offers.presented(rec["offers"]) is not None:
+        offers.mark_abandoned(rec["offers"])
+
+
 def _disposition(transcript: list, scenario: dict, rec: dict, outcome: str, offer_accepted: bool) -> dict:
     """Structured-output reading of intent/reason/confidence, reconciled with
     the mechanically-known outcome/offer (the loop is the source of truth)."""
@@ -1094,6 +1121,7 @@ def simulate_conversation(scenario: dict, conn, *, system: str = SYSTEM) -> dict
         pending = cust["reply"]  # screened by _advance on the next iteration
     if outcome is None:
         outcome = "lost"
+    _close_dangling_offer(rec, outcome)   # same transition the live path applies (no drift)
 
     disp = _disposition(transcript, scenario, rec, outcome, offer_accepted)
     return {"customer_id": cid, "scenario_id": scenario["id"], "transcript": transcript,
@@ -1561,8 +1589,7 @@ def resolve_session(session: dict, conn, *, outcome: str | None = None,
         # Acceptance was already earned DURING the conversation (the live classifier /
         # button, mirroring the batch simulator) — resolve does NOT mark_accepted here. A
         # lost close still transitions any dangling presented offer to 'rejected'.
-        if outcome == "lost" and offers.presented(rec["offers"]) is not None:
-            offers.mark_rejected(rec["offers"])
+        _close_dangling_offer(rec, outcome)
         disp = _disposition(session["transcript"], scenario, rec, outcome, offer_accepted)
         record = {"customer_id": session["customer_id"], "scenario_id": None,
                   "transcript": session["transcript"], "disposition": disp, "outcome": outcome,
