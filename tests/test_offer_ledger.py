@@ -390,3 +390,42 @@ def test_an_accepted_offer_is_never_reclassified_by_the_terminal_transition():
     offers.mark_accepted(rec["offers"])
     runtime._close_dangling_offer(rec, "lost")
     assert offers.accepted(rec["offers"]) is not None
+
+
+def test_an_abandoned_offer_was_still_extended_to_the_customer():
+    """R13-CRITICAL, self-inflicted by R12. mark_abandoned added a FOURTH terminal state and
+    extended() was never taught about it, so an offer presented and never answered vanished
+    from offer_made — and with it from offer-effectiveness analytics, the save cooldown, and
+    the judge's evidence. On the committed run that dropped 68 of 160 conversations, every
+    one a LOSS, so the exclusion was purely survivorship-directional."""
+    from agent import runtime
+    rec = runtime._new_rec()
+    o = offers.authorize(rec["offers"], "pause", {"months": 3})
+    offers.present(rec["offers"], o, {"months": 3})
+    runtime._close_dangling_offer(rec, "lost")
+
+    assert rec["offers"][0].state == "abandoned"
+    assert offers.extended(rec["offers"]) is not None, "an unanswered offer was still made"
+    assert offers.offer_summary(rec["offers"]) == "3-month pause"
+    assert runtime._offer_made(rec) == "3-month pause", "the persisted column must record it"
+
+
+def test_extended_covers_every_terminal_state_the_ledger_can_reach():
+    """The bug above was a state added in one place and not the other. Pin the invariant
+    rather than the instance: every state a terminal transition can produce must be
+    classifiable by extended(), so the next added state fails here instead of silently
+    deleting data from the analytics layer."""
+    from agent import runtime
+    terminal_states = set()
+    for outcome, decision in (("lost", None), ("lost", "reject"), ("saved", "accept")):
+        rec = runtime._new_rec()
+        o = offers.authorize(rec["offers"], "pause", {"months": 1})
+        offers.present(rec["offers"], o, {"months": 1})
+        if decision:
+            runtime._apply_customer_decision(rec, decision)
+        else:
+            runtime._close_dangling_offer(rec, outcome)
+        terminal_states.add(rec["offers"][0].state)
+        assert offers.extended(rec["offers"]) is not None, \
+            f"state {rec['offers'][0].state!r} is reachable but invisible to extended()"
+    assert terminal_states == {"abandoned", "rejected", "accepted"}, terminal_states

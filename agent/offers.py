@@ -212,9 +212,25 @@ def human_terms(offer: Offer, terms: dict | None = None) -> str:
 
 def extended(offers: list[Offer]) -> Offer | None:
     """The offer that was actually EXTENDED to the customer this conversation —
-    accepted, else presented, else rejected. (An offer the customer rejected was
-    still made: it matters for cooldown and offer-effectiveness analytics.)"""
-    for state in ("accepted", "presented", "rejected"):
+    accepted, else presented, else rejected, else abandoned. (An offer the customer
+    rejected was still made: it matters for cooldown and offer-effectiveness analytics.
+    So was one they never answered.)
+
+    `abandoned` is in this tuple because R12 added it as a FOURTH terminal state
+    (mark_abandoned, for an offer presented and never answered) and did not add it here.
+    Before that, every terminal offer landed on presented/rejected and both were listed,
+    so the omission dropped 68 of 160 conversations' offers on the committed run — every
+    one of them a LOSS, which made the exclusion purely survivorship-directional: the
+    offer-effectiveness panel counted the offers that worked and discarded the ones that
+    were ignored. It also meant `offer_made` was NULL for those rows, so the 90-day save
+    cooldown never started for 24 customers who had in fact been shown an offer, and the
+    judge was handed a self-contradictory envelope ("offer: None" beside an OFFER LEDGER
+    line reading "abandoned:pause presented={'months': 3}").
+
+    Any future terminal state MUST be added here too. The states this deliberately
+    excludes are `authorized` (policy said yes, the customer never saw it) and
+    `superseded` (replaced before it was shown) — neither was extended to anyone."""
+    for state in ("accepted", "presented", "rejected", "abandoned"):
         for o in reversed(offers):
             if o.state == state:
                 return o

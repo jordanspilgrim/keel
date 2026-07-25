@@ -346,7 +346,7 @@ fixed in advance, the seed is held constant so the only thing that varies is the
 variance a re-run sees), **every run is counted** (no dropping the low or negative draws), and the
 committed headline is the **median**, never the max. Result over the 5 pre-registered runs on the
 fully-remediated build (baseline graded before Learn, eval-eligible signal, identical starting-state
-hash each arm, program healthy, **zero** saved-plus-cancelled records): the price-sensitive segment's
+hash each arm, **zero** saved-plus-cancelled records — but NOT "program healthy": see the kill-switch note below): the price-sensitive segment's
 lift had **median +15.0pp, range [+6.7, +21.7]pp — all five runs positive** (values
 `[15.0, 6.7, 6.7, 15.0, 21.7]`); margin-adjusted median **+12.0pp**; overall-cohort median
 **+11.2pp**; eval pass median **75%** (range 73.8–80.0%); observational outcome-parity gap median
@@ -355,6 +355,18 @@ harness is `evals/agent_fairness.py`). The committed median-lift run (`run-20260
 the segment **10% → 25%** and is what the dashboard AND the live Explorer/API render (its DB restored
 as canonical); the full distribution is persisted to `dashboard/demo_aggregate.json`, with each run's
 manifest under `dashboard/manifests/`.
+
+**The kill switch trips on this batch, and that is stated rather than quietly passed over.**
+`safety.program_state()` against the shipped DB returns `healthy=False, mode=safe`, reason
+`eval pass rate 69% below floor 80%` — so a live session opened against the committed database
+starts in safe mode and routes to a human. An earlier build at 75% was treated as blocking for
+exactly this reason, so it would be inconsistent to wave this one through. Two things are true
+at once and both belong in the record: the floor aggregates over BOTH arms (`agent/safety.py`),
+and the baseline arm is a deliberately un-improved control, so retaining it mechanically drags
+the aggregate down — the AFTER arm alone is 64/80 = **0.8000**, exactly at the floor, not below
+it. That is an argument for scoping the floor to the treated arm, not an argument that the
+number is fine. Until that is decided, the honest statement is: this batch does not clear the
+program-health gate as currently defined.
 
 **The estimator's own variance, and one real confound — both stated rather than hidden.** THREE
 pre-registered median-of-5 estimates have now been run, and all three are retained:

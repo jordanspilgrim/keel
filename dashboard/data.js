@@ -53,14 +53,14 @@ window.KEEL_DATA = {
   "offers": [
     {
       "label": "discount",
-      "save_rate": 0.615,
-      "margin_cost": 14.03,
-      "rel_cost": 1.02
+      "save_rate": 0.4,
+      "margin_cost": 9.12,
+      "rel_cost": 1.35
     },
     {
       "label": "pause",
-      "save_rate": 0.339,
-      "margin_cost": 13.73,
+      "save_rate": 0.167,
+      "margin_cost": 6.75,
       "rel_cost": 1.0
     }
   ],

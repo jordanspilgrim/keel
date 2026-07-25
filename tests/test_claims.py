@@ -148,7 +148,12 @@ def test_html_demo_docs_cite_the_pre_registered_median():
     man = json.loads(_read("dashboard/manifest.json"))
     sp = agg["segment_save_pp"]
     treated_n = agg["treated_cohort_n"]
-    for rel in ("docs/index.html", "docs/how-it-works.html"):
+    # docs/testing.html was NOT in this tuple, and that is exactly how it kept publishing the
+    # superseded +23.3pp batch — wrong median, wrong range, wrong run id, wrong eval rate — as
+    # "the pre-registered median-of-5", while README and the other two HTML docs had been
+    # reconciled. README links it as one of three browsable docs. Any doc that prints demo
+    # numbers belongs in this list.
+    for rel in ("docs/index.html", "docs/how-it-works.html", "docs/testing.html"):
         text = _read(rel)
         assert str(sp["median"]) in text, f"{rel} must cite the median lift {sp['median']}"
         assert str(sp["max"]) in text, f"{rel} must cite the range max {sp['max']}"
