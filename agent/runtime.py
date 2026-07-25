@@ -19,6 +19,7 @@ decision are persisted (conversations + audit_log).
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -706,6 +707,57 @@ def _queue_cancellation_live(conn, session_key: str | None) -> None:
     conn.commit()
 
 
+def _flush_telemetry_live(conn, session_key: str | None, rec: dict) -> None:
+    """Write this live session's guardrail + audit rows NOW, keyed by session id.
+
+    They were held in RAM (rec["guardrail"], rec["audit"]) and only written by
+    persist_conversation, so a customer who probed the agent and then closed the tab left
+    NO record: the attacker effectively chose whether their blocked jailbreak was ever
+    logged, and _evict() destroyed the evidence an hour later. Safety telemetry cannot be
+    contingent on the subject cooperating. Rewritten in full each turn (delete-then-insert
+    on the un-linked session rows) so this is idempotent and never double-counts; persist
+    then clears these and writes the authoritative conversation-linked set."""
+    if not session_key:
+        return
+    try:
+        conn.execute("DELETE FROM guardrail_events WHERE session_key=? AND conversation_id IS NULL",
+                     (session_key,))
+        conn.execute("DELETE FROM audit_log WHERE session_key=? AND conversation_id IS NULL",
+                     (session_key,))
+        conn.executemany(
+            "INSERT INTO guardrail_events (session_key, type, action, detail, created_at) "
+            "VALUES (?,?,?,?,?)", [(session_key, t, a, d, _now()) for (t, a, d) in rec["guardrail"]])
+        conn.executemany(
+            "INSERT INTO audit_log (session_key, actor, decision, reason, created_at) "
+            "VALUES (?,?,?,?,?)", [(session_key, a, d, r, _now()) for (a, d, r) in rec["audit"]])
+        conn.commit()
+    except Exception as e:  # telemetry must never break a customer turn
+        # ROLL BACK explicitly. Without it a half-written flush stays pending on the
+        # connection and is committed later by an unrelated commit() — which is how a
+        # failed flush silently produced DUPLICATE guardrail rows.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logging.getLogger(__name__).warning("live telemetry flush failed for %s: %s", session_key, e)
+
+
+def _queue_fulfillment_live(conn, session_key: str | None, offer: str | None) -> None:
+    """Durably enqueue the accepted offer BEFORE the customer is told 'our team will apply
+    it to your account'. The escalation and cancellation terminals already do this, for
+    exactly this reason; the SAVE terminal -- the flagship outcome -- did not. It relied on
+    _finalize_if_terminal, whose best-effort `except` swallows failure, so a transient write
+    lock (db.connect sets no busy_timeout) meant the customer got the promise while
+    conversations, offer_fulfillment_requests and evals all held zero rows. Idempotent on
+    the session key; linked to its conversation at persist."""
+    if not session_key or not offer:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO offer_fulfillment_requests (session_key, offer, status, created_at) "
+        "VALUES (?,?,?,?)", (session_key, offer, "pending_application", _now()))
+    conn.commit()
+
+
 def _queue_escalation_live(conn, session_key: str | None, reason: str | None) -> None:
     """Durably enqueue a human hand-off keyed by SESSION id at turn time — the same
     durability the cancellation path has (H4): the promise 'a teammate will take it from
@@ -1105,6 +1157,14 @@ def persist_conversation(conn, record: dict) -> int:
             "INSERT INTO audit_log (conversation_id, actor, decision, reason, created_at) VALUES (?,?,?,?,?)",
             [(conv_id, a, d, r, _now()) for (a, d, r) in record["audit"]],
         )
+        # Drop this session's turn-time pre-writes first: persist is the single writer of
+        # the authoritative, conversation-linked set, and the pre-writes exist only to make
+        # the telemetry durable BEFORE a conversation is finalized.
+        if record.get("resolution_key"):
+            conn.execute("DELETE FROM guardrail_events WHERE session_key=? AND conversation_id IS NULL",
+                         (record["resolution_key"],))
+            conn.execute("DELETE FROM audit_log WHERE session_key=? AND conversation_id IS NULL",
+                         (record["resolution_key"],))
         conn.executemany(
             "INSERT INTO guardrail_events (conversation_id, type, action, detail, created_at) VALUES (?,?,?,?,?)",
             [(conv_id, t, a, d, _now()) for (t, a, d) in record["guardrail_events"]],
@@ -1143,9 +1203,15 @@ def persist_conversation(conn, record: dict) -> int:
         # server's "our team will apply it" is backed by a real pending action rather than
         # an unsupported promise. Nothing auto-applies in the POC — this is the honest queue.
         if record.get("outcome") == "saved" and record.get("offer_made"):
-            conn.execute(
-                "INSERT INTO offer_fulfillment_requests (conversation_id, offer, status, created_at) "
-                "VALUES (?,?,?,?)", (conv_id, record["offer_made"], "pending_application", _now()))
+            skey = record.get("resolution_key")   # same key the other two queues link on
+            linked = conn.execute(
+                "UPDATE offer_fulfillment_requests SET conversation_id=? "
+                "WHERE session_key=? AND conversation_id IS NULL",
+                (conv_id, skey)).rowcount if skey else 0
+            if not linked:  # batch path, or a live save whose pre-write never landed
+                conn.execute(
+                    "INSERT INTO offer_fulfillment_requests (conversation_id, offer, status, created_at) "
+                    "VALUES (?,?,?,?)", (conv_id, record["offer_made"], "pending_application", _now()))
         conn.commit()
     except Exception:
         conn.rollback()  # discard the partial write — never leave it open on the connection
@@ -1181,8 +1247,16 @@ def new_session(customer_id: int, conn) -> dict:
             "safety_reasons": state["reasons"]}
 
 
-def _turn_result(session: dict, reply: str, new_events: list) -> dict:
+def _turn_result(session: dict, reply: str, new_events: list, conn=None) -> dict:
     rec = session["rec"]
+    # Every live turn makes its guardrail/audit telemetry durable before returning — see
+    # _flush_telemetry_live. Routed through the single result builder so a new early-return
+    # branch cannot silently opt out of it, which is how the RAM-only gap arose.
+    if conn is not None and not session.get("resolved"):
+        # Once the conversation is finalized, persist_conversation owns the authoritative
+        # conversation-linked rows — re-flushing session-keyed copies after it would
+        # duplicate every event. The flush exists only for the window BEFORE finalization.
+        _flush_telemetry_live(conn, session.get("_session_id"), rec)
     return {"reply": reply, "escalated": rec["escalated"], "offer_made": _offer_made(rec),
             "outcome": session["outcome"], "new_guardrail_events": new_events,
             "guardrail_events": list(rec["guardrail"])}
@@ -1266,8 +1340,14 @@ def _finalize_if_terminal(session: dict, conn) -> None:
         return
     try:
         resolve_session(session, conn, resolution_key=session.get("_session_id"))
-    except Exception:
-        pass  # durable queue row is the safety net; grade_all / a later /resolve reconcile
+    except Exception as e:
+        # Best-effort by design (a finalize failure must not break the customer's turn), but
+        # NOT silent: an unlogged `pass` here is how a lost save leaves no trace at all.
+        # Every terminal now has a durable pre-written queue row, so the obligation survives
+        # this; the record and grade are reconciled by a later turn's self-heal or /resolve.
+        rec["audit"].append(("system", "finalize_failed", f"{type(e).__name__}: {e}"))
+        logging.getLogger(__name__).warning(
+            "live finalize failed for session %s: %s", session.get("_session_id"), e, exc_info=True)
 
 
 def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: str | None = None) -> dict:
@@ -1300,7 +1380,7 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
         session["transcript"].append({"role": "user", "content": shown})
         session["transcript"].append({"role": "assistant", "content": _ESCALATED_REPLY})
         _emit(on_step, "guardrail", "Session already escalated — not running the agent", gtype="escalated")
-        return _turn_result(session, _ESCALATED_REPLY, rec["guardrail"][before:])
+        return _turn_result(conn=conn, session=session, reply=_ESCALATED_REPLY, new_events=rec["guardrail"][before:])
     # A routed cancellation is TERMINAL too — the agent has recorded the action, so a
     # later message does NOT silently re-enter the autonomous agent.
     if session.get("outcome") == "cancelled" or rec.get("cancellation_routed"):
@@ -1309,7 +1389,7 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
         session["transcript"].append({"role": "user", "content": shown})
         session["transcript"].append({"role": "assistant", "content": _CANCELLED_REPLY})
         _emit(on_step, "guardrail", "Cancellation already routed — not running the agent", gtype="cancelled")
-        return _turn_result(session, _CANCELLED_REPLY, rec["guardrail"][before:])
+        return _turn_result(conn=conn, session=session, reply=_CANCELLED_REPLY, new_events=rec["guardrail"][before:])
     # A CUSTOMER DECISION is terminal too — exactly as in the batch path, where the
     # simulated customer's accept/reject BREAKS the loop. Without this guard a later message
     # re-entered the autonomous agent on an already-closed conversation, and an agent that
@@ -1317,12 +1397,19 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
     # accepted offer was still on the ledger (a customer-facing data corruption, and exactly
     # the live-vs-batch divergence the customer-earned-acceptance work exists to eliminate).
     if session.get("outcome") in ("saved", "lost"):
+        # Self-heal, as the escalated/cancelled branches do: if the earlier finalize failed
+        # (its exception is swallowed by design), re-assert the durable obligation and retry
+        # the persist rather than re-stating "your acceptance is already recorded" while
+        # nothing is in fact recorded.
+        if session["outcome"] == "saved":
+            _queue_fulfillment_live(conn, skey, _offer_made(rec))
+        _finalize_if_terminal(session, conn)
         reply = _SAVED_CLOSED_REPLY if session["outcome"] == "saved" else _DECLINED_CLOSED_REPLY
         session["transcript"].append({"role": "user", "content": shown})
         session["transcript"].append({"role": "assistant", "content": reply})
         _emit(on_step, "guardrail", f"Conversation already closed as '{session['outcome']}' — "
               f"not running the agent", gtype="closed")
-        return _turn_result(session, reply, rec["guardrail"][before:])
+        return _turn_result(conn=conn, session=session, reply=reply, new_events=rec["guardrail"][before:])
     # Kill switch: if the program is in safe mode, disclose + route to a human
     # instead of running the agent autonomously.
     if session.get("safe_mode"):
@@ -1339,7 +1426,7 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
         session["outcome"] = "escalated"
         _emit(on_step, "reply", reply)
         _finalize_if_terminal(session, conn)  # H3: persist + grade the hand-off now
-        return _turn_result(session, reply, rec["guardrail"][before:])
+        return _turn_result(conn=conn, session=session, reply=reply, new_events=rec["guardrail"][before:])
     # A recognized jailbreak/injection is BLOCKED here, before the decision classifier and
     # before the agent — the input never reaches a model on any live path. (Terminal-state
     # branches above still win, since their reply is a fact about the conversation, not a
@@ -1348,7 +1435,7 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
         session["transcript"].append({"role": "user", "content": shown})
         session["transcript"].append({"role": "assistant", "content": dec["reply"]})
         _emit(on_step, "reply", dec["reply"])
-        return _turn_result(session, dec["reply"], rec["guardrail"][before:])
+        return _turn_result(conn=conn, session=session, reply=dec["reply"], new_events=rec["guardrail"][before:])
     # H2 — CUSTOMER-EARNED ACCEPTANCE. If a retention offer is on the table, classify the
     # customer's reply (or use an explicit button `decision`) and apply it to the ledger
     # BEFORE the agent runs. accept/reject are TERMINAL customer decisions (as in the batch
@@ -1375,13 +1462,18 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
             session["transcript"].append({"role": "user", "content": shown})
             outcome, _acc = _apply_customer_decision(rec, d)
             session["outcome"] = outcome  # 'saved' or 'lost' — a customer-EARNED terminal
+            if outcome == "saved":
+                # Durably record the obligation NOW, before the customer is told we will
+                # apply it — the same write-before-promise ordering the escalation and
+                # cancellation terminals use.
+                _queue_fulfillment_live(conn, skey, _offer_made(rec))
             reply = _SAVED_REPLY if outcome == "saved" else _DECLINED_REPLY
             session["transcript"].append({"role": "assistant", "content": reply})
             _emit(on_step, "decision", f"customer {d}ed the {presented.kind} offer → {outcome}")
             # A customer decision is terminal — finalize it NOW (persist + grade + queue the
             # fulfillment obligation) rather than waiting for a /resolve a closed tab never sends.
             _finalize_if_terminal(session, conn)
-            return _turn_result(session, reply, rec["guardrail"][before:])
+            return _turn_result(conn=conn, session=session, reply=reply, new_events=rec["guardrail"][before:])
     reply = _advance(user_text, session["transcript"], session["input_list"],
                      session["customer_id"], session["sub"], conn, rec, on_step=on_step,
                      screened=dec)
@@ -1396,7 +1488,7 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
         _queue_cancellation_live(conn, skey)
         session["outcome"] = "cancelled"  # terminal — the agent recorded the cancellation
     _finalize_if_terminal(session, conn)  # H3: if this turn reached a terminal, persist + grade it now
-    return _turn_result(session, reply, rec["guardrail"][before:])
+    return _turn_result(conn=conn, session=session, reply=reply, new_events=rec["guardrail"][before:])
 
 
 def _load_resolved_record(conn, resolution_key: str | None) -> dict | None:

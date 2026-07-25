@@ -124,7 +124,7 @@ def _evict() -> None:
         SESSIONS.pop(sid, None)
     now = time.time()
     stale = [sid for sid, s in SESSIONS.items()
-             if not s.get("resolved") and not s.get("_busy")
+             if not s.get("resolved") and not s.get("_busy") and not s.get("_resolving")
              and now - s.get("_last_active", now) > _SESSION_TTL_S]
     for sid in stale:
         SESSIONS.pop(sid, None)
@@ -151,6 +151,15 @@ def chat_turn(req: TurnReq):
                                      f"— no more agent turns")
         if session.get("_busy"):
             raise HTTPException(409, "a turn is already in progress")
+        if session.get("_resolving"):
+            # The guard was one-directional: chat_resolve refused on _busy, but admission
+            # never checked _resolving. chat_resolve claims the flag, RELEASES _LOCK, then
+            # spends a multi-second _disposition call outside any guard — so a turn admitted
+            # in that window raced the finalize. Reproduced: resolve derives 'lost' and flips
+            # the presented offer to rejected, then an accept turn is admitted, finds no
+            # presented offer, and re-runs as an ordinary turn — durable outcome 'lost',
+            # zero fulfillment rows, for a customer who accepted.
+            raise HTTPException(409, "this conversation is being finalized — no more agent turns")
         session["_busy"] = True
         session["_last_active"] = time.time()  # keep an active conversation out of the TTL sweep
         tid = uuid.uuid4().hex
@@ -230,6 +239,14 @@ def chat_resolve(req: ResolveReq):
         # rather than a 409 — resolving is safe to repeat (same outcome, same row).
         if session.get("resolved"):
             rec = session.get("_record") or {}
+            # The cross-check that stops a caller manufacturing an outcome runs inside
+            # resolve_session, which a retry never reaches — so the FIRST call was validated
+            # and every retry was not. A retry asserting a different outcome than the one
+            # actually recorded is a contradiction, not an idempotent repeat.
+            if req.outcome is not None and rec.get("outcome") is not None \
+                    and req.outcome != rec.get("outcome"):
+                raise HTTPException(422, f"asserted outcome '{req.outcome}' contradicts the "
+                                         f"recorded outcome '{rec.get('outcome')}'")
             return {"conversation_id": rec.get("conversation_id"), "outcome": rec.get("outcome"),
                     "disposition": rec.get("disposition")}
         if session.get("_resolving"):
@@ -237,6 +254,9 @@ def chat_resolve(req: ResolveReq):
         # Claim the resolve under the lock so a second concurrent request can't
         # also pass the checks above before resolve_session flips 'resolved'.
         session["_resolving"] = True
+        session["_last_active"] = time.time()  # resolving IS activity — a >TTL-idle session
+        # finalized via End must not be evicted mid-resolve, which made both the resolve and
+        # its retry unrecoverable (404, zero rows).
     conn = None
     try:
         conn = db.connect()  # inside try — a connect failure clears the claim, never sticks

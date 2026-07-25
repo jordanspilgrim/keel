@@ -339,13 +339,20 @@ async function sendMessage(forceText,decision){
 }
 function updateSide(res){
   $('#offerVal').textContent=res.offer_made||'—';
-  const cancelled=res.outcome==='cancelled';
-  $('#statusVal').innerHTML=res.escalated?'<span class="pill escalated">escalated</span>':cancelled?'<span class="pill lost">cancellation routed</span>':'<span class="pill neutral">active</span>';
+  const cancelled=res.outcome==='cancelled', saved=res.outcome==='saved', lost=res.outcome==='lost';
+  $('#statusVal').innerHTML=res.escalated?'<span class="pill escalated">escalated</span>'
+    :cancelled?'<span class="pill lost">cancellation routed</span>'
+    :saved?'<span class="pill saved">saved</span>'
+    :lost?'<span class="pill lost">declined</span>'
+    :'<span class="pill neutral">active</span>';
   const ev=res.guardrail_events||[];
   $('#glist').innerHTML= ev.length? ev.map(g=>`<div class="gevt"><span class="pill neutral">${esc(g[0])}</span><span class="sec">${esc(g[1])}</span></div>`).join('') : '<div class="sec" style="font-size:12.5px;margin-top:6px">None yet.</div>';
   // A routed cancellation is terminal AND already durably recorded — no need for the
   // user to separately "log" it. Escalation is terminal too.
-  if(res.escalated||cancelled){ ended=true; $('#sendBtn').disabled=true; $('#msgBox').disabled=true; }
+  // ALL FOUR terminals end the conversation. saved/lost were missing, so after Accept the
+  // pill still read "active", send was re-enabled by sendMessage's finally, and the next
+  // message came back HTTP 400 rendered as a red error in the transcript.
+  if(res.escalated||cancelled||saved||lost){ ended=true; $('#sendBtn').disabled=true; $('#msgBox').disabled=true; }
 }
 $('#sendBtn').onclick=sendMessage;
 $('#msgBox').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();} });
@@ -360,11 +367,15 @@ $$('#endRow button[data-decision]').forEach(b=>b.onclick=async()=>{
 // never asserts an outcome (H2).
 $('#endBtn').onclick=async()=>{
   if(!sessionId){return;}
+  // Lock the controls BEFORE awaiting: resolve takes multiple seconds (it grades), and
+  // leaving send + the decision buttons live for that whole round trip is what let a turn
+  // race the finalize.
+  ended=true; $('#sendBtn').disabled=true; $('#msgBox').disabled=true;
   try{
     const r=await api('/api/chat/resolve',{method:'POST',body:JSON.stringify({session_id:sessionId})});
     toast(`Logged as ${r.outcome} → conversation #${r.conversation_id}. See it in the Explorer.`);
-    ended=true; $('#sendBtn').disabled=true; $('#msgBox').disabled=true;
-  }catch(e){toast('Could not log: '+e.message);}
+  }catch(e){ ended=false; $('#sendBtn').disabled=false; $('#msgBox').disabled=false;
+             toast('Could not log: '+e.message); }
 };
 
 /* ---------- explorer ---------- */

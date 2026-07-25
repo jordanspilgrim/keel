@@ -122,9 +122,10 @@ CREATE TABLE IF NOT EXISTS escalation_requests (
 -- escalation queues). Nothing auto-applies in the POC; this is the honest hand-off.
 CREATE TABLE IF NOT EXISTS offer_fulfillment_requests (
     id                INTEGER PRIMARY KEY,
-    conversation_id   INTEGER NOT NULL REFERENCES conversations(id),
+    conversation_id   INTEGER REFERENCES conversations(id),   -- NULL until persist links it
     offer             TEXT NOT NULL,           -- the accepted offer, e.g. '3-month pause' / '20% discount'
     status            TEXT NOT NULL,           -- pending_application (mock work queue)
+    session_key       TEXT,                    -- durable idempotency key when accepted live, before persist
     created_at        TEXT NOT NULL
 );
 
@@ -222,6 +223,14 @@ _ADDED_COLUMNS = [
     # column BEFORE idx_escalation_session_key is created, or init_db fails with
     # "no such column: session_key". Fresh DBs already include it via CREATE TABLE.
     ("escalation_requests", "session_key", "TEXT"),
+    # An earned SAVE now pre-writes its fulfillment row at turn time like the other two
+    # terminals, so this table needs the same durable idempotency key on existing DBs.
+    ("offer_fulfillment_requests", "session_key", "TEXT"),
+    # Live guardrail/audit telemetry is pre-written at TURN time keyed by session, so a
+    # blocked jailbreak is durable the moment it happens rather than only if the customer
+    # later chooses to finalize. Existing DBs need the column.
+    ("guardrail_events", "session_key", "TEXT"),
+    ("audit_log", "session_key", "TEXT"),
 ]
 
 
@@ -255,6 +264,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_escalation_session_key "
         "ON escalation_requests(session_key) WHERE session_key IS NOT NULL")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_fulfillment_session_key "
+        "ON offer_fulfillment_requests(session_key) WHERE session_key IS NOT NULL")
     conn.commit()
 
 
