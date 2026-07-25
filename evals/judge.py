@@ -62,6 +62,11 @@ def _spec_version() -> str:
     # (derive_verdict), and the input-envelope serializer (build_judge_input). A change
     # to any of them yields a new spec id — none can silently reuse the old grade
     # definition.
+    # judge_conversation's source is included below, and it CONTAINS the llm.structured call
+    # with its reasoning_effort / max_output_tokens — so a change to the call layer (not just
+    # the prompt) yields a new spec id. Asserted by a test rather than left implicit, since
+    # grades produced by a materially different judge configuration must not pool under one
+    # spec id.
     formatter_src = "".join(inspect.getsource(f) for f in
                             (judge_conversation, _offer_ledger_line, derive_verdict, build_judge_input))
     blob = json.dumps({

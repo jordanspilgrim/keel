@@ -95,6 +95,18 @@ CLUSTER_RANDOM_STATE = 42
 # price every month; a pause mostly defers revenue, so its true given-away
 # margin is modeled as a small goodwill fraction of price. Tunable.
 PAUSE_MARGIN_FRACTION = 0.07
+# LOAD-BEARING ASSUMPTION, stated explicitly because the demo's headline conclusion depends
+# on it. At 0.07/month a 3-month pause is charged 21% of ONE month's price, so in the
+# margin-adjusted north star a 3-month pause (0.79 of a save) and a 20% discount (0.80)
+# score almost identically. The DEFENSIBLE reading is that a pause DEFERS revenue rather
+# than destroying it — the customer is expected to return at full price, whereas a discount
+# is permanent margin loss. That is a modeling choice, not a measurement: if churn-after-
+# pause is high, the true cost of a 3-month pause approaches three months of lost revenue
+# (300% of one month), which would make pauses far more expensive than discounts and could
+# reverse a pause-vs-discount comparison. This POC has no post-pause retention data to
+# calibrate it, so the number is an assumption an operator must set from their own cohort
+# data — not a result. Any claim of the form "discounts retain this segment better than
+# pauses" is conditional on it.
 
 # ---------------------------------------------------------------------------
 # Datastore.

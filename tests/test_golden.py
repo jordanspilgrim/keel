@@ -85,3 +85,24 @@ def test_there_is_at_least_one_negative_golden_fixture():
                             for p in glob.glob(os.path.join(_GOLDEN, "*.json")))
              if d.get("human_verdict") == "fail"]
     assert fails, "golden set has no negative fixtures"
+
+
+def test_eval_spec_version_covers_the_judge_call_layer_not_just_the_prompt():
+    """RT23 claimed the content-hashed eval spec misses the judge's call layer, so grades
+    from materially different judge configurations would pool under one spec id. That is
+    REFUTED — judge_conversation's source is hashed and the llm.structured call (model,
+    reasoning_effort, max_output_tokens) lives inside it. Pin it, so the property is
+    asserted rather than incidental."""
+    import inspect
+    from evals import judge
+    src = inspect.getsource(judge.judge_conversation)
+    assert "reasoning_effort" in src and "max_output_tokens" in src, \
+        "the call parameters must live inside the function whose source is hashed"
+    before = judge._spec_version()
+    original = judge.RUBRIC
+    try:
+        judge.RUBRIC = list(original) + ["invented_dimension"]
+        assert judge._spec_version() != before
+    finally:
+        judge.RUBRIC = original
+    assert judge._spec_version() == before
