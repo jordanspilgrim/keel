@@ -90,9 +90,9 @@
     </div>
     <div class="tile"><div class="lbl">Save rate <span class="pop" id="k_save_pop">—</span></div>
       <div class="val" id="k_save">—</div><div class="delta" id="k_save_d"></div></div>
-    <div class="tile"><div class="lbl">Eval pass rate</div><div class="val" id="k_eval">—</div><div class="delta flat" id="k_eval_cov">—</div></div>
-    <div class="tile"><div class="lbl">Guardrail catch rate</div><div class="val" id="k_guard">—</div><div class="delta flat">red-team</div></div>
-    <div class="tile"><div class="lbl">AI disclosure coverage</div><div class="val" id="k_comp">—</div><div class="delta good">● transcript-verified</div></div>
+    <div class="tile"><div class="lbl">Eval pass rate <span class="pop" id="k_eval_pop">—</span></div><div class="val" id="k_eval">—</div><div class="delta flat" id="k_eval_cov">—</div></div>
+    <div class="tile"><div class="lbl">Guardrail catch rate <span class="pop" id="k_guard_pop">—</span></div><div class="val" id="k_guard">—</div><div class="delta flat">red-team</div></div>
+    <div class="tile"><div class="lbl">AI disclosure coverage <span class="pop" id="k_comp_pop">—</span></div><div class="val" id="k_comp">—</div><div class="delta good">● transcript-verified</div></div>
   </section>
 
   <div class="grid">
@@ -124,10 +124,10 @@
       <div class="meterrow"><span>AI disclosure coverage (transcript-verified)</span><span class="v" id="m_comp">—</span></div>
       <div class="track"><div class="fill" id="m_comp_fill" style="background:var(--series-1)"></div></div>
       <div class="safetytiles">
-        <div class="stile"><div class="n" id="s_jb">—</div><div class="t">Jailbreak attempts blocked</div></div>
-        <div class="stile"><div class="n" id="s_os">—</div><div class="t">Off-scope questions bounded</div></div>
-        <div class="stile"><div class="n" id="s_ol">—</div><div class="t">Over-ceiling offers capped</div></div>
-        <div class="stile"><div class="n" id="s_pii">—</div><div class="t">PII fields redacted pre-log</div></div>
+        <div class="stile"><div class="n" id="s_jb">—</div><div class="t">Jailbreaks blocked <span class="pop">seeded probes</span></div></div>
+        <div class="stile"><div class="n" id="s_os">—</div><div class="t">Off-scope bounded <span class="pop">seeded probes</span></div></div>
+        <div class="stile"><div class="n" id="s_ol">—</div><div class="t">Over-ceiling offers capped <span class="pop">live conversations</span></div></div>
+        <div class="stile"><div class="n" id="s_pii">—</div><div class="t">PII fields redacted <span class="pop">seeded probes</span></div></div>
       </div>
     </div>
   </div>
@@ -188,8 +188,18 @@ function renderKPIs(){
   $('#k_save_pop').textContent = segLbl;
   $('#k_madj_pop').textContent = segLbl;
   $('#trendPop').textContent = segLbl;
+  // Per-tile populations, not a blanket claim. The previous single clause ("KPIs above are
+  // treated segment · n=60") was FALSE for three of the five tiles: eval pass spans all 160
+  // conversations across BOTH arms, guardrail catch rate is 14 red-team probes and not
+  // conversations at all, and disclosure coverage spans every conversation. README is
+  // explicit that these are different populations that must not be quoted interchangeably;
+  // asserting one population across all of them was worse than the earlier no claim at all.
+  const allLbl = `all conversations · n=${D.meta.conversations}`;
+  $('#k_eval_pop').textContent = allLbl;
+  $('#k_guard_pop').textContent = 'red-team probes · n=14';
+  $('#k_comp_pop').textContent = allLbl;
   $('#srcTag').textContent = window.KEEL_DATA
-    ? `${D.meta.conversations} live conversations · KPIs above are ${segLbl || 'segment-scoped'}`
+    ? `${D.meta.conversations} live conversations · each tile is labelled with its own population`
     : 'synthetic mock';
 }
 

@@ -229,3 +229,66 @@ def test_worker_exception_surfaces_not_hangs(client, monkeypatch):
     assert st["error"] and "boom" in st["error"]  # surfaced, not hung
     import server
     assert server.SESSIONS[sid]["_busy"] is False  # busy flag cleared for the next turn
+
+
+# --- R13-D7: controls that were shipped with zero mutation signal -----------------
+def test_turn_is_refused_while_a_resolve_is_in_flight(client):
+    """The headline race of e8b29b9. chat_resolve claims _resolving, releases _LOCK, then
+    spends a multi-second _disposition call outside any guard — a turn admitted in that
+    window races the finalize. The guard shipped with NO test: reverting it left the suite
+    fully green."""
+    import server
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    server.SESSIONS[sid]["_resolving"] = True          # simulate the mid-resolve window
+    r = client.post("/api/chat/turn", json={"session_id": sid, "message": "yes I accept"})
+    assert r.status_code == 409, r.text
+    assert "finalized" in r.json()["detail"]
+
+
+def test_a_session_mid_resolve_is_not_ttl_evicted(client):
+    """Same guard, second half: a >TTL-idle session finalized via End could be swept out
+    from under its own resolve, making both the resolve and its retry unrecoverable."""
+    import server
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    s = server.SESSIONS[sid]
+    s["_resolving"] = True
+    s["_last_active"] = 0                              # ancient
+    server._evict()
+    assert sid in server.SESSIONS, "a session being finalized must never be evicted"
+
+
+def test_oversized_message_is_refused(client):
+    """Screening is regex-heavy and holds the GIL; an unbounded message let one caller
+    stall every other session."""
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    r = client.post("/api/chat/turn", json={"session_id": sid, "message": "x" * 5000})
+    assert r.status_code == 413
+
+
+def test_out_of_range_integer_is_a_client_error_not_a_500(client):
+    """An out-of-INT64 id reached sqlite3 and surfaced as a 500 — a malformed request, not
+    a server fault."""
+    r = client.post("/api/chat/start", json={"customer_id": 10**19})
+    assert r.status_code == 422, r.status_code
+
+
+def test_resolve_retry_asserting_a_different_outcome_is_refused(client, monkeypatch):
+    """RT14: the anti-manufacture cross-check lives inside resolve_session, which a retry
+    never reaches — so the first call was validated and every retry was not."""
+    import server
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    server.SESSIONS[sid]["resolved"] = True
+    server.SESSIONS[sid]["_record"] = {"conversation_id": 7, "outcome": "lost", "disposition": {}}
+    ok = client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "lost"})
+    assert ok.status_code == 200
+    bad = client.post("/api/chat/resolve", json={"session_id": sid, "outcome": "saved"})
+    assert bad.status_code == 422 and "contradicts" in bad.json()["detail"]
+
+
+def test_live_session_count_is_capped(client, monkeypatch):
+    """'Bound memory' was enforced only by a 1-hour TTL, so a client could open sessions
+    faster than they expire."""
+    import server
+    monkeypatch.setattr(server, "_MAX_LIVE_SESSIONS", 2)
+    ids = [client.post("/api/chat/start", json={"customer_id": 1}) for _ in range(3)]
+    assert [r.status_code for r in ids].count(503) >= 1, [r.status_code for r in ids]

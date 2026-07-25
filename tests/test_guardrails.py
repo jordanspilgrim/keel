@@ -81,8 +81,16 @@ def test_weak_cue_single_name_is_denylist_gated_not_name_gated():
     for redacted in ["I'm John", "I am Michael and I want to cancel", "This is Sarah"]:
         out, types = guardrails.redact_pii(redacted)
         assert "REDACTED_NAME" in out and "name" in types, redacted
-    for kept in ["I'm Disappointed", "I am Furious about this", "I'm Canadian", "this is Monday"]:
+    for kept in ["I'm Disappointed", "I am Furious about this", "I'm Canadian"]:
         assert "REDACTED_NAME" not in guardrails.redact_pii(kept)[0], kept
+    # Months and weekdays are deliberately NOT on the denylist: May, June, April, August,
+    # March, Sunday, Friday and Wednesday are all real given names, and listing them leaked
+    # exactly those eight into durable transcripts — the same "coverage depends on whose
+    # names someone thought of" bug the denylist replaced. After a self-identification cue
+    # they are treated as names, at the cost of over-redacting a genuine date reference.
+    for name in ["May", "June", "April", "August", "March", "Friday", "Wednesday"]:
+        out, types = guardrails.redact_pii(f"Hi, this is {name}. I want to cancel.")
+        assert "REDACTED_NAME" in out and "name" in types, name
 
 
 def test_name_redaction_is_symmetric_across_name_origins():

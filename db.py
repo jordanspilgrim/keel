@@ -234,6 +234,45 @@ _ADDED_COLUMNS = [
 ]
 
 
+def _relax_not_null_for_pre_persist_queues(conn: sqlite3.Connection) -> None:
+    """Make `offer_fulfillment_requests.conversation_id` nullable on legacy databases.
+
+    The R12 write-before-promise change enqueues an accepted offer at TURN time, keyed by
+    session, BEFORE the conversation row exists — so conversation_id must be NULL initially.
+    Fresh databases get that from CREATE TABLE, but ALTER TABLE ADD COLUMN cannot relax an
+    existing NOT NULL, so on any pre-R12 database the surviving constraint rejected the
+    pre-write. The insert used INSERT OR IGNORE (correct for its session-key uniqueness
+    guard) which SWALLOWS that rejection too, so the durable write was a silent no-op and
+    the customer received "our team will apply it" with nothing backing it. The migration
+    added the column; it did not add the durability.
+
+    SQLite cannot ALTER a column's nullability, so rebuild the table when needed. Guarded on
+    the actual constraint, so it is a no-op on current schemas and safe to re-run."""
+    info = list(conn.execute("PRAGMA table_info(offer_fulfillment_requests)"))
+    if not info:
+        return
+    conv = next((r for r in info if r["name"] == "conversation_id"), None)
+    if conv is None or not conv["notnull"]:
+        return  # already nullable — nothing to do
+    conn.executescript("""
+        PRAGMA foreign_keys=OFF;
+        CREATE TABLE _ofr_rebuild (
+            id                INTEGER PRIMARY KEY,
+            conversation_id   INTEGER REFERENCES conversations(id),
+            offer             TEXT NOT NULL,
+            status            TEXT NOT NULL,
+            session_key       TEXT,
+            created_at        TEXT NOT NULL
+        );
+        INSERT INTO _ofr_rebuild (id, conversation_id, offer, status, session_key, created_at)
+            SELECT id, conversation_id, offer, status, session_key, created_at
+            FROM offer_fulfillment_requests;
+        DROP TABLE offer_fulfillment_requests;
+        ALTER TABLE _ofr_rebuild RENAME TO offer_fulfillment_requests;
+        PRAGMA foreign_keys=ON;
+    """)
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     """Create all tables if they don't exist, back-fill any columns added after the
     table was first created, and (idempotently) enforce one grade per
@@ -243,6 +282,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    _relax_not_null_for_pre_persist_queues(conn)
     # Dedup any pre-existing duplicate grades (keep the newest id) BEFORE adding the
     # unique index, so the migration never fails on legacy data.
     conn.execute(

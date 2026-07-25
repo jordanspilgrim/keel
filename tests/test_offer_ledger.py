@@ -350,22 +350,55 @@ def test_two_offer_calls_authorize_both(conn):
     assert len(presented) == 1 and presented[0].kind == "pause"
 
 
-def test_batch_and_live_persist_identical_ledger_evidence_for_the_same_terminal():
-    """E2E#14 / RT22: resolve_session transitioned a dangling presented offer on a lost
-    close and simulate_conversation did not, so the two paths persisted DIFFERENT ledger
-    evidence for the identical terminal state — batch ('presented') vs live ('rejected').
-    _offer_ledger_line renders that string verbatim into the judge prompt, and `resolution`
-    and `offer_appropriateness` are exactly the dimensions that read it. Both paths now call
-    one shared transition."""
-    from agent import runtime
-    states = []
-    for _ in range(2):
-        rec = runtime._new_rec()
-        o = offers.authorize(rec["offers"], "pause", {"months": 1})
-        offers.present(rec["offers"], o, {"months": 1})
-        runtime._close_dangling_offer(rec, "lost")
-        states.append(rec["offers"][0].state)
-    assert states[0] == states[1] == "abandoned"
+def test_batch_and_live_persist_identical_ledger_evidence_for_the_same_terminal(tmp_path, monkeypatch):
+    """E2E#14 / RT22: resolve_session transitioned a dangling presented offer on a lost close
+    and simulate_conversation did not, so the two paths persisted DIFFERENT ledger evidence
+    for the identical terminal — batch 'presented' vs live 'rejected'. _offer_ledger_line
+    renders that string verbatim into the judge prompt.
+
+    This drives BOTH REAL PATHS. The earlier version of this test called the shared helper
+    _close_dangling_offer twice in a loop and asserted the two results matched — a tautology
+    over one pure function, which meant DELETING EITHER CALL SITE left the suite green. The
+    property that actually matters is that both paths reach the helper."""
+    import db as _db
+    import synth as _synth
+    from agent import guardrails, runtime
+
+    conn = _db.connect(str(tmp_path / "parity.db"))
+    _synth.generate(conn)
+    monkeypatch.setattr(guardrails, "check_scope", lambda t: {"in_scope": True, "reason": "t"})
+    monkeypatch.setattr(guardrails, "classify_injection", lambda t: False)
+    monkeypatch.setattr(runtime, "_disposition",
+                        lambda transcript, scenario, rec, outcome, accepted: {
+                            "intent": "cancel", "churn_reason": "price",
+                            "offer_made": runtime._offer_made(rec),
+                            "offer_accepted": accepted, "outcome": outcome, "confidence": 0.8})
+
+    def _agent(input_list, cid, sub, conn_, rec, system=runtime.SYSTEM, on_step=None):
+        if not rec["offers"]:                      # present an offer on the first turn only
+            o = offers.authorize(rec["offers"], "pause", {"months": 1})
+            offers.present(rec["offers"], o, {"months": 1})
+        input_list.append({"role": "assistant", "content": "Here is a pause."})
+        return "Here is a pause."
+    monkeypatch.setattr(runtime, "_agent_turn", _agent)
+    # the simulated customer never answers the offer, then the conversation runs out of turns
+    monkeypatch.setattr(runtime.sim, "respond",
+                        lambda scenario, msg, hist: {"reply": "hmm, let me think", "decision": "continue"})
+
+    scenario = dict(conn.execute("SELECT * FROM scenarios WHERE kind='churn' LIMIT 1").fetchone())
+    batch_rec = runtime.simulate_conversation(scenario, conn)
+    batch_states = [o["state"] for o in batch_rec["evidence"]["offers"]]
+
+    monkeypatch.setattr(runtime, "_grade_and_store", lambda *a, **k: None)
+    session = runtime.new_session(scenario["customer_id"], conn)
+    session["_session_id"] = "parity-live"
+    runtime.live_turn(session, "your price is too high", conn)
+    live_rec = runtime.resolve_session(session, conn, resolution_key="parity-live")
+    live_states = [o["state"] for o in live_rec["evidence"]["offers"]]
+
+    assert batch_states == live_states == ["abandoned"], (batch_states, live_states)
+    assert batch_rec["offer_made"] == live_rec["offer_made"] == "1-month pause"
+    conn.close()
 
 
 def test_an_unanswered_offer_is_abandoned_not_rejected():
@@ -429,3 +462,43 @@ def test_extended_covers_every_terminal_state_the_ledger_can_reach():
         assert offers.extended(rec["offers"]) is not None, \
             f"state {rec['offers'][0].state!r} is reachable but invisible to extended()"
     assert terminal_states == {"abandoned", "rejected", "accepted"}, terminal_states
+
+
+def test_write_before_promise_works_on_a_pre_r12_database(tmp_path):
+    """R13-D8f: the R12 write-before-promise enqueues at TURN time, before the conversation
+    row exists, so conversation_id must be NULL initially. Fresh DBs get that from CREATE
+    TABLE, but ALTER TABLE ADD COLUMN cannot relax an existing NOT NULL — so on any pre-R12
+    database the surviving constraint rejected the pre-write, and INSERT OR IGNORE swallowed
+    the rejection. The durable write was a silent no-op while the customer still got 'our
+    team will apply it'. The migration added the column; it did not add the durability."""
+    import sqlite3
+    import db as _db
+    from agent import runtime
+
+    path = str(tmp_path / "legacy.db")
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE conversations (id INTEGER PRIMARY KEY);
+        CREATE TABLE offer_fulfillment_requests (
+            id INTEGER PRIMARY KEY,
+            conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+            offer TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
+        INSERT INTO conversations (id) VALUES (1);
+        INSERT INTO offer_fulfillment_requests (conversation_id, offer, status, created_at)
+            VALUES (1, '20% discount', 'pending_application', 't');
+    """)
+    raw.commit()
+    raw.close()
+
+    conn = _db.connect(path)
+    _db.init_db(conn)                             # the migration entry point
+    runtime._queue_fulfillment_live(conn, "legacy-session", "1-month pause")
+
+    row = conn.execute("SELECT offer, conversation_id FROM offer_fulfillment_requests "
+                       "WHERE session_key='legacy-session'").fetchone()
+    assert row is not None, "the promise must be durable on a legacy schema too"
+    assert row["conversation_id"] is None and row["offer"] == "1-month pause"
+    # the pre-existing row survived the table rebuild
+    assert conn.execute("SELECT count(*) c FROM offer_fulfillment_requests "
+                        "WHERE conversation_id=1").fetchone()["c"] == 1
+    conn.close()

@@ -48,7 +48,15 @@ def guardrail_version() -> str:
         repr(sorted(_NOT_A_NAME_AFTER_CUE)),
         _STREET, _WEAK_CUE_SINGLE_NAME.pattern, _SENSITIVE_TERMS.pattern,
         config.MINI_MODEL,
-        "".join(inspect.getsource(f) for f in (redact_pii, screen_input, classify_injection)),
+        # The SCOPE classifier was missing, and it is not a minor input: 4 of the 14 seeded
+        # probes are off_scope with NO deterministic fallback, so gutting its prompt drops the
+        # true catch rate to 10/14 = 0.714 against a 0.95 floor while this hash — and therefore
+        # the kill switch — stayed green. The docstring calls this "a content hash over
+        # everything that decides whether a probe is caught"; that was false for 28.6% of the
+        # probe set. The sibling judge._spec_version() hashes instructions AND schema.
+        _SCOPE_INSTRUCTIONS, repr(_SCOPE_SCHEMA),
+        "".join(inspect.getsource(f) for f in
+                (redact_pii, screen_input, classify_injection, check_scope)),
     ]
     return "g-" + hashlib.sha256("||".join(parts).encode()).hexdigest()[:12]
 
@@ -63,7 +71,9 @@ _PII_PATTERNS = [
     (re.compile(r"\b\d{3}[ -]\d{2}[ -]\d{4}\b"), "[REDACTED_SSN]", "ssn"),
     # A BARE 9-digit run is genuinely ambiguous (order id, account number), so it is redacted
     # only behind an explicit cue rather than blanket-matching every 9-digit number.
-    (re.compile(r"((?i:\b(?:ssn|social security(?: number)?))\b[:\s#]*)\d{9}\b"),
+    # The separator between the cue and the digits may be punctuation OR the word "is"
+    # ("My SSN is 123456789" is the commonest phrasing and was missed; "My ssn: ..." was not).
+    (re.compile(r"((?i:\b(?:ssn|social security(?: number)?))\b(?:\s+is)?[:\s#]*)\d{9}\b"),
      r"\1[REDACTED_SSN]", "ssn"),
     # Length-BOUNDED local part and domain labels. Unbounded runs made this quadratic: a
     # long "a.a.a...@"-shaped string backtracked from every start position (measured 1.7ms
@@ -111,27 +121,23 @@ _SENSITIVE_TERMS = re.compile(
 # A single Titlecase word after a WEAK cue ("i'm John") is redacted only if it's a known
 # first name — so "I'm John" is scrubbed but "I'm Disappointed" / "This is Comcast" are not.
 # Best-effort common-name lexicon (not exhaustive); the fact allowlist is the real backstop.
-_COMMON_FIRST_NAMES = frozenset("""
-james john robert michael william david richard joseph thomas charles christopher daniel
-matthew anthony mark donald steven paul andrew joshua kenneth kevin brian george edward
-ronald timothy jason jeffrey ryan jacob gary nicholas eric jonathan stephen larry justin
-scott brandon frank benjamin gregory samuel raymond patrick alexander jack dennis jerry
-tyler aaron jose adam henry nathan douglas peter zachary kyle walter ethan jeremy harold
-carl keith roger gerald arthur terry sean christian austin noah jesse bryan luke
-mary patricia jennifer linda elizabeth barbara susan jessica sarah karen nancy lisa betty
-margaret sandra ashley kimberly emily donna michelle carol amanda dorothy melissa deborah
-stephanie rebecca sharon laura cynthia kathleen amy angela shirley anna brenda pamela emma
-nicole helen samantha katherine christine debra rachel carolyn janet maria catherine heather
-diane olivia julie joyce victoria kelly christina joan evelyn lauren judith megan andrea
-cheryl hannah jacqueline martha gloria teresa ann sara madison frances kathryn janice jean
-abigail alice julia judy sophia grace denise amber danielle marilyn beverly charlotte natalie
-""".split())
+# NOTE: _COMMON_FIRST_NAMES (a US-census top-names list) was DELETED here in R13. It was
+# already dead after R12 replaced the name ALLOWLIST gate with a non-name denylist, and
+# leaving a name allowlist in the file invites someone to wire it back in — which is the
+# ethnically-biased control the denylist exists to replace.
 
 # Titlecase words that commonly follow "I'm ..." / "this is ..." WITHOUT being a name.
 # A denylist of non-names rather than an allowlist of names — see _sub_weak_single.
+#
+# MONTHS AND WEEKDAYS ARE DELIBERATELY ABSENT. An earlier draft listed them, which leaked
+# eight real given names — May, June, April, August, March, Sunday, Friday, Wednesday — as
+# plaintext in durable transcripts, reintroducing in a new form exactly the bug the denylist
+# replaced: a privacy control whose coverage depends on which names someone happened to think
+# of. After an explicit self-identification cue ("my name is X", "this is X"), a month or
+# weekday word is far more likely a person than a date, and over-redacting "this is Friday"
+# costs a little transcript fidelity while under-redacting "this is April" leaks a name.
+# That is the same failure-direction trade this whole gate is built on.
 _NOT_A_NAME_AFTER_CUE = frozenset("""
-monday tuesday wednesday thursday friday saturday sunday
-january february march april may june july august september october november december
 american british canadian australian irish german french italian spanish indian chinese
 japanese korean mexican brazilian nigerian kenyan russian polish dutch swedish
 sorry sure fine okay yes no still just really very quite done ready
@@ -264,8 +270,11 @@ _FIELD_TOKEN = {"name": "[REDACTED_NAME]", "full_name": "[REDACTED_NAME]",
 def redact_tool_result(result):
     """Redact PII in a tool result before it reaches the model or the grounded-fact corpus.
     Structure is preserved (the model and the output cross-check both key off it); only
-    leaves are touched. A leaf is scrubbed if its KEY is sensitive (exact, no cue needed)
-    or if its text matches a PII pattern. Values the product legitimately renders (plan,
+    leaves are touched. A leaf is scrubbed if its KEY is sensitive AND its
+    value is a str (exact key match, no cue needed), or if its text matches a PII pattern.
+    The str restriction is stated because the code enforces it — a sensitive key holding a
+    non-string passes through. No such column exists in this schema (every sensitive field is
+    TEXT, so SQLite hands back a str), but the docstring should describe the code. Values the product legitimately renders (plan,
     price, dates, tenure) are neither, so this is a no-op for them."""
     if isinstance(result, dict):
         out = {}

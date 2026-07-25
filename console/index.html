@@ -382,7 +382,7 @@ $('#endBtn').onclick=async()=>{
 const KPI_DEFS={
   madj:{label:'Margin-adjusted save rate',hero:true,why:'<b>The north star.</b> Each save counts as (1 − margin given away ÷ price), so a save bought with a deep discount counts less than a clean one. <b>Assumption:</b> a pause is charged 7% of price per month (it defers revenue rather than destroying margin), so a 3-month pause and a 20% discount score almost the same here — read any pause-vs-discount comparison as conditional on that.',f:'Σ_saved (1 − margin_cost/price) ÷ conversations'},
   save:{label:'Save rate',why:'Share of conversations that ended in a retained customer (an accepted retention offer).',f:'saved ÷ conversations'},
-  eval:{label:'Eval pass rate',why:'Share of conversations the LLM-judge passed (all 5 rubric dimensions ≥ 3). Every conversation is graded.',f:'evals(pass) ÷ evals'},
+  eval:{label:'Eval pass rate',why:'Share of conversations the LLM-judge passed (all 5 rubric dimensions ≥ 3). Grading is <b>attempted</b> on every conversation; a judge error is a coverage miss, not a grade, so coverage is reported separately and is not always 100%.',f:'evals(pass) ÷ evals'},
   guard:{label:'Guardrail events',why:'Total guardrail trips logged — jailbreaks blocked, off-scope bounded, PII redacted, over-limit capped, human-review routed.',f:'count(guardrail_events)'},
   comp:{label:'AI disclosure coverage',why:'Share of conversations whose transcript actually contains the AI-disclosure turn (transcript-verified) — should be 100%.',f:'conversations with disclosure ÷ conversations'}
 };

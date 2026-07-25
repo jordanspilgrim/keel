@@ -307,7 +307,12 @@ def _resolve_call(name: str, args: dict, cid: int, sub: dict, conn, rec: dict, *
         gtype = "cooldown"
     elif "disabled by the current retention policy" in _r:
         gtype = "policy_disabled"
-    elif "must be a positive" in _r or "finite" in _r or "not a known" in _r or "unknown tool" in _r:
+    # Match policy's ACTUAL wording. This tested for "unknown tool" while policy.py emits
+    # "Unknown action tool {name}." — so an unknown tool fell through to over_limit and was
+    # counted on the "Over-ceiling offers capped" tile, which is the same mislabel this split
+    # exists to fix.
+    elif ("must be a positive" in _r or "finite" in _r or "not a known" in _r
+          or "unknown action tool" in _r):
         gtype = "invalid_args"
     else:
         gtype = "over_limit"
@@ -572,10 +577,12 @@ def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
         #     every action. Dispose it here so the decision is RECORDED (it lands in
         #     rec["policy_decisions"], and so in the eval envelope the judge grades) and so
         #     an operator who tightens the policy actually binds this path.
-        pv = policy.authorize("cancel_subscription", {}, rec.get("_sub") or {})
-        rec.setdefault("policy_decisions", []).append(
-            {"tool": "cancel_subscription", "action": pv["action"], "reason": pv["reason"]})
-        rec["audit"].append(("policy", f"cancel_subscription:{pv['action']}", pv["reason"]))
+        # Dispose it, but do NOT record here. _validate_contract is a PURE CHECK that runs on
+        # every generation attempt, including ones that are then rejected and regenerated —
+        # so recording wrote a policy decision and an audit row for cancellations that never
+        # happened, twice per regenerated turn, and those rows land in the eval envelope the
+        # judge reads. The decision is recorded in _apply_contract, when it is actually acted on.
+        pv = policy.authorize("cancel_subscription", {}, {})
         if pv["allowed"]:
             return False, "cancel_subscription must route to a human; it is never auto-executed"
     if kind in ("discount", "pause"):
@@ -763,10 +770,19 @@ def _queue_fulfillment_live(conn, session_key: str | None, offer: str | None) ->
     the session key; linked to its conversation at persist."""
     if not session_key or not offer:
         return
-    conn.execute(
-        "INSERT OR IGNORE INTO offer_fulfillment_requests (session_key, offer, status, created_at) "
-        "VALUES (?,?,?,?)", (session_key, offer, "pending_application", _now()))
-    conn.commit()
+    # NOT "INSERT OR IGNORE". That form is right for the session-key uniqueness guard but it
+    # also swallows NOT NULL and every other integrity failure, which is how this durable
+    # write became a silent no-op on legacy schemas while the customer still got the promise.
+    # Ignore ONLY a uniqueness conflict (the idempotent re-entry case); surface anything else.
+    try:
+        conn.execute(
+            "INSERT INTO offer_fulfillment_requests (session_key, offer, status, created_at) "
+            "VALUES (?,?,?,?)", (session_key, offer, "pending_application", _now()))
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        if "unique" not in str(e).lower():
+            raise
 
 
 def _queue_escalation_live(conn, session_key: str | None, reason: str | None) -> None:
@@ -791,7 +807,14 @@ def _apply_contract(contract: dict, rec: dict) -> None:
     presented with the exact offered terms (so outcome/economics use presented, not
     authorized, terms), and route a cancellation as a real terminal action."""
     if contract.get("process_cancellation"):
-        _route_cancellation(rec)  # policy-gated by _validate_contract before we get here
+        # Record the policy disposition HERE — on the contract that is actually being applied,
+        # exactly once — so the audit trail and the eval envelope describe cancellations that
+        # really were routed (see the note in _validate_contract).
+        pv = policy.authorize("cancel_subscription", {}, {})
+        rec.setdefault("policy_decisions", []).append(
+            {"tool": "cancel_subscription", "action": pv["action"], "reason": pv["reason"]})
+        rec["audit"].append(("policy", f"cancel_subscription:{pv['action']}", pv["reason"]))
+        _route_cancellation(rec)
     offer = contract.get("offer") or {"kind": "none"}
     kind = offer.get("kind")
     if kind not in ("discount", "pause"):
@@ -864,6 +887,17 @@ def _ceiling_fallback(rec: dict, kind: str | None) -> str | None:
     # proposed 10% and later proposed 50% (capped by policy to the 20% ceiling), a failure
     # path would hand the customer 20%. A fallback must never deliver more value than the
     # agent could deliver on the happy path: on a failure we concede the LEAST.
+    # An offer the customer has ALREADY SEEN is never re-presented at a higher number.
+    # cheapest_authorized_of_kind() considers live offers including PRESENTED ones and
+    # returned their AUTHORIZED terms, so an offer committed to the customer at 5% inside a
+    # 20% ceiling was re-presented at 20% on the failure path — a 4x upgrade, overwriting
+    # presented_terms, logged as "capped_to_ceiling", in the same function whose docstring
+    # says "on a failure we concede the LEAST". Hold an already-presented offer at exactly
+    # the terms it was made on; only an unpresented one may be presented at its ceiling.
+    live = offers.presented(rec["offers"])
+    if live is not None and live.kind == kind:
+        terms = live.presented_terms or live.authorized_terms
+        return _CEILING_TEMPLATE.format(label=offers.human_terms(live, terms))
     off = offers.cheapest_authorized_of_kind(rec["offers"], kind)
     if off is None:
         return None

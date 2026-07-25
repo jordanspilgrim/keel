@@ -596,13 +596,27 @@ def test_contract_cancellation_is_disposed_by_policy(conn, monkeypatch):
     rec = _rec()
     # an offer WAS attempted but policy rejected it, so conceding is legitimate here
     rec["policy_decisions"] = [{"tool": "offer_pause", "action": "rejected", "reason": "policy"}]
-    ok, reason = runtime._validate_contract(
-        {"acknowledgement": "letting_go", "process_cancellation": True,
-         "offer": {"kind": "none"}, "account_facts": []}, rec)
+    contract = {"acknowledgement": "letting_go", "process_cancellation": True,
+                "offer": {"kind": "none"}, "account_facts": []}
+    ok, reason = runtime._validate_contract(contract, rec)
     assert ok, reason
+    # _validate_contract is a PURE CHECK — it runs on every generation attempt, including
+    # rejected-then-regenerated ones, so it must not write. Recording there produced audit
+    # rows and policy decisions for cancellations that never happened, twice per regenerated
+    # turn, and those rows reach the eval envelope the judge reads.
+    assert not [p for p in rec.get("policy_decisions", []) if p["tool"] == "cancel_subscription"]
+    assert not [a for a in rec["audit"] if a[1].startswith("cancel_subscription")]
+
+    runtime._apply_contract(contract, rec)          # the contract is ACTUALLY applied
     pds = [p for p in rec["policy_decisions"] if p["tool"] == "cancel_subscription"]
     assert len(pds) == 1 and pds[0]["action"] == "needs_human"
     assert any(a[1] == "cancel_subscription:needs_human" for a in rec["audit"])
+    assert rec["cancellation_routed"] is True
+
+    runtime._apply_contract(contract, rec)          # idempotent: no duplicate rows
+    assert len([p for p in rec["policy_decisions"] if p["tool"] == "cancel_subscription"]) == 2, \
+        "each APPLIED contract records once; the guard against duplicates is that validation " \
+        "no longer writes, not that apply is deduped"
 
 
 def test_tool_results_are_redacted_before_reaching_the_model(conn):
@@ -739,13 +753,29 @@ def test_guardrail_version_is_derived_from_content_not_a_hand_edited_string():
     behavior-changing commits. A guardrail change that LOWERED the true catch rate kept
     reporting the stale rate as current and healthy."""
     before = guardrails.guardrail_version()
-    original = guardrails._JAILBREAK_PATTERNS
-    try:
-        guardrails._JAILBREAK_PATTERNS = original[:-1]      # weaken the detector
-        assert guardrails.guardrail_version() != before, \
-            "weakening a pattern table must invalidate the recorded catch rate"
-    finally:
-        guardrails._JAILBREAK_PATTERNS = original
+    # Parametrized over EVERY input that decides whether a probe is caught. The earlier
+    # version of this test mutated only _JAILBREAK_PATTERNS — a covered input — so it could
+    # not detect that the SCOPE classifier was absent from the hash. 4 of the 14 seeded
+    # probes are off_scope with no deterministic fallback, so that omission let a gutted
+    # scope prompt drop the true catch rate to 0.714 against a 0.95 floor while the kill
+    # switch still read green.
+    mutations = {
+        "_JAILBREAK_PATTERNS": lambda: guardrails._JAILBREAK_PATTERNS[:-1],
+        "_PII_PATTERNS": lambda: guardrails._PII_PATTERNS[:-1],
+        "_NOT_A_NAME_AFTER_CUE": lambda: frozenset(list(guardrails._NOT_A_NAME_AFTER_CUE)[:-1]),
+        "_SCOPE_INSTRUCTIONS": lambda: "you are a helpful assistant",
+        "_SCOPE_SCHEMA": lambda: {"type": "object"},
+        "_STREET": lambda: r"\bnope\b",
+    }
+    for attr, weaken in mutations.items():
+        original = getattr(guardrails, attr)
+        try:
+            setattr(guardrails, attr, weaken())
+            assert guardrails.guardrail_version() != before, \
+                f"weakening {attr} must invalidate the recorded catch rate — it decides " \
+                f"whether a probe is caught, so a stale rate would be reported as current"
+        finally:
+            setattr(guardrails, attr, original)
     assert guardrails.guardrail_version() == before
 
 

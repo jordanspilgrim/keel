@@ -458,3 +458,55 @@ def test_a_run_is_only_reportable_when_it_is_a_matched_pair():
     assert not run_demo.run_is_reportable(**{**ok, "paired": False})
     assert not run_demo.run_is_reportable(**{**ok, "after_n": 59})    # treated arms differ
     assert not run_demo.run_is_reportable(**{**ok, "after_convs": 0})  # after arm empty
+
+
+def test_eval_eligibility_does_not_count_error_rows_as_graded(tmp_path):
+    """E2E#8's fix shipped with no test: `graded` was an unfiltered EXISTS, and BOTH writers
+    insert a verdict='error' row on a coverage miss, so graded == total unconditionally and
+    coverage was pinned to 1.0. Reverting the filter left the suite green."""
+    from analytics import themes
+    from evals import judge
+    conn = db.connect(str(tmp_path / "e.db"))
+    synth.generate(conn)
+    sc = conn.execute("SELECT id, customer_id FROM scenarios WHERE kind='churn' LIMIT 2").fetchall()
+    for i, row in enumerate(sc):
+        conn.execute("INSERT INTO conversations (customer_id, scenario_id, transcript_json, "
+                     "disposition_json, outcome, evidence_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                     (row["customer_id"], row["id"], "[]", "{}", "lost", "{}", "t"))
+        cid = conn.execute("SELECT last_insert_rowid() r").fetchone()["r"]
+        conn.execute("INSERT INTO evals (conversation_id, scores_json, verdict, rationale, "
+                     "fairness_flag, rubric_version, created_at) VALUES (?,?,?,?,?,?,?)",
+                     (cid, "{}", "pass" if i == 0 else "error", "r", 0, judge.EVAL_SPEC_VERSION, "t"))
+    conn.commit()
+    el = themes._eval_eligibility(conn, None, None)
+    assert el["total"] == 2 and el["graded"] == 1, el
+    assert el["coverage"] == 0.5, "an error row is a coverage MISS, not a grade"
+    conn.close()
+
+
+def test_the_demo_bails_rather_than_reporting_an_unpaired_run(monkeypatch, tmp_path, capsys):
+    """31f45b5 claimed the integrity bails were 'mutation-verified'. Only the extracted
+    PREDICATES were covered — the CALL SITES were not, so deleting the guard in run_once left
+    the suite green. This drives run_once far enough to reach the structural abort."""
+    import json
+    (tmp_path / "dashboard").mkdir()
+    monkeypatch.chdir(tmp_path)
+    _real_connect = db.connect
+    monkeypatch.setattr(run_demo.config, "DB_PATH", str(tmp_path / "k.db"))
+    monkeypatch.setattr(run_demo.db, "connect", lambda *a, **k: _real_connect(str(tmp_path / "k.db")))
+    # a signal whose segment no lever fits -> the lever-compatibility bail
+    monkeypatch.setattr(run_demo.themes, "recommend_intervention",
+                        lambda conn, **k: {"segment": "Moved house", "recommended_lever": None,
+                                           "lever_compatible": False, "confidence": 0.1,
+                                           "recommended_action": "none", "signal_id": 1,
+                                           "evidence": {"segment_ranking": []},
+                                           "eval_eligibility": {"eligible": 5, "total": 5,
+                                                                "coverage": 1.0, "rule": "r"}})
+    monkeypatch.setattr(run_demo.batch, "run_batch", lambda *a, **k: [])
+    monkeypatch.setattr(run_demo.run_evals, "grade_all", lambda *a, **k: {"n": 0})
+    monkeypatch.setattr(run_demo.themes, "run_analytics", lambda *a, **k: None)
+    monkeypatch.setattr(run_demo, "_redteam", lambda conn: ({"jailbreaks": 0, "off_scope": 0, "pii": 0}, 1.0))
+
+    assert run_demo.run_once(_real_connect(str(tmp_path / "k.db"))) is None, \
+        "a run whose signal has no compatible lever must bail, not report a lift"
+    assert "no available policy lever" in capsys.readouterr().out

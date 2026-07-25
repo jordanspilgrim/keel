@@ -384,8 +384,8 @@ materially the same measurement path.
 So the drop from +23.3 to +15.0 must **not** be read as cleanly "the confound was worth 8pp" — the
 estimator's own spread is the same order as the effect being corrected, and separating them would
 take more batches than were run. What all three agree on is direction and rough magnitude. The
-honest claim is **a consistently positive treated-segment lift, roughly the +7 to +25pp band across
-three independent pre-registered estimates**, not a point estimate; quoting any one of the three
+honest claim is **a consistently positive treated-segment lift; every one of the 15 individual runs
+across three pre-registered estimates landed in [+5.0, +25.0]pp**, not a point estimate; quoting any one of the three
 alone would be sequence cherry-picking of exactly the kind the pre-registration exists to prevent. Two variables change together and there is no
 randomized holdout, so this remains a paired *demonstration*, not an isolated causal estimate.
 
