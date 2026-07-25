@@ -1,62 +1,62 @@
 {
-  "generated_at": "2026-07-24T04:28:02.274834+00:00",
+  "generated_at": "2026-07-25T01:00:35.682100+00:00",
   "method": "pre-registered median of k paired runs; fixed seed (identical world), so the variance measured is the LLM-draw variance a re-run actually sees; every run included; committed headline is the median run, not the max",
   "k": 5,
   "seed": 42,
   "treated_cohort_n": 60,
   "run_ids": [
-    "run-20260724T032049",
-    "run-20260724T033415",
-    "run-20260724T034654",
-    "run-20260724T035915",
-    "run-20260724T041318"
+    "run-20260724T234820",
+    "run-20260725T000504",
+    "run-20260725T002018",
+    "run-20260725T003416",
+    "run-20260725T004648"
   ],
-  "committed_run_id": "run-20260724T033415",
+  "committed_run_id": "run-20260725T002018",
   "segment_save_pp": {
-    "median": 11.7,
-    "min": 5.0,
-    "max": 18.3,
+    "median": 23.3,
+    "min": 10.0,
+    "max": 25.0,
     "values": [
-      5.0,
-      11.7,
-      13.3,
-      18.3,
-      11.7
+      10.0,
+      25.0,
+      23.3,
+      15.0,
+      25.0
     ]
   },
   "segment_madj_pp": {
-    "median": 9.6,
-    "min": 4.1,
-    "max": 15.2,
+    "median": 18.7,
+    "min": 8.0,
+    "max": 20.1,
     "values": [
-      4.1,
-      9.3,
-      10.9,
-      15.2,
-      9.6
+      8.0,
+      19.9,
+      18.7,
+      12.0,
+      20.1
     ]
   },
   "overall_save_pp": {
-    "median": 10.0,
+    "median": 17.5,
     "min": 6.2,
-    "max": 16.3,
+    "max": 23.8,
     "values": [
       6.2,
+      23.8,
+      17.5,
       10.0,
-      16.3,
-      15.0,
-      7.5
+      22.5
     ]
   },
   "eval_pass_rate": {
-    "median": 0.838,
-    "min": 0.8,
-    "max": 0.863
+    "median": 0.863,
+    "min": 0.812,
+    "max": 0.9
   },
   "outcome_parity_gap": {
-    "median": 0.068,
-    "min": 0.003,
-    "max": 0.144,
+    "median": 0.074,
+    "min": 0.0,
+    "max": 0.08,
     "observational": true
   }
 }

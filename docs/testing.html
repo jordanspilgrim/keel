@@ -166,9 +166,9 @@ open dashboard/index.html   <span class="c"># shows the committed median run</sp
 ③ LEARN — structured intervention signal (worst lever-compatible segment):
   Price too high  n=60 · loss=… · lever=discount   ← selected, persisted signal #1
 PRE-REGISTERED MEDIAN-OF-5  (treated price-sensitive segment · n=60)
-  segment save lift:  median <span class="g">+11.7 pp</span>   range [+5.0, +18.3] pp   (all 5 positive)
-  committed run:      run-20260724T033415   (18%  →  30%)
-  eval pass median 84% (range 80–86%) · guardrail catch 100% · compliance 100% · paired cohort: True</pre>
+  segment save lift:  median <span class="g">+23.3 pp</span>   range [+10.0, +25.0] pp   (all 5 positive)
+  committed run:      run-20260725T002018   (5%  →  28%)
+  eval pass median 86% (range 81–90%) · guardrail catch 100% · compliance 100% · paired cohort: True</pre>
   <p class="proves">Proves the definition of done: on <b>identical seeded customers</b>, acting on the analytics signal (chosen from EVAL-ELIGIBLE baseline conversations, enable discounts for the price-sensitive segment) produced a measured lift <b>on the treated segment</b> — the flywheel visibly turning. Single runs are noisy, so the committed headline is the pre-registered median; the run requires a matched paired cohort and a strictly-positive treated-segment lift, and writes the k=5 distribution to <code>dashboard/demo_aggregate.json</code> (+ the committed run to <code>dashboard/manifest.json</code>).</p>
 
   <h2>What each command proves, at a glance</h2>
