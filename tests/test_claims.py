@@ -26,6 +26,19 @@ def _declared_test_functions() -> int:
     return n
 
 
+def _read_dashboard_data() -> dict:
+    """The committed dashboard payload.
+
+    Reads data.js, which is TRACKED, rather than data.json, which .gitignore excludes. The
+    two are byte-identical apart from the `window.KEEL_DATA = ` prefix, but only one of them
+    exists in a fresh clone — so these guards (the R10-F1 median-run check and the
+    eval-population check) failed with FileNotFoundError on `pytest tests/`, the very first
+    command the README lists under "no API key needed". Verified against a clean clone of
+    HEAD: 2 failed, before this."""
+    raw = _read("dashboard/data.js")
+    return json.loads(raw.split("=", 1)[1].strip().rstrip(";\n").rstrip(";"))
+
+
 def _read(rel: str) -> str:
     with open(os.path.join(_ROOT, rel)) as fh:
         return fh.read()
@@ -104,7 +117,7 @@ def test_readme_cites_each_eval_population_with_its_own_number():
     quoting one number as if it covered both (which previously made 'coverage ≥99%' false
     against the committed manifest)."""
     man = json.loads(_read("dashboard/manifest.json"))
-    data = json.loads(_read("dashboard/data.json"))
+    data = _read_dashboard_data()
     readme = _read("README.md")
     for value in (round(man["after"]["eval_coverage"] * 100, 1),
                   round(man["after"]["eval_pass_rate"] * 100, 1),
@@ -120,7 +133,7 @@ def test_dashboard_data_renders_the_committed_median_run():
     it must render the SAME committed (median) run as the manifest, not whatever ran LAST in
     the k-loop. run_median re-exports data.js from the committed run to guarantee this."""
     man = json.loads(_read("dashboard/manifest.json"))
-    data = json.loads(_read("dashboard/data.json"))
+    data = _read_dashboard_data()
     assert data["meta"]["provenance"]["run_id"] == man["run_id"], \
         "dashboard renders a different run than the committed manifest — the primary surface overstates the headline"
     assert round(data["kpis"]["save_delta_pp"], 1) == man["lift"]["segment_save_pp"], \
@@ -139,3 +152,22 @@ def test_html_demo_docs_cite_the_pre_registered_median():
         assert str(sp["median"]) in text, f"{rel} must cite the median lift {sp['median']}"
         assert str(sp["max"]) in text, f"{rel} must cite the range max {sp['max']}"
         assert f"n={treated_n}" in text, f"{rel} must cite the treated cohort n={treated_n}"
+
+
+def test_every_test_cited_in_the_docs_actually_exists():
+    """E2E#21: cross-referencing every `test_*` identifier named in BUILD.md/README.md
+    against the suite found NINE citations naming tests that exist nowhere in the repo —
+    removed by a later refactor, while the rows kept citing them as live evidence. The
+    remediation matrix is the document a reviewer uses to check that a claimed fix is
+    actually tested, so a citation that resolves to nothing is worse than no citation.
+    test_claims only ever checked numeric drift."""
+    real = set()
+    for f in glob.glob(os.path.join(_ROOT, "tests", "test_*.py")):
+        with open(f) as fh:
+            real |= set(re.findall(r"^def (test_\w+)", fh.read(), re.M))
+    filenames = {os.path.basename(f)[:-3] for f in glob.glob(os.path.join(_ROOT, "tests", "test_*.py"))}
+    cited = set()
+    for rel in ("BUILD.md", "README.md"):
+        cited |= set(re.findall(r"`(test_\w+)`", _read(rel)))
+    phantom = sorted(cited - real - filenames)
+    assert not phantom, f"docs cite tests that do not exist: {phantom}"

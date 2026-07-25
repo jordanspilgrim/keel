@@ -18,10 +18,39 @@ Design choices:
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import re
 
 import config
 import llm
+
+
+def guardrail_version() -> str:
+    """A content hash over everything that decides whether a probe is caught.
+
+    config.GUARDRAIL_VERSION was a hand-maintained string, and it had already drifted: it
+    was last bumped in 347ccae, after which agent/guardrails.py took five behavior-changing
+    commits (+103/-2) including wiring classify_injection into screen_input. The kill
+    switch's only code-identity check is string equality against that marker, so a
+    guardrail change that LOWERED the true catch rate kept reporting the stale rate as
+    current and healthy, bounded only by GUARDRAIL_HEALTH_MAX_AGE_DAYS. Probed: narrowing
+    two jailbreak patterns drops the real catch rate to 0.86 while program_state still
+    reports 'normal' and /api/metrics still reports 1.0.
+
+    evals/judge._spec_version() already solves exactly this for grades; this is the same
+    approach for guardrails — the pattern tables, the classifier prompt/model, and the
+    SOURCE of the functions that use them.
+    """
+    parts = [
+        repr(sorted((rx.pattern, kind) for rx, _repl, kind in _PII_PATTERNS)),
+        repr(sorted(getattr(p, "pattern", p) for p in _JAILBREAK_PATTERNS)),
+        repr(sorted(_NOT_A_NAME_AFTER_CUE)),
+        _STREET, _WEAK_CUE_SINGLE_NAME.pattern, _SENSITIVE_TERMS.pattern,
+        config.MINI_MODEL,
+        "".join(inspect.getsource(f) for f in (redact_pii, screen_input, classify_injection)),
+    ]
+    return "g-" + hashlib.sha256("||".join(parts).encode()).hexdigest()[:12]
 
 # --- PII / sensitive-data redaction (runs before any log or embed) ---------
 _STREET = (r"\b\d{1,6}\s+(?:[A-Z][a-z]+\.?\s+){1,3}"
@@ -488,7 +517,11 @@ def check_grounding(reply: str, tool_results: list[str]) -> dict:
     return {"flagged": False, "reason": ""}
 
 
-def screen_output(reply: str, tool_results: list[str], *, authorized: dict | None = None) -> dict:
-    """Full output-guardrail pass over an agent reply."""
-    return {"tone": check_tone(reply), "promise": check_promise(reply, authorized=authorized),
-            "grounding": check_grounding(reply, tool_results)}
+# NOTE: screen_output() was DELETED here in R12. It was documented as "Full output-guardrail
+# pass" and had been edited twice in remediation commits to track check_promise's signature,
+# but AST analysis found exactly one reference repo-wide -- its own definition. The live gate
+# is runtime._screen_contract. Worse, the dead function would have failed OPEN: with
+# moderation unavailable _screen_contract branches on `degraded` and BLOCKS, while
+# screen_output returned all three sub-verdicts unflagged with no top-level verdict, so a
+# caller doing `any(v["flagged"] ...)` would have read all-clear. Dead code that poses as a
+# safety control is worse than no code.

@@ -68,7 +68,7 @@ def main() -> int:
     _c = sum(v[0] for v in caught.values())
     _t = sum(v[1] for v in caught.values())
     db.record_health(conn, "guardrail_catch_rate", _c / _t if _t else 0.0, f"{_c}/{_t} probes caught",
-                     version=config.GUARDRAIL_VERSION)
+                     version=guardrails.guardrail_version())
 
     # PII must actually be scrubbed from the text (not just detected)
     card = next(p for p in probes if p["attack_type"] == "pii_leak" and "4111" in p["opening_message"])

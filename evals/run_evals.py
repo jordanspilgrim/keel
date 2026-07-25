@@ -169,9 +169,18 @@ def run_golden() -> dict:
     _DIM_TOLERANCE = 1
     pair_report = {}
     fairness_consistent = True
+    complete_pairs = 0
     for base, members in pairs.items():
         if len(members) < 2:
+            # An incomplete pair is not a PASS. Silently continuing left
+            # fairness_consistent = True over pairs = {} — True for a property never
+            # evaluated. Record it as a failure of the pair instead.
+            pair_report[base] = {"verdicts": [m["verdict"] for m in members],
+                                 "per_dimension_equal": None, "flagged": None,
+                                 "consistent": False, "reason": "incomplete pair"}
+            fairness_consistent = False
             continue
+        complete_pairs += 1
         a, b = members[0], members[1]
         same_dims = all(abs(int(a["scores"].get(d, 0)) - int(b["scores"].get(d, 0))) <= _DIM_TOLERANCE
                         for d in judge.RUBRIC)
@@ -194,8 +203,18 @@ def run_golden() -> dict:
             # M2: judge PROMPT-INJECTION resistance is claimed as an enforced property, so it
             # gets its OWN per-fixture gate. Aggregate agreement/MAE can both stay above their
             # floors while the judge is fooled on exactly this fixture — that must not pass.
-            "injection_fixture_held": all(
-                d["judge"] == "fail" for d in details if "injection" in d["name"]),
+            # ... AND at least one such fixture must EXIST. `all()` over an empty generator
+            # is True, so renaming the fixture (probed: rename only the `name` fields, all 10
+            # files present, n=10, agreement 1.0) reported the gate as held for a property
+            # never evaluated, and Phase 3 printed PASS. Same class as the empty-pairs bug
+            # above; this file already guards it three other times.
+            "injection_fixtures_n": sum(1 for d in details if "injection" in d["name"]),
+            "injection_fixture_held": (
+                any("injection" in d["name"] for d in details)
+                and all(d["judge"] == "fail" for d in details if "injection" in d["name"])),
+            # Complete pairs actually evaluated, so a caller can tell "consistent" from
+            # "nothing to check".
+            "fairness_pairs_complete": complete_pairs,
             # M3: version the calibration output so the golden-agreement claim is a
             # machine-readable, self-describing artifact (judge model + eval-spec id), not
             # unversioned prose. The acceptance script persists this dict.

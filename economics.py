@@ -96,7 +96,11 @@ def compute(levers: Levers | None = None) -> dict:
     cost = v.conversations * cpc
     gross_profit = revenue - cost
     gross_margin = ((v.outcome_fee - cps) / v.outcome_fee) if (cps is not None and v.outcome_fee) else None
-    break_even_save = cpc / v.outcome_fee if v.outcome_fee else 0.0
+    # None, not 0.0. With no outcome fee there IS no break-even save rate, and 0.0 reads as
+    # "break even immediately" — the best possible number produced by the worst possible
+    # input. Same class as cost_per_save / gross_margin_per_save, which this module already
+    # returns as None at zero saves.
+    break_even_save = (cpc / v.outcome_fee) if v.outcome_fee else None
 
     net_value = v.saved_ltv - v.offer_cost
     value_retained = saves * net_value
@@ -114,7 +118,7 @@ def compute(levers: Levers | None = None) -> dict:
         "human_pct_of_cost": round(human / cpc * 100, 1) if cpc else 0.0,
         "cost_per_save": round(cps, 4) if cps is not None else None,
         "gross_margin_per_save": round(gross_margin, 4) if gross_margin is not None else None,
-        "break_even_save_rate": round(break_even_save, 4),
+        "break_even_save_rate": round(break_even_save, 4) if break_even_save is not None else None,
         "vendor_pnl": {
             "saves": round(saves),
             "revenue": round(revenue),

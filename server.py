@@ -31,7 +31,7 @@ import time
 import uuid
 
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 import db
@@ -104,6 +104,11 @@ def chat_start(req: StartReq):
         conn.close()
     sid = uuid.uuid4().hex
     with _LOCK:
+        _evict()  # reclaim resolved/abandoned sessions before testing the cap
+        if len(SESSIONS) >= _MAX_LIVE_SESSIONS:
+            # A 1-hour TTL alone does not bound anything: a client can open sessions faster
+            # than they expire. Refuse rather than grow without limit.
+            raise HTTPException(503, "too many concurrent live sessions — try again shortly")
         session["_session_id"] = sid  # so live_turn can durably key a routed cancellation
         session["_last_active"] = time.time()
         SESSIONS[sid] = session
@@ -131,6 +136,16 @@ def _evict() -> None:
 
 
 _MAX_MESSAGE_CHARS = 4000
+# RT27: "bound memory" was enforced only by a 1-hour TTL, so nothing stopped a client
+# opening sessions faster than they expire. A hard cap makes the claim true.
+_MAX_LIVE_SESSIONS = 500
+
+
+@app.exception_handler(OverflowError)
+def _overflow_handler(request, exc):
+    """RT26: an out-of-INT64 integer (e.g. customer_id 10**19) reached sqlite3 and raised
+    OverflowError, surfacing as a 500. That is a malformed request, not a server fault."""
+    return JSONResponse(status_code=422, content={"detail": "numeric value out of range"})
 
 
 @app.post("/api/chat/turn")

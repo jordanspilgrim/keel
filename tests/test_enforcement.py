@@ -688,3 +688,70 @@ def test_signal_recommendation_is_redacted_like_the_theme_label(conn):
     sig = themes.rank_signals(cards)[0]
     assert "Maria Garcia" not in sig["recommendation"]
     assert "[REDACTED_NAME]" in sig["recommendation"]
+
+
+# --- R12-F: gates that were vacuous, and coverage that did not exist -------------
+def test_grounding_half_of_the_output_cross_check_is_wired(conn, monkeypatch):
+    """E2E#24: the comment above this cross-check names 'unit-tested but unwired' as the
+    defect being remediated, and then the PROMISE half got a wiring test while the GROUNDING
+    half did not — leaving it tested only in isolation, exactly the pattern the comment
+    condemns. Mutation: deleting the grounding branch left the suite green."""
+    rec = _rec()
+    monkeypatch.setattr(runtime, "_render_reply", lambda c, r: "Your balance is $4,204.11.")
+    monkeypatch.setattr(runtime, "_validate_contract", lambda c, r: (True, ""))
+    monkeypatch.setattr(runtime.guardrails, "check_tone", lambda t: {"flagged": False, "degraded": False})
+    monkeypatch.setattr(runtime.guardrails, "check_promise", lambda t, authorized=None: {"flagged": False})
+    monkeypatch.setattr(runtime, "_generate_contract",
+                        lambda il, sysmsg, corrective="": {"acknowledgement": "price",
+                                                           "offer": {"kind": "none"},
+                                                           "process_cancellation": False,
+                                                           "account_facts": []})
+    ok, reason, _c, rendered = runtime._screen_contract([], runtime.SYSTEM, rec, "")
+    assert not ok and "output cross-check" in reason
+    assert rendered == "" and any(e[0] == "grounding" for e in rec["guardrail"])
+
+
+def test_persist_rejects_an_empty_transcript_instead_of_failing_open(conn):
+    """E2E#20: the guard was `if record.get("transcript") and not has_disclosure(...)`, so an
+    EMPTY list short-circuited it. The row persisted and was then counted as NON-disclosing
+    by export.compliance_coverage — the gate README states absolutely failing open on the
+    emptiest possible input. Its two sibling invariants each had a negative test; this had none."""
+    rec = {"customer_id": 1, "scenario_id": None, "transcript": [], "disposition": {},
+           "outcome": "lost", "offer_made": None, "evidence": {}, "guardrail_events": [],
+           "audit": [], "resolution_key": None}
+    with pytest.raises(ValueError, match="disclosure"):
+        runtime.persist_conversation(conn, rec)
+
+
+def test_median_estimator_rejects_k_below_three():
+    """E2E#17 / RT24: only `k < 1` was rejected, so --k=1 printed 'PRE-REGISTERED
+    MEDIAN-OF-1', exited 0, and wrote an aggregate whose method string claims the headline
+    is 'the median run, not the max' over a sample of ONE."""
+    import run_demo
+    for bad in (1, 2, 4):
+        with pytest.raises(SystemExit):
+            run_demo.run_median(k=bad)
+
+
+def test_guardrail_version_is_derived_from_content_not_a_hand_edited_string():
+    """E2E#16: the kill switch's only code-identity check was string equality against
+    config.GUARDRAIL_VERSION, last bumped in 347ccae — after which guardrails.py took five
+    behavior-changing commits. A guardrail change that LOWERED the true catch rate kept
+    reporting the stale rate as current and healthy."""
+    before = guardrails.guardrail_version()
+    original = guardrails._JAILBREAK_PATTERNS
+    try:
+        guardrails._JAILBREAK_PATTERNS = original[:-1]      # weaken the detector
+        assert guardrails.guardrail_version() != before, \
+            "weakening a pattern table must invalidate the recorded catch rate"
+    finally:
+        guardrails._JAILBREAK_PATTERNS = original
+    assert guardrails.guardrail_version() == before
+
+
+def test_the_dead_output_gate_is_gone():
+    """E2E#21: screen_output was documented as 'Full output-guardrail pass' with exactly one
+    reference repo-wide (its own definition), and would have failed OPEN under moderation
+    degradation while the live gate fails closed. DISPOSITION_SCHEMA was likewise orphaned."""
+    assert not hasattr(guardrails, "screen_output")
+    assert not hasattr(runtime, "DISPOSITION_SCHEMA")

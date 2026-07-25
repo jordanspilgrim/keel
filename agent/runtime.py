@@ -33,20 +33,9 @@ from agent import disclosure, guardrails, offers, policy, safety, tools
 MAX_TURNS = 4          # agent<->customer exchanges before we call it lost
 MAX_HOPS = 5           # tool-resolution hops within a single agent turn
 
-DISPOSITION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "intent": {"type": "string"},
-        "churn_reason": {"type": "string"},
-        "offer_made": {"type": ["string", "null"]},
-        "offer_accepted": {"type": "boolean"},
-        "outcome": {"type": "string", "enum": ["saved", "lost", "escalated"]},
-        "confidence": {"type": "number"},
-    },
-    "required": ["intent", "churn_reason", "offer_made", "offer_accepted", "outcome", "confidence"],
-    "additionalProperties": False,
-}
-
+# NOTE: DISPOSITION_SCHEMA was DELETED here in R12 — orphaned, zero references repo-wide.
+# The live disposition read uses _INTENT_SCHEMA below. An unused schema sitting next to the
+# one actually in force invites edits to the wrong one.
 _INTENT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1151,7 +1140,11 @@ def persist_conversation(conn, record: dict) -> int:
     # a transcript whose first assistant turn is not the disclosure never reaches the store.
     # (Previously has_disclosure() had no caller in the request path, so a new channel adapter
     # that forgot to prepend would have shipped a silently non-disclosing agent.)
-    if record.get("transcript") and not disclosure.has_disclosure(record["transcript"]):
+    # `record.get("transcript") and ...` short-circuited on an EMPTY list, so a
+    # transcript-less record persisted and was then counted as NON-disclosing by
+    # export.compliance_coverage — the gate README states absolutely ("a non-disclosing
+    # transcript can never reach the store") failing open on the emptiest possible input.
+    if not disclosure.has_disclosure(record.get("transcript") or []):
         raise ValueError("compliance violation: transcript is missing the mandatory AI disclosure turn")
     # De-identify before storage/embedding: redact EVERY role defensively (data
     # minimization). User turns are normally redacted at input, but the terminal

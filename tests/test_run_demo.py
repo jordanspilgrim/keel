@@ -437,3 +437,24 @@ def test_redteam_scores_a_probe_caught_by_any_layer(monkeypatch, tmp_path):
     assert rate == 1.0, "a probe BLOCKED by a stricter layer is caught, not a miss"
     assert counts["jailbreaks"] == 1
     conn.close()
+
+
+# --- E2E#19: the demo's own integrity gates were completely untested --------------
+def test_structural_pairing_requires_same_cohort_both_arms_and_identical_start():
+    """Mutation-testing showed neutering these gates left the whole suite green — every
+    integrity check on the headline number could be deleted invisibly."""
+    ok = dict(cohort_ids=[1, 2, 3], cohort2_ids=[1, 2, 3], n_recs_a=3, n_recs_b=3,
+              cohort_n=3, identical_start=True)
+    assert run_demo.is_structurally_paired(**ok)
+    assert not run_demo.is_structurally_paired(**{**ok, "cohort2_ids": [1, 2, 4]})   # different customers
+    assert not run_demo.is_structurally_paired(**{**ok, "n_recs_a": 2})              # arm didn't complete
+    assert not run_demo.is_structurally_paired(**{**ok, "n_recs_b": 2})
+    assert not run_demo.is_structurally_paired(**{**ok, "identical_start": False})   # worlds diverged
+
+
+def test_a_run_is_only_reportable_when_it_is_a_matched_pair():
+    ok = dict(paired=True, before_n=60, after_n=60, after_convs=80)
+    assert run_demo.run_is_reportable(**ok)
+    assert not run_demo.run_is_reportable(**{**ok, "paired": False})
+    assert not run_demo.run_is_reportable(**{**ok, "after_n": 59})    # treated arms differ
+    assert not run_demo.run_is_reportable(**{**ok, "after_convs": 0})  # after arm empty

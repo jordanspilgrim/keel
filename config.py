@@ -59,8 +59,12 @@ JUDGE_CONFIDENCE_FLOOR = 0.60       # agent disposition below this → escalate
 # Guardrail-health provenance: a persisted red-team result only counts as a valid
 # kill-switch input if it was produced by THIS guardrail version and is recent. A
 # stale or version-mismatched result must not keep authorizing normal mode after
-# the guardrails have changed. Bump GUARDRAIL_VERSION whenever guardrails change.
-GUARDRAIL_VERSION = "4"             # prose-bound contract + claim validation + terminal escalation
+# the guardrails have changed. The code-identity check is guardrails.guardrail_version(), a
+# CONTENT HASH — this string is a human-readable label only and is not load-bearing. It used
+# to be the check, and it had already drifted five behavior-changing commits behind the code
+# it claimed to version, so a guardrail change that lowered the true catch rate kept
+# reporting the stale rate as current and healthy.
+GUARDRAIL_VERSION_LABEL = "4"       # prose-bound contract + claim validation + terminal escalation
 GUARDRAIL_HEALTH_MAX_AGE_DAYS = 7   # older red-team results are treated as stale
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import json
 import pytest
 
 import config
+from agent import guardrails
 import db
 import synth
 from agent import offers, runtime, safety
@@ -145,13 +146,13 @@ def test_stale_version_health_forces_safe_mode(conn):
 
 
 def test_below_floor_health_forces_safe_mode(conn):
-    db.record_health(conn, "guardrail_catch_rate", 0.50, "bad", version=config.GUARDRAIL_VERSION)
+    db.record_health(conn, "guardrail_catch_rate", 0.50, "bad", version=guardrails.guardrail_version())
     st = safety.program_state(conn)
     assert st["healthy"] is False and any("catch rate" in r for r in st["reasons"])
 
 
 def test_current_healthy_signal_stays_normal(conn):
-    db.record_health(conn, "guardrail_catch_rate", 1.0, "good", version=config.GUARDRAIL_VERSION)
+    db.record_health(conn, "guardrail_catch_rate", 1.0, "good", version=guardrails.guardrail_version())
     st = safety.program_state(conn)
     assert st["healthy"] is True and st["mode"] == "normal"
 

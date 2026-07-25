@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 import config
 import db
+from agent import guardrails
 from evals import judge
 
 _MIN_SAMPLE = 10          # don't judge health until there's a sample
@@ -64,9 +65,9 @@ def program_state(conn) -> dict:
         metrics["guardrail_catch_rate"] = round(catch_rate, 3)
         metrics["guardrail_health_version"] = row["version"]
         metrics["guardrail_health_age_days"] = round(age, 2) if age is not None else None
-        if row["version"] != config.GUARDRAIL_VERSION:
+        if row["version"] != guardrails.guardrail_version():
             reasons.append(f"guardrail health from version {row['version']} != current "
-                           f"{config.GUARDRAIL_VERSION} (re-run the red-team)")
+                           f"{guardrails.guardrail_version()} (re-run the red-team)")
         elif age is not None and age > config.GUARDRAIL_HEALTH_MAX_AGE_DAYS:
             reasons.append(f"guardrail health is {age:.0f}d old (> {config.GUARDRAIL_HEALTH_MAX_AGE_DAYS}d)")
         elif catch_rate < config.GUARDRAIL_CATCH_RATE_FLOOR:

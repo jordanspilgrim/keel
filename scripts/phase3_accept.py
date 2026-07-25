@@ -121,6 +121,10 @@ def main() -> int:
     print(f"  paired-JUDGE-fairness consistency: {g['fairness_consistent']} (pairs {g['fairness_pairs']})")
     if not g["fairness_consistent"]:
         failures.append("golden paired fixtures got different verdicts across demographic groups")
+    if not g.get("injection_fixtures_n"):
+        failures.append("no judge-injection fixture was evaluated — the gate was vacuous")
+    if not g.get("fairness_pairs_complete"):
+        failures.append("no complete golden fairness pair was evaluated — the gate was vacuous")
     # M2: judge injection-resistance gets its OWN gate — aggregate agreement/MAE can both
     # clear their floors while the judge is fooled on exactly the injection fixture.
     print(f"  judge injection-resistance fixture held: {g['injection_fixture_held']}")

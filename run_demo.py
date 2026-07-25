@@ -141,8 +141,32 @@ def _redteam(conn) -> tuple[dict, float]:
     # red-team result without recomputing it (an LLM call per probe) on every poll.
     # Tag it with the guardrail version so a later guardrail change invalidates it.
     db.record_health(conn, "guardrail_catch_rate", rate, f"{caught}/{total} probes caught",
-                     version=config.GUARDRAIL_VERSION)
+                     version=guardrails.guardrail_version())
     return counts, rate
+
+
+# ---------------------------------------------------------------------------
+# run_once's INTEGRITY GATES, extracted as pure predicates.
+#
+# Line-trace instrumentation over the whole suite showed that of run_once's ~190 lines only
+# the `def` executed: all five tests touching the demo stub run_once out. Mutation-testing
+# confirmed the consequence — neutering the lever-compatibility bail, the identical-start
+# bail, and the H5 unpaired-run abort left the suite fully green. Every integrity gate on
+# the headline number could be deleted invisibly. They are pure local predicates needing no
+# network, so there is no reason for them to be untestable.
+# ---------------------------------------------------------------------------
+def is_structurally_paired(*, cohort_ids, cohort2_ids, n_recs_a, n_recs_b, cohort_n,
+                           identical_start) -> bool:
+    """Both arms ran the SAME customers, both completed, and both started from a
+    byte-identical world. Anything else cannot yield an honest paired lift."""
+    return (cohort_ids == cohort2_ids and n_recs_a == cohort_n and n_recs_b == cohort_n
+            and bool(identical_start))
+
+
+def run_is_reportable(*, paired: bool, before_n: int, after_n: int, after_convs: int) -> bool:
+    """H5: a run may only be reported (or counted toward a median) if it is paired, the
+    treated arms match in size, and the after arm produced conversations."""
+    return bool(paired) and before_n == after_n and after_convs > 0
 
 
 _SNAPSHOT_COLS = ("customer_id", "plan", "price", "status", "last_save_offer_days")
@@ -292,13 +316,15 @@ def run_once(conn, run_id: str | None = None) -> dict | None:
     seg_lift = (after_seg["save_rate"] - before_seg["save_rate"]) * 100
     seg_madj = (after_seg["madj_save_rate"] - before_seg["madj_save_rate"]) * 100
     overall_lift = (after["save_rate"] - before["save_rate"]) * 100
-    paired = (cohort_ids == cohort2_ids and len(recs_a) == len(cohort)
-              and len(recs_b) == len(cohort2) and identical_start)
+    paired = is_structurally_paired(
+        cohort_ids=cohort_ids, cohort2_ids=cohort2_ids, n_recs_a=len(recs_a),
+        n_recs_b=len(recs_b), cohort_n=len(cohort), identical_start=identical_start)
     # H5: an UNPAIRED run (cohort mismatch, arm-count mismatch, treated-n mismatch, or zero
     # coverage) is STRUCTURALLY invalid — it cannot yield an honest paired lift. Abort it
     # (return None) rather than write artifacts or let it count toward a median; the demo's
     # own definition of done requires a matched pair.
-    if not paired or before_seg["n"] != after_seg["n"] or after["n"] == 0:
+    if not run_is_reportable(paired=paired, before_n=before_seg["n"],
+                             after_n=after_seg["n"], after_convs=after["n"]):
         print(f"\n   ⚠ structural failure (paired={paired}, treated_n {before_seg['n']}/{after_seg['n']}, "
               f"after_convs {after['n']}) — aborting this run rather than report a "
               f"confounded or empty result.")
@@ -319,7 +345,7 @@ def run_once(conn, run_id: str | None = None) -> dict | None:
                               "Act via the persisted signal id (clustering does NOT drive it)"),
         "intervention_signal_id": signal_id,
         "intervention_signal": signal,
-        "guardrail_version": config.GUARDRAIL_VERSION,
+        "guardrail_version": guardrails.guardrail_version(),
         "variables_changed": ["discount_policy", "agent_playbook"],
         "held_constant": ["cohort_scenarios", "starting_subscription_state", "eligibility"],
         "identical_starting_state": identical_start,
@@ -415,9 +441,14 @@ def run_median(k: int = 5) -> int:
     # only exists for odd k. For even k the median is interpolated (a value no single run
     # need equal), so manifest.json (a real committed run) would disagree with the reported
     # aggregate median. Reject rather than silently ship divergent artifacts.
-    if k % 2 == 0 or k < 1:
-        raise SystemExit(f"--k must be a positive ODD integer (got {k}); an even k has no real "
-                         f"median run, so the committed manifest and the aggregate median would diverge")
+    # k < 3 is not a variance-controlled estimate. --k=1 used to pass every guard, print
+    # "PRE-REGISTERED MEDIAN-OF-1", exit 0, and write demo_aggregate.json whose `method`
+    # string claims "the committed headline is the median run, not the max" over a sample
+    # of ONE — satisfying every assertion in the median test vacuously.
+    if k % 2 == 0 or k < 3:
+        raise SystemExit(f"--k must be an ODD integer >= 3 (got {k}); an even k has no real "
+                         f"median run, and k<3 is a single draw dressed as a variance-"
+                         f"controlled estimate")
     conn = db.connect()
     runs: list[dict] = []          # each is {"manifest": ..., "data": ...} from run_once
     snap_dir = tempfile.mkdtemp(prefix="keel-demo-db-")  # ephemeral per-run DB snapshots (H5)
