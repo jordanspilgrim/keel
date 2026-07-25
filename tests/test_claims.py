@@ -145,6 +145,7 @@ def test_html_demo_docs_cite_the_pre_registered_median():
     README/aggregate — no stale cross-run mixing (the sixth-review defect was an old n=20
     cohort beside a freshly-updated lift in one sentence). Extracted from the aggregate."""
     agg = json.loads(_read("dashboard/demo_aggregate.json"))
+    man = json.loads(_read("dashboard/manifest.json"))
     sp = agg["segment_save_pp"]
     treated_n = agg["treated_cohort_n"]
     for rel in ("docs/index.html", "docs/how-it-works.html"):
@@ -152,6 +153,11 @@ def test_html_demo_docs_cite_the_pre_registered_median():
         assert str(sp["median"]) in text, f"{rel} must cite the median lift {sp['median']}"
         assert str(sp["max"]) in text, f"{rel} must cite the range max {sp['max']}"
         assert f"n={treated_n}" in text, f"{rel} must cite the treated cohort n={treated_n}"
+        # The run_id was NOT pinned here, and that is exactly how docs/index.html kept
+        # naming the PREVIOUS batch's run as "the committed median-lift run, shown on the
+        # dashboard" after a re-run had already reconciled the medians around it. Citing
+        # the right number beside the wrong provenance is its own kind of false.
+        assert man["run_id"] in text, f"{rel} must cite the committed run_id {man['run_id']}"
 
 
 def test_every_test_cited_in_the_docs_actually_exists():
@@ -171,3 +177,18 @@ def test_every_test_cited_in_the_docs_actually_exists():
         cited |= set(re.findall(r"`(test_\w+)`", _read(rel)))
     phantom = sorted(cited - real - filenames)
     assert not phantom, f"docs cite tests that do not exist: {phantom}"
+
+
+def test_build_md_cites_the_current_median_and_committed_run():
+    """BUILD.md is the 'source of truth' doc and was the ONE doc whose demo numbers no test
+    pinned — so after the R12 re-run it still carried the previous build's +23.3pp headline in
+    two summary rows while README and the HTML docs had been reconciled. Historical rows are
+    allowed to name old figures (the estimator's own history is part of the record); what must
+    be true is that the CURRENT median, range and committed run_id all appear."""
+    agg = json.loads(_read("dashboard/demo_aggregate.json"))
+    man = json.loads(_read("dashboard/manifest.json"))
+    build = _read("BUILD.md")
+    sp = agg["segment_save_pp"]
+    assert man["run_id"] in build, "BUILD.md does not cite the committed run_id"
+    for value in (sp["median"], sp["min"], sp["max"]):
+        assert str(value) in build, f"BUILD.md must cite {value} from the current aggregate"

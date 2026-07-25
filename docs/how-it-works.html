@@ -76,16 +76,6 @@
 </style>
 </head>
 <body>
-<div style="border:2px solid #d03b3b;background:rgba(208,59,59,.08);padding:14px 16px;border-radius:8px;margin:18px 0">
-<b>⚠️ Artifact staleness (2026-07-25).</b> Every demo number on this page was produced at build
-<code>c3e9423</code>, <b>before</b> the R12 hop-budget fix, and is expected to move <b>down</b> on
-re-run. The old agent loop escalated without presenting an offer policy had already authorized, and
-it bound the two arms asymmetrically (the baseline arm's policy rejects <code>offer_discount</code>,
-so it burns extra hops retrying). The 12th-pass review counted 26 hop-limit conversations in the
-baseline arm vs 1 in the after arm and put the exclusion-adjusted lift at <b>+20.0pp rather than
-+23.3pp</b> — the reviewer's measurement, which could not be reproduced because the canonical
-database had been overwritten. The re-run is blocked on OpenAI API quota, not on code.
-</div>
 
 <div class="wrap">
   <nav class="top">
@@ -181,7 +171,7 @@ themes / signals   clustered churn themes and ranked roadmap signals</pre>
   <p>The unit-economics model surfaces one finding that reframes everything: <b>~97% of blended cost-to-serve is human escalation; the entire AI stack — agent, grading every conversation, guardrails — is about 3¢ per conversation.</b></p>
   <div class="callout">Two consequences are baked into the design: the optimization lever is <b>containment</b> (safely reducing escalation), not model choice or token-shaving; and you <b>grade 100% of conversations</b> because evaluation is nearly free. Sampling to “save money” saves nothing and costs you signal. <a href="economics-calculator.html">Explore the model →</a></div>
 
-  <p class="foot">All six phases built and verified end-to-end — agent, guardrails, evals, analytics, and the closed loop (acting on one analytics signal, the treated price-sensitive segment's save-rate lift had a pre-registered <b>median of +23.3pp, range [+10.0, +25.0]pp across 5 runs — all positive</b>, at a treated cohort of n=60; the committed median-lift run moved it 5% → 28%. An earlier median-of-5 on the preceding build gave +11.7pp, so the honest read is a consistently positive lift in roughly the +10–25pp band, not a point estimate). A single run is high-variance because both arms are LLM-simulated, so the headline is a pre-registered median-of-5 (fixed seed, every run counted, median not max), not any one lucky draw. See <a href="testing.html">How to test</a> to run any of it. Regulatory references are architecture, not legal advice.</p>
+  <p class="foot">All six phases built and verified end-to-end — agent, guardrails, evals, analytics, and the closed loop (acting on one analytics signal, the treated price-sensitive segment's save-rate lift had a pre-registered <b>median of +15.0pp, range [+6.7, +21.7]pp across 5 runs — all positive</b>, at a treated cohort of n=60; the committed median-lift run (<code>run-20260725T071548</code>) moved it 10% → 25%. Three pre-registered median-of-5 estimates have now been run and all are retained: +11.7pp, +23.3pp, and this one. The middle was inflated by a real defect — the agent loop escalated without presenting an offer policy had already authorized, and the baseline arm burned extra hops retrying because its policy rejects discounts, so the hop budget bound the arms asymmetrically (fixed in R12). But the first two were ~12pp apart on materially the same measurement path, so the drop must not be read as cleanly &ldquo;the confound was worth 8pp&rdquo;: the estimator's own spread is the same order as the effect being corrected. The honest read is a consistently positive lift in roughly the +7–25pp band across three independent estimates, not a point estimate). A single run is high-variance because both arms are LLM-simulated, so the headline is a pre-registered median-of-5 (fixed seed, every run counted, median not max), not any one lucky draw. See <a href="testing.html">How to test</a> to run any of it. Regulatory references are architecture, not legal advice.</p>
 </div>
 <script>
   document.getElementById('themeBtn').addEventListener('click',()=>{

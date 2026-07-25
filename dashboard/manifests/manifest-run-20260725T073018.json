@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-07-25T07:30:18.467857+00:00",
-  "run_id": "run-20260725T071548",
+  "generated_at": "2026-07-25T07:42:46.538653+00:00",
+  "run_id": "run-20260725T073018",
   "cohort_size": 80,
   "cohort_scenario_ids": [
     1,
@@ -92,50 +92,50 @@
   "intervention_signal": {
     "confidence": 1.0,
     "eval_eligibility": {
-      "coverage": 1.0,
-      "eligible": 47,
-      "excluded": 33,
-      "graded": 80,
+      "coverage": 0.988,
+      "eligible": 45,
+      "excluded": 35,
+      "graded": 79,
       "rule": "current-spec eval verdict = pass",
       "spec_version": "spec-c5868d7d7b08",
       "total": 80
     },
     "evidence": {
-      "loss": 24.0,
-      "n": 30,
-      "save_rate": 0.2,
+      "loss": 19.0,
+      "n": 31,
+      "save_rate": 0.387,
       "segment_ranking": [
         {
-          "loss": 24.0,
-          "n": 30,
+          "loss": 19.0,
+          "n": 31,
           "reason": "Price too high",
-          "save_rate": 0.2
-        },
-        {
-          "loss": 6.0,
-          "n": 8,
-          "reason": "No longer needed",
-          "save_rate": 0.25
+          "save_rate": 0.387
         },
         {
           "loss": 6.0,
           "n": 6,
           "reason": "Switched to competitor",
           "save_rate": 0.0
+        },
+        {
+          "loss": 2.0,
+          "n": 6,
+          "reason": "No longer needed",
+          "save_rate": 0.667
         }
       ]
     },
     "lever_compatible": true,
     "offer_effectiveness": [
       {
-        "avg_margin_cost": 11.85,
-        "n": 25,
+        "avg_margin_cost": 25.64,
+        "n": 30,
         "offer": "pause",
-        "save_rate": 0.36
+        "save_rate": 0.567
       },
       {
         "avg_margin_cost": 0.0,
-        "n": 22,
+        "n": 15,
         "offer": "none",
         "save_rate": 0.0
       }
@@ -167,26 +167,26 @@
     "playbook_sha": "add93744da2a",
     "conversations": 80,
     "starting_state_sha": "world-cc0b6f6f6e67",
-    "segment_save_rate": 0.1,
-    "overall_save_rate": 0.1125
+    "segment_save_rate": 0.2,
+    "overall_save_rate": 0.2375
   },
   "after": {
     "policy": "discounts_enabled",
     "playbook_sha": "a68e48936007",
     "conversations": 80,
     "starting_state_sha": "world-cc0b6f6f6e67",
-    "segment_save_rate": 0.25,
-    "overall_save_rate": 0.2375,
-    "eval_pass_rate": 0.8,
-    "eval_coverage": 0.975
+    "segment_save_rate": 0.2667,
+    "overall_save_rate": 0.25,
+    "eval_pass_rate": 0.762,
+    "eval_coverage": 1.0
   },
   "lift": {
-    "segment_save_pp": 15.0,
-    "segment_madj_pp": 12.0,
-    "overall_save_pp": 12.5
+    "segment_save_pp": 6.7,
+    "segment_madj_pp": 5.6,
+    "overall_save_pp": 1.3
   },
   "guardrail_catch_rate": 1.0,
-  "outcome_parity_gap": 0.023,
+  "outcome_parity_gap": 0.028,
   "outcome_parity_observational": true,
   "note": "Paired before/after on identical seeded customers run from a byte-identical starting subscription state (same starting_state_sha in both arms \u2192 eligibility held constant). TWO variables changed together (discount policy + agent playbook), so this is a synthetic PAIRED demonstration of the flywheel on the treated (price-sensitive) segment \u2014 not an isolated causal estimate. Numbers vary run to run."
 }

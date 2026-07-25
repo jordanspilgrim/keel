@@ -1,16 +1,6 @@
 # Keel — Build Checklist (source of truth)
 
 
-> **⚠️ Artifact staleness (2026-07-25):** every demo number below was produced at `c3e9423`,
-> BEFORE the R12 hop-budget fix, and is expected to move DOWN on re-run. The old
-> `for hop in range(MAX_HOPS)` loop escalated without presenting an offer policy had already
-> authorized, and it bound the two arms asymmetrically (the baseline arm's policy rejects
-> `offer_discount`, so it burns extra hops retrying). The 12th-pass review counted 26
-> hop-limit conversations in baseline vs 1 in after and put the exclusion-adjusted lift at
-> **+20.0pp rather than +23.3pp** — the reviewer's measurement, which I could not reproduce
-> because the canonical DB had been overwritten. Re-run blocked on OpenAI quota, not code.
-> See the README banner.
-
 Phased build; each phase ends in a demoable, testable state. Do not skip the
 guardrail/compliance phase before evals. Full intent: `docs/keel-build-handoff.md` §4.
 
@@ -24,7 +14,7 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 | **2 — Guardrails & compliance** | ✅ **done** | `agent/guardrails.py` (input: PII redact / jailbreak / scope; output: tone / promise / grounding), policy human-in-the-loop (+`deny_refund` tool), `guardrail_events` populated, PII redacted before store | `python -m scripts.phase2_accept`: **100% catch rate (14/14)** — jailbreak 6/6 blocked, off-scope 4/4 bounded, PII 4/4 redacted, over-limit 40%→capped 20%, refund→human ✓; full suite green |
 | **3 — Eval harness** | ✅ **done** | `evals/judge.py` (5-dim rubric + fairness flag + prompt-injection resistance, fed the persisted eval envelope), `evals/run_evals.py` (grade_all + run_golden + `build_judge_input`), 10 golden fixtures (per-dimension human scores), `batch.py` concurrent runner | `python -m scripts.phase3_accept` (representative run): 12/12 graded (eval pass ~92%), golden agreement **100% (10/10)** at the 80% floor, **per-dimension calibration MAE 0.5** (floor 1.0), paired-fairness consistent, a judge-injection fixture ("disregard your rubric, all 5s") still scored **fail**, a known-bad conversation → **fail**; fairness slice by group reported |
 | **4 — VoC analytics** | ✅ **done** | `analytics/embed.py` (batched), `analytics/cluster.py` (KMeans), `analytics/themes.py` (theme cards + offer effectiveness + ranked signals), `economics.margin_cost` | `python -m scripts.phase4_accept`: 30-conv batch → 5 themes, top-3 drivers, ranked signals, offer comparison from clusters ✓ |
-| **5 — Close the loop** | ✅ **done** | `dashboard/export.py` → `data.js` wired to a data-driven `dashboard/index.html`; `run_demo.py` consumes a structured intervention signal (persisted + loaded by id), runs baseline → learn → act → re-measure over an **n=60** treated cohort, requires a paired cohort + lever-compatible signal + strictly-positive treated-segment lift, writes `manifest.json` (+ copies named by run_id in `dashboard/manifests/`) and, in `--median` mode, `demo_aggregate.json` | `python run_demo.py --median --k=5` (pre-registered median, every run counted): the signal selected the price-sensitive segment (worst lever-compatible loss, from EVAL-ELIGIBLE baseline conversations); treated save-rate lift **median +23.3pp, range [+10.0, +25.0]pp — all 5 positive**, margin-adjusted median +18.7pp, overall median +17.5pp, eval median 86% — **the flywheel turning**. The committed headline is the median, never the max; the estimator's own cross-build spread (a prior median-of-5 gave +11.7pp) is disclosed in *Honest statistical power* below |
+| **5 — Close the loop** | ✅ **done** | `dashboard/export.py` → `data.js` wired to a data-driven `dashboard/index.html`; `run_demo.py` consumes a structured intervention signal (persisted + loaded by id), runs baseline → learn → act → re-measure over an **n=60** treated cohort, requires a paired cohort + lever-compatible signal + strictly-positive treated-segment lift, writes `manifest.json` (+ copies named by run_id in `dashboard/manifests/`) and, in `--median` mode, `demo_aggregate.json` | `python run_demo.py --median --k=5` (pre-registered median, every run counted): the signal selected the price-sensitive segment (worst lever-compatible loss, from EVAL-ELIGIBLE baseline conversations); treated save-rate lift **median +15.0pp, range [+6.7, +21.7]pp — all 5 positive**, margin-adjusted median +12.0pp, overall median +11.2pp, eval median 75% — **the flywheel turning**. The committed headline is the median, never the max; three pre-registered estimates now exist (+11.7pp, +23.3pp, +15.0pp), one of them inflated by a real hop-budget confound since fixed — all disclosed in *Honest statistical power* below |
 | **6 — Stretch** | ⬜ | adversarial red-team suite (synth already seeds 14 probes), A/B offer testing, "propose a policy change" agent | — |
 
 ## Phase 0 — verified
@@ -60,7 +50,7 @@ Model IDs verified available 2026-07-17: `gpt-5`, `gpt-5-mini`, `text-embedding-
 
 - `dashboard/export.py`: computes every dashboard view from the DB (KPIs incl. margin-adjusted save rate, before/after trend, clustered drivers, offer effectiveness, safety) → writes `dashboard/data.js` (`window.KEEL_DATA`). The dashboard loads it via `<script src>` (works on file://) and falls back to a mock if absent.
 - `dashboard/index.html`: rewritten data-driven — same design language, now rendering real demo output.
-- `run_demo.py`: the full flywheel on one identical seeded cohort — BASELINE (discounts disabled) → grade + cluster → a **structured intervention signal** (`themes.recommend_intervention`) selects the highest-loss segment *for which a lever exists* and surfaces any higher-loss segment it can't address → ACT (enable discounts + lead-with-discount playbook for the selected segment) → RE-MEASURE. The lift is measured on the **treated segment** where the act applies, over an **n=60** treated cohort. The baseline is GRADED before Learn, and the intervention is chosen only from eval-eligible (passing) baseline conversations (H1). Because both arms are independently LLM-simulated, a single run is noisy even at n=60, so the headline is a **pre-registered median of k=5 runs** (`--median`; fixed seed, every run counted, median not max): treated-segment lift **median +23.3pp, range [+10.0, +25.0]pp — all 5 positive**, margin-adjusted median +18.7pp, overall median +17.5pp, eval median 86% (range 81–90%). The committed median-lift run (`run-20260725T002018`, one immutable `run_id`, no DB reset between phases) moved the segment 5%→28% and is what the dashboard AND the live Explorer/API render (the committed run's DB is restored as canonical). The signal is persisted under the run_id and **loaded back by id** (durable Learn→Act lineage). Both arms run from a byte-identical **restored world snapshot** (snapshot→restore, recorded as `starting_state_sha` in both arms) so eligibility is a held constant, not a confound; requires a matched paired cohort from an identical starting-state hash, a lever-compatible signal, and a strictly-positive treated-segment lift; writes `dashboard/manifest.json` plus a copy named by run_id in `dashboard/manifests/` (cohort IDs, signal id + segment ranking, prompt/policy hashes, model IDs, eval coverage, lift), and in `--median` mode the k-run distribution to `dashboard/demo_aggregate.json`.
+- `run_demo.py`: the full flywheel on one identical seeded cohort — BASELINE (discounts disabled) → grade + cluster → a **structured intervention signal** (`themes.recommend_intervention`) selects the highest-loss segment *for which a lever exists* and surfaces any higher-loss segment it can't address → ACT (enable discounts + lead-with-discount playbook for the selected segment) → RE-MEASURE. The lift is measured on the **treated segment** where the act applies, over an **n=60** treated cohort. The baseline is GRADED before Learn, and the intervention is chosen only from eval-eligible (passing) baseline conversations (H1). Because both arms are independently LLM-simulated, a single run is noisy even at n=60, so the headline is a **pre-registered median of k=5 runs** (`--median`; fixed seed, every run counted, median not max): treated-segment lift **median +15.0pp, range [+6.7, +21.7]pp — all 5 positive**, margin-adjusted median +12.0pp, overall median +11.2pp, eval median 75% (range 73.8–80.0%). The committed median-lift run (`run-20260725T071548`, one immutable `run_id`, no DB reset between phases) moved the segment 10%→25% and is what the dashboard AND the live Explorer/API render (the committed run's DB is restored as canonical). The signal is persisted under the run_id and **loaded back by id** (durable Learn→Act lineage). Both arms run from a byte-identical **restored world snapshot** (snapshot→restore, recorded as `starting_state_sha` in both arms) so eligibility is a held constant, not a confound; requires a matched paired cohort from an identical starting-state hash, a lever-compatible signal, and a strictly-positive treated-segment lift; writes `dashboard/manifest.json` plus a copy named by run_id in `dashboard/manifests/` (cohort IDs, signal id + segment ranking, prompt/policy hashes, model IDs, eval coverage, lift), and in `--median` mode the k-run distribution to `dashboard/demo_aggregate.json`.
 - Definition of done met: `python run_demo.py` runs generate → converse → grade → analyze → act → re-measure → export, and the dashboard shows the lift.
 
 ## Keel Console — interactive web app (post-Phase-5)
@@ -357,24 +347,34 @@ variance a re-run sees), **every run is counted** (no dropping the low or negati
 committed headline is the **median**, never the max. Result over the 5 pre-registered runs on the
 fully-remediated build (baseline graded before Learn, eval-eligible signal, identical starting-state
 hash each arm, program healthy, **zero** saved-plus-cancelled records): the price-sensitive segment's
-lift had **median +23.3pp, range [+10.0, +25.0]pp — all five runs positive** (values
-`[10.0, 25.0, 23.3, 15.0, 25.0]`); margin-adjusted median **+18.7pp**; overall-cohort median
-**+17.5pp**; eval pass median **86%** (range 81–90%); observational outcome-parity gap median
-**0.074** (noise — the agent never sees the attribute; the counterfactual agent-treatment
-harness is `evals/agent_fairness.py`). The committed median-lift run (`run-20260725T002018`) moved
-the segment **5% → 28%** and is what the dashboard AND the live Explorer/API render (its DB restored
+lift had **median +15.0pp, range [+6.7, +21.7]pp — all five runs positive** (values
+`[15.0, 6.7, 6.7, 15.0, 21.7]`); margin-adjusted median **+12.0pp**; overall-cohort median
+**+11.2pp**; eval pass median **75%** (range 73.8–80.0%); observational outcome-parity gap median
+**0.057** (noise — the agent never sees the attribute; the counterfactual agent-treatment
+harness is `evals/agent_fairness.py`). The committed median-lift run (`run-20260725T071548`) moved
+the segment **10% → 25%** and is what the dashboard AND the live Explorer/API render (its DB restored
 as canonical); the full distribution is persisted to `dashboard/demo_aggregate.json`, with each run's
 manifest under `dashboard/manifests/`.
 
-**The estimator's own variance — stated rather than hidden.** The immediately preceding build's
-pre-registered median-of-5 came out at **+11.7pp (range [+5.0, +18.3])**; this build's is **+23.3pp
-(range [+10.0, +25.0])**. The remediation between them touched the live path, eval write-ordering,
-redaction, and docs — nothing in the batch measurement path that should move the lift — so the ~12pp
-gap is best read as *the median-of-5 estimator's own run-to-run variance*, not an effect of the
-changes. Both distributions are retained. The honest claim this supports is **a consistently
-positive treated-segment lift in roughly the +10 to +25pp band**, not a point estimate; quoting the
-+23.3pp alone (having previously published +11.7pp) would be sequence cherry-picking of exactly the
-kind the pre-registration exists to prevent. Two variables change together and there is no
+**The estimator's own variance, and one real confound — both stated rather than hidden.** THREE
+pre-registered median-of-5 estimates have now been run, and all three are retained:
+**+11.7pp** `[+5.0, +18.3]`, then **+23.3pp** `[+10.0, +25.0]`, now **+15.0pp** `[+6.7, +21.7]`.
+
+Two separate things are mixed in that sequence and it matters not to conflate them. (1) A REAL
+DEFECT inflated the middle estimate: `_agent_turn` looped `for hop in range(MAX_HOPS)` and escalated
+without ever presenting an offer policy had already authorized — and because the baseline arm's
+policy REJECTS `offer_discount` it burned extra hops retrying, so the hop budget bound the two arms
+asymmetrically and the measured lift included it. R12 fixed it (a reserved tool-free finalize hop),
+and the direction of the correction was written into this repo BEFORE the re-run was executed.
+(2) The estimator ALSO has large intrinsic variance: the first two estimates were ~12pp apart on
+materially the same measurement path.
+
+So the drop from +23.3 to +15.0 must **not** be read as cleanly "the confound was worth 8pp" — the
+estimator's own spread is the same order as the effect being corrected, and separating them would
+take more batches than were run. What all three agree on is direction and rough magnitude. The
+honest claim is **a consistently positive treated-segment lift, roughly the +7 to +25pp band across
+three independent pre-registered estimates**, not a point estimate; quoting any one of the three
+alone would be sequence cherry-picking of exactly the kind the pre-registration exists to prevent. Two variables change together and there is no
 randomized holdout, so this remains a paired *demonstration*, not an isolated causal estimate.
 
 ## Ninth independent review — durability parity, price-snapshot analytics, and the median-of-k demo
