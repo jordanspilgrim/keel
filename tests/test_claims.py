@@ -11,10 +11,14 @@ import json
 import os
 import re
 
+import pytest
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _actual_test_count() -> int:
+def _declared_test_functions() -> int:
+    """How many `def test_` functions exist. NOT the number a user sees: a parametrized
+    function is one def but N collected tests."""
     n = 0
     for f in glob.glob(os.path.join(_ROOT, "tests", "test_*.py")):
         with open(f) as fh:
@@ -27,11 +31,18 @@ def _read(rel: str) -> str:
         return fh.read()
 
 
-def test_docs_state_the_actual_test_count():
+def test_docs_state_the_actual_test_count(request):
     """Every doc that advertises a current suite size must state the real count. Extracts
     each 'N tests' / 'N passed' / 'N offline tests' mention and requires it to equal the
-    collected count (historical remediation prose is phrased without the word 'tests')."""
-    actual = _actual_test_count()
+    collected count (historical remediation prose is phrased without the word 'tests').
+
+    The count comes from pytest's OWN collection, not a `def test_` grep. The grep
+    undercounts a parametrized function -- one def, N collected tests -- so the docs would
+    claim a smaller number than the "N passed" a reader sees when they run the suite.
+    Skipped on a subset run, where the collected count is legitimately smaller."""
+    actual = len(request.session.items)
+    if actual < _declared_test_functions():
+        pytest.skip("subset run — the collected count is not the full suite")
     for rel in ("README.md", "docs/testing.html"):
         text = _read(rel)
         # a number then an OPTIONAL comma-separated adjective list then tests/passed, so

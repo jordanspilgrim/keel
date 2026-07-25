@@ -27,9 +27,21 @@ import llm
 _STREET = (r"\b\d{1,6}\s+(?:[A-Z][a-z]+\.?\s+){1,3}"
            r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Terrace|Ter|Place|Pl)\b")
 _PII_PATTERNS = [
-    (re.compile(r"\b\d(?:[ -]?\d){12,18}\b"), "[REDACTED_CARD]", "card"),
-    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN]", "ssn"),
-    (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"), "[REDACTED_EMAIL]", "email"),
+    # Separators include '.', which the original class ([ -]) omitted: "4111.1111.1111.1111"
+    # is a canonical way to write a card and went through unredacted.
+    (re.compile(r"\b\d(?:[ .-]?\d){12,18}\b"), "[REDACTED_CARD]", "card"),
+    # SSNs are written with hyphens OR spaces; only the hyphen form was covered.
+    (re.compile(r"\b\d{3}[ -]\d{2}[ -]\d{4}\b"), "[REDACTED_SSN]", "ssn"),
+    # A BARE 9-digit run is genuinely ambiguous (order id, account number), so it is redacted
+    # only behind an explicit cue rather than blanket-matching every 9-digit number.
+    (re.compile(r"((?i:\b(?:ssn|social security(?: number)?))\b[:\s#]*)\d{9}\b"),
+     r"\1[REDACTED_SSN]", "ssn"),
+    # Length-BOUNDED local part and domain labels. Unbounded runs made this quadratic: a
+    # long "a.a.a...@"-shaped string backtracked from every start position (measured 1.7ms
+    # at 1KB, 26ms at 4KB, 393ms at 16KB), and with no size cap on /api/chat/turn one
+    # request held the GIL long enough to stall the server. RFC 5321 caps the local part at
+    # 64 and each domain label at 63, so bounding them is both correct and linear.
+    (re.compile(r"\b[\w.+-]{1,64}@[\w-]{1,63}\.[\w.-]{1,63}\b"), "[REDACTED_EMAIL]", "email"),
     (re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"), "[REDACTED_DOB]", "dob"),
     (re.compile(r"\b(?:\+?1[ -.]?)?\(?\d{3}\)?[ -.]?\d{3}[ -.]?\d{4}\b"), "[REDACTED_PHONE]", "phone"),
     (re.compile(_STREET), "[REDACTED_ADDRESS]", "address"),

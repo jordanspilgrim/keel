@@ -79,7 +79,12 @@ def build_conversation_views(conn, *, run_id: str | None = None, phase: str | No
     for r in rows:
         transcript = json.loads(r["transcript_json"])
         disp = json.loads(r["disposition_json"])
-        customer_text = " ".join(t["content"] for t in transcript if t["role"] == "user")
+        # Transcripts are already redacted at persist; redact again here as defense in
+        # depth before this text is embedded and sent to the labeler. redact_pii is
+        # idempotent, so this is a no-op on well-formed rows and a backstop on any row
+        # written by an older build (or a future writer that forgets).
+        customer_text = guardrails.redact_pii(
+            " ".join(t["content"] for t in transcript if t["role"] == "user"))[0]
         views.append({
             "id": r["id"], "summary": customer_text[:600],
             "churn_reason": disp.get("churn_reason", "unknown"),
@@ -278,11 +283,16 @@ def rank_signals(cards: list[dict]) -> list[dict]:
     signals = []
     for c in cards:
         loss = c["size"] * (1 - c["save_rate"])
-        rec = (f"'{c['label']}' drives {c['size']} at-risk conversations at a "
+        # Build from the REDACTED label: `persist` redacts c["label"] on the way into
+        # `themes`, but this string was built from the raw one six lines earlier and
+        # inserted verbatim into `signals`. redact_pii is idempotent, so redacting here
+        # keeps the two columns consistent rather than one scrubbed and one not.
+        _label = guardrails.redact_pii(c["label"])[0]
+        rec = (f"'{_label}' drives {c['size']} at-risk conversations at a "
                f"{c['save_rate']*100:.0f}% save rate — "
                + ("healthy; hold." if c["save_rate"] >= 0.6
                   else "test a stronger offer play for this theme."))
-        signals.append({"label": c["label"], "recommendation": rec, "priority_score": round(loss, 2)})
+        signals.append({"label": _label, "recommendation": rec, "priority_score": round(loss, 2)})
     return sorted(signals, key=lambda s: s["priority_score"], reverse=True)
 
 

@@ -600,13 +600,22 @@ def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
 
     # 3) each account_fact must (a) be a CUSTOMER-VISIBLE field (never identity/PII or an
     #    internal field), and (b) reference a value a cited tool actually returned.
-    for f in contract.get("account_facts", []):
+    # The rejection reason lands in guardrail_events.detail, which the API serves. `field`
+    # and `source_tool` are UNCONSTRAINED strings the model authors, so interpolating them
+    # wrote model free text -- which can carry customer PII -- straight into a durable,
+    # API-served column, while the transcript on the SAME persist call was redacted. This is
+    # the H4 pattern applied here: reference the offending fact by INDEX and name only
+    # SERVER-side data (the allowlist), so no model-authored text is ever durable. The
+    # reason is still fully actionable for the regeneration attempt.
+    for i, f in enumerate(contract.get("account_facts", [])):
         field, tool = f.get("field"), f.get("source_tool")
         if field not in _CUSTOMER_FACT_FIELDS.get(tool, ()):
-            return False, (f"account_fact '{field}' from '{tool}' is not a customer-visible field "
-                           f"(identity/internal fields must never be stated to the customer)")
+            allowed = sorted(set().union(*_CUSTOMER_FACT_FIELDS.values())) if _CUSTOMER_FACT_FIELDS else []
+            return False, (f"account_fact #{i + 1} names a field/tool pair that is not customer-visible "
+                           f"(identity/internal fields must never be stated to the customer); "
+                           f"allowed fields are {allowed}")
         if _fact_value(rec, field, tool) is None:
-            return False, (f"account_fact '{field}' from '{tool}' was not returned by that tool")
+            return False, (f"account_fact #{i + 1} was not returned by the tool it cites")
     return True, ""
 
 

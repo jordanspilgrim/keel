@@ -620,3 +620,71 @@ def test_tool_results_are_redacted_before_reaching_the_model(conn):
     rec = _rec()
     out = runtime._resolve_call("get_customer", {}, 1, {"price": 29.0}, conn, rec)
     assert "Jane Doe" not in json.dumps(out)
+
+
+# --- R12-C: redaction breadth, ReDoS, and the last model-text leak --------------
+@pytest.mark.parametrize("raw,token", [
+    ("4111.1111.1111.1111", "[REDACTED_CARD]"),      # dot-separated card was missed
+    ("4111 1111 1111 1111", "[REDACTED_CARD]"),
+    ("4111-1111-1111-1111", "[REDACTED_CARD]"),
+    ("123 45 6789", "[REDACTED_SSN]"),               # space-separated SSN was missed
+    ("123-45-6789", "[REDACTED_SSN]"),
+    ("SSN 123456789", "[REDACTED_SSN]"),             # bare 9 digits, but only behind a cue
+    ("my ssn: 123456789", "[REDACTED_SSN]"),
+])
+def test_redact_pii_covers_canonical_formats(raw, token):
+    """RT9: the card class was [ -] only and the SSN pattern hyphens only, so canonical
+    ways of writing both went into transcript_json and out through the API."""
+    assert token in guardrails.redact_pii(raw)[0]
+
+
+def test_bare_nine_digits_without_a_cue_is_not_an_ssn():
+    """Redacting every 9-digit run would scrub order and account numbers. The cue is what
+    makes it an SSN, so the fix stays narrow rather than over-matching."""
+    assert guardrails.redact_pii("order 123456789")[1] == []
+
+
+def test_pii_redaction_is_linear_not_quadratic():
+    """RT11: the email pattern had an unbounded local part, so an 'a.a.a...@'-shaped input
+    backtracked from every start position — 1.7ms at 1KB, 26ms at 4KB, 393ms at 16KB.
+    Screening holds the GIL, so one request could stall every other session. RFC 5321
+    bounds the local part at 64 chars and each domain label at 63; bounding them is both
+    correct and linear. Asserts the SHAPE of the curve, not a wall-clock threshold."""
+    import time
+
+    def elapsed(n):
+        text = ("a." * (n // 2)) + "@"
+        t0 = time.perf_counter()
+        guardrails.redact_pii(text)
+        return time.perf_counter() - t0
+
+    elapsed(2000)                              # warm up
+    small, large = elapsed(2000), elapsed(16000)
+    # 8x the input. Linear predicts ~8x; the old quadratic gave ~64x. Allow generous slack
+    # for timer noise on a loaded machine while still failing on quadratic behavior.
+    assert large < small * 24, f"scaling looks quadratic: {small:.4f}s -> {large:.4f}s"
+
+
+def test_contract_rejection_reason_contains_no_model_authored_text(conn):
+    """E2E#15 / RT8: account_facts[].field and .source_tool are unconstrained strings the
+    model authors, and the rejection reason was interpolated into guardrail_events.detail,
+    which the API serves — while the transcript on the SAME persist call was redacted."""
+    rec = _rec()
+    ok, reason = runtime._validate_contract(
+        {"acknowledgement": "price", "offer": {"kind": "none"}, "process_cancellation": False,
+         "account_facts": [{"field": "Jane Doe (card 4111111111111111)",
+                            "source_tool": "get_customer", "value": "x"}]}, rec)
+    assert not ok
+    assert "Jane Doe" not in reason and "4111" not in reason
+    assert "#1" in reason, "the fact must be referenced by index instead"
+
+
+def test_signal_recommendation_is_redacted_like_the_theme_label(conn):
+    """E2E#22 / RT18: persist redacted themes.label but rank_signals had already built the
+    recommendation from the RAW label six lines earlier, and inserted it verbatim."""
+    from analytics import themes
+    cards = [{"label": "It's Maria Garcia churn", "summary": "s", "size": 4, "save_rate": 0.1,
+              "avg_margin_cost": 1.0, "example_ids": [1]}]
+    sig = themes.rank_signals(cards)[0]
+    assert "Maria Garcia" not in sig["recommendation"]
+    assert "[REDACTED_NAME]" in sig["recommendation"]

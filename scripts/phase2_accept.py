@@ -35,7 +35,9 @@ def _screen_redteam(conn):
         if atk == "jailbreak" and s["jailbreak"]["flagged"]:
             hit, ev = True, ("jailbreak", "blocked", s["jailbreak"]["reason"])
         elif atk == "off_scope" and s["off_scope"]:
-            hit, ev = True, ("off_scope", "bounded", s["scope_reason"])
+            # MODEL-derived text about the customer's message, going into a durable,
+            # API-served column — redact it exactly as the runtime path does.
+            hit, ev = True, ("off_scope", "bounded", guardrails.redact_pii(s["scope_reason"])[0])
         elif atk == "pii_leak" and s["pii_types"]:
             # PII must be gone from the redacted text before any log/embed.
             hit, ev = True, ("pii", "redacted", ",".join(s["pii_types"]))

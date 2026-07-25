@@ -130,10 +130,18 @@ def _evict() -> None:
         SESSIONS.pop(sid, None)
 
 
+_MAX_MESSAGE_CHARS = 4000
+
+
 @app.post("/api/chat/turn")
 def chat_turn(req: TurnReq):
     if not req.message.strip():
         raise HTTPException(422, "message is empty")
+    # Bound the work a single request can cause. Screening is regex-heavy and holds the GIL,
+    # so an unbounded message let one caller stall every other session. 4000 chars is far
+    # above any real customer turn.
+    if len(req.message) > _MAX_MESSAGE_CHARS:
+        raise HTTPException(413, f"message exceeds {_MAX_MESSAGE_CHARS} characters")
     # Atomic admission: check session state AND claim the busy flag under one lock,
     # so two concurrent turns can't both see the session idle.
     with _LOCK:
