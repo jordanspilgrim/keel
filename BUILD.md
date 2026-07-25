@@ -1,5 +1,16 @@
 # Keel — Build Checklist (source of truth)
 
+
+> **⚠️ Artifact staleness (2026-07-25):** every demo number below was produced at `c3e9423`,
+> BEFORE the R12 hop-budget fix, and is expected to move DOWN on re-run. The old
+> `for hop in range(MAX_HOPS)` loop escalated without presenting an offer policy had already
+> authorized, and it bound the two arms asymmetrically (the baseline arm's policy rejects
+> `offer_discount`, so it burns extra hops retrying). The 12th-pass review counted 26
+> hop-limit conversations in baseline vs 1 in after and put the exclusion-adjusted lift at
+> **+20.0pp rather than +23.3pp** — the reviewer's measurement, which I could not reproduce
+> because the canonical DB had been overwritten. Re-run blocked on OpenAI quota, not code.
+> See the README banner.
+
 Phased build; each phase ends in a demoable, testable state. Do not skip the
 guardrail/compliance phase before evals. Full intent: `docs/keel-build-handoff.md` §4.
 

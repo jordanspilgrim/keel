@@ -14,6 +14,30 @@ Full intent lives in [`docs/retention-flywheel-plan.md`](docs/retention-flywheel
 
 **Browsable docs** (open in a browser): [`docs/index.html`](docs/index.html) — plain-English overview + the flywheel · [`docs/how-it-works.html`](docs/how-it-works.html) — architecture, agent loop, guardrails, compliance · [`docs/testing.html`](docs/testing.html) — run and test each phase · plus the [dashboard](docs/keel-dashboard.html) and [economics calculator](docs/economics-calculator.html) mockups.
 
+> ### ⚠️ The committed numbers predate the current code (2026-07-25)
+>
+> **`dashboard/manifest.json`, `demo_aggregate.json` and `data.js` were produced by the build
+> at `c3e9423`, BEFORE the R12 hop-budget fix.** They are stale with respect to HEAD, and the
+> honest expectation is that the headline moves DOWN when re-run.
+>
+> Why: `_agent_turn` looped `for hop in range(MAX_HOPS)` and, if the model was still calling
+> tools on the last hop, escalated without ever presenting an offer policy had already
+> authorized. That bound the two arms **asymmetrically** — the baseline arm's policy rejects
+> `offer_discount`, so it burns extra hops retrying — which means the measured lift included
+> the hop budget as well as the policy change. The 12th-pass review counted 26 hop-limit
+> conversations in the baseline arm vs 1 in the after arm on the committed run, and put the
+> exclusion-adjusted lift at **+20.0pp rather than +23.3pp**. That adjustment is the
+> reviewer's measurement, not mine — the canonical DB had been overwritten by the time I went
+> to reproduce it, so I could not independently confirm it and am attributing it rather than
+> restating it as my own.
+>
+> The fix (reserve one tool-free finalize hop so an authorized offer is always presented) is
+> in HEAD. The re-run that would refresh these artifacts is **blocked on OpenAI API quota**
+> (`429 insufficient_quota`), not on code. Until it lands, read the committed figures as
+> describing `c3e9423`, and treat the defensible claim as before: a consistently positive
+> treated-segment lift, band rather than point estimate, now with a known downward correction
+> pending. `run_demo.py --median --k=5` regenerates everything and reconciles the docs.
+
 ## Quick start
 
 ```bash

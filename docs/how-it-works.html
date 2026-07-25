@@ -76,6 +76,17 @@
 </style>
 </head>
 <body>
+<div style="border:2px solid #d03b3b;background:rgba(208,59,59,.08);padding:14px 16px;border-radius:8px;margin:18px 0">
+<b>⚠️ Artifact staleness (2026-07-25).</b> Every demo number on this page was produced at build
+<code>c3e9423</code>, <b>before</b> the R12 hop-budget fix, and is expected to move <b>down</b> on
+re-run. The old agent loop escalated without presenting an offer policy had already authorized, and
+it bound the two arms asymmetrically (the baseline arm's policy rejects <code>offer_discount</code>,
+so it burns extra hops retrying). The 12th-pass review counted 26 hop-limit conversations in the
+baseline arm vs 1 in the after arm and put the exclusion-adjusted lift at <b>+20.0pp rather than
++23.3pp</b> — the reviewer's measurement, which could not be reproduced because the canonical
+database had been overwritten. The re-run is blocked on OpenAI API quota, not on code.
+</div>
+
 <div class="wrap">
   <nav class="top">
     <div class="navlinks">
