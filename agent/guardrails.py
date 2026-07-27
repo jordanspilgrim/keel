@@ -26,6 +26,17 @@ import config
 import llm
 
 
+def _repl_identity(repl) -> str:
+    """Stable identity for a regex replacement: the literal for a string, qualname+source for
+    a callback. Never repr(), which embeds a memory address."""
+    if isinstance(repl, str):
+        return repl
+    try:
+        return f"{repl.__qualname__}:{inspect.getsource(repl)}"
+    except (TypeError, OSError):
+        return getattr(repl, "__qualname__", "<callable>")
+
+
 def guardrail_version() -> str:
     """A content hash over everything that decides whether a probe is caught.
 
@@ -55,7 +66,16 @@ def guardrail_version() -> str:
         # jailbreak regex ("Ignore All Previous Instructions" stops matching); and gutting
         # check_jailbreak's body (6/6 catches -> 0/6). A hash that a leak can slip past is not
         # a code-identity check, it is decoration.
-        repr(sorted((rx.pattern, rx.flags, repl, kind) for rx, repl, kind in _PII_PATTERNS)),
+        # A replacement may be a STRING or a CALLBACK. repr() of a function embeds its memory
+        # address ("<function _sub_name at 0x10a8789e0>"), so hashing it made the version
+        # DIFFERENT ON EVERY PROCESS — which silently broke the kill switch: it compares a
+        # recorded version against the current one, so a per-process hash means the recorded
+        # value can never match and the program sits permanently in safe mode, for a reason
+        # that looks like a real guardrail change. Introduced when R15 replaced the string
+        # replacements with callbacks. Hash a callback by its qualname + SOURCE, which is what
+        # actually determines behavior and is stable across processes.
+        repr(sorted((rx.pattern, rx.flags, _repl_identity(repl), kind)
+                    for rx, repl, kind in _PII_PATTERNS)),
         repr(sorted(getattr(p, "pattern", p) for p in _JAILBREAK_PATTERNS)),
         repr(_JAILBREAK_RX.flags),
         repr(sorted(_NOT_A_NAME_AFTER_CUE)),

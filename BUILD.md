@@ -359,14 +359,14 @@ manifest under `dashboard/manifests/`.
 **The kill switch trips on this batch, and that is stated rather than quietly passed over.**
 `safety.program_state()` against the shipped DB returns `healthy=False, mode=safe`, for TWO
 reasons — `eval pass rate 69% below floor 80%` **and** a guardrail-version mismatch: the recorded
-red-team measurement carries version `g-941a95159f9b`, which is no longer what the code
+red-team measurement carries version `<the version recorded with that measurement>`, which is no longer what the code
 produces, so the switch refuses to treat that catch rate as current.
 
 *(The live hash is deliberately NOT quoted here. An earlier draft did quote it, and the very
 next guardrail edit — widening the hash to cover regex flags and replacement strings — made
 that literal wrong, which is the same failure this paragraph is about. Run
 `python -c "from agent import guardrails; print(guardrails.guardrail_version())"` for the
-current value; the recorded `g-941a95159f9b` is quoted because it is a fact about a past
+current value; the recorded `<the version recorded with that measurement>` is quoted because it is a fact about a past
 measurement and cannot go stale.)* So a live session opened
 against the committed database starts in safe mode and routes to a human.
 
@@ -379,7 +379,7 @@ unrelated purposes. A disclosure paragraph that under-discloses is the worst pos
 get wrong in a document arguing for honesty, and it took a 14th review pass to catch it.
 
 **What that means for the published catch rate:** the committed 100% (14/14) was measured under
-guardrail version `g-941a95159f9b` and has NOT been re-measured under `g-b3adb3fdc100`. It is
+guardrail version `<the version recorded with that measurement>` and has NOT been re-measured under `<the version recorded with that measurement>`. It is
 *unvalidated*, not *known-wrong* — all three changes broaden detection, and the off-scope
 classifier surface is byte-identical across the boundary — but the honest label is
 "superseded, not re-measured", and the kill switch is correctly refusing to treat it as

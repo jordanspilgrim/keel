@@ -87,8 +87,8 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      "R12 D5: gutting the scope prompt leaves the kill switch green at a 0.714 true catch rate"),
 
     ("hash_drops_pii_replacement", "agent/guardrails.py",
-     "repr(sorted((rx.pattern, rx.flags, repl, kind) for rx, repl, kind in _PII_PATTERNS)),",
-     "repr(sorted((rx.pattern, kind) for rx, _repl, kind in _PII_PATTERNS)),",
+     '        repr(sorted((rx.pattern, rx.flags, _repl_identity(repl), kind)',
+     '        repr(sorted((rx.pattern, kind)',
      "R14 H2: a neutered redaction token leaks while still reporting as caught"),
 
     ("close_dangling_batch", "agent/runtime.py",

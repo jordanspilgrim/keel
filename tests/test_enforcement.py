@@ -13,11 +13,15 @@ import re
 
 import pytest
 
+import os
+
 import config
 import db
 import llm
 import synth
 from agent import guardrails, offers, policy, runtime
+
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from evals import judge
 
 
@@ -861,3 +865,23 @@ def test_the_fulfillment_pre_write_surfaces_a_schema_failure_instead_of_swallowi
         runtime._queue_fulfillment_live(conn, "sess", "1-month pause")
     assert conn.execute("SELECT count(*) c FROM offer_fulfillment_requests").fetchone()["c"] == 0
     conn.close()
+
+
+def test_guardrail_version_is_stable_across_processes():
+    """R16-F3. The kill switch compares a RECORDED guardrail version against the current one,
+    so a hash that differs per process means the recorded value can never match — the program
+    sits permanently in safe mode for a reason that reads like a real guardrail change, and
+    every published catch rate is permanently 'superseded'.
+
+    It did. R15 replaced the string replacements with callbacks, and repr() of a function
+    embeds its memory address. Every existing test compared two values computed INSIDE ONE
+    interpreter, so none of them could see it. This one spawns real subprocesses."""
+    import subprocess
+    import sys
+    out = [subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, '.'); from agent import guardrails; "
+         "print(guardrails.guardrail_version())"],
+        cwd=_ROOT_DIR, capture_output=True, text=True).stdout.strip() for _ in range(3)]
+    assert len(set(out)) == 1, f"guardrail_version differs across processes: {out}"
+    assert out[0].startswith("g-") and len(out[0]) == 14, out[0]
