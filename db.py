@@ -263,22 +263,28 @@ def _relax_not_null_for_pre_persist_queues(conn: sqlite3.Connection) -> None:
     conn.commit()
     conn.execute("PRAGMA foreign_keys=OFF")
     try:
+        # Individual execute() calls, NOT executescript(). sqlite3.executescript() issues an
+        # implicit COMMIT before running, which silently commits away the BEGIN IMMEDIATE this
+        # block is wrapped in — so the previous version was documented and committed as
+        # "atomic ... one transaction" while actually running in autocommit, and a crash
+        # between DROP and RENAME would have left no table at all. Verified: in_transaction
+        # goes True -> False across an executescript call.
         conn.execute("BEGIN IMMEDIATE")
-        conn.executescript("""
-        CREATE TABLE _ofr_rebuild (
-            id                INTEGER PRIMARY KEY,
-            conversation_id   INTEGER REFERENCES conversations(id),
-            offer             TEXT NOT NULL,
-            status            TEXT NOT NULL,
-            session_key       TEXT,
-            created_at        TEXT NOT NULL
-        );
-        INSERT INTO _ofr_rebuild (id, conversation_id, offer, status, session_key, created_at)
-            SELECT id, conversation_id, offer, status, session_key, created_at
-            FROM offer_fulfillment_requests;
-        DROP TABLE offer_fulfillment_requests;
-        ALTER TABLE _ofr_rebuild RENAME TO offer_fulfillment_requests;
-    """)
+        conn.execute("""
+            CREATE TABLE _ofr_rebuild (
+                id                INTEGER PRIMARY KEY,
+                conversation_id   INTEGER REFERENCES conversations(id),
+                offer             TEXT NOT NULL,
+                status            TEXT NOT NULL,
+                session_key       TEXT,
+                created_at        TEXT NOT NULL
+            )""")
+        conn.execute("""
+            INSERT INTO _ofr_rebuild (id, conversation_id, offer, status, session_key, created_at)
+                SELECT id, conversation_id, offer, status, session_key, created_at
+                FROM offer_fulfillment_requests""")
+        conn.execute("DROP TABLE offer_fulfillment_requests")
+        conn.execute("ALTER TABLE _ofr_rebuild RENAME TO offer_fulfillment_requests")
         conn.commit()
     except Exception:
         conn.rollback()

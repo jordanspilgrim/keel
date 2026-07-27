@@ -1445,6 +1445,10 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
     skey = session.get("_session_id")
     if session.get("outcome") == "escalated" or rec.get("escalated"):
         _queue_escalation_live(conn, skey, rec.get("escalate_reason"))  # self-heal a failed prior write
+        # Retry the finalize too. The saved/lost and cancelled branches both do; escalated
+        # re-asserted its queue row and stopped there, so a swallowed finalize failure stayed
+        # unrecovered on the one terminal a safety reviewer most needs persisted.
+        _finalize_if_terminal(session, conn)
         session["transcript"].append({"role": "user", "content": shown})
         session["transcript"].append({"role": "assistant", "content": _ESCALATED_REPLY})
         _emit(on_step, "guardrail", "Session already escalated — not running the agent", gtype="escalated")
