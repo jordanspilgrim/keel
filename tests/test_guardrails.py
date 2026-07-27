@@ -5,6 +5,8 @@ script, scripts/phase2_accept.py, not here.)"""
 
 from __future__ import annotations
 
+import pytest
+
 from agent import guardrails
 
 
@@ -221,3 +223,53 @@ def test_grounding_flags_money_with_no_tool_data():
 
 def test_grounding_ok_when_tools_returned_numbers():
     assert not guardrails.check_grounding("That brings it to $399.20", ['{"price": 499.0}'])["flagged"]
+
+
+# --- R15: redaction must not depend on orthography, and must scrub values not labels ---
+@pytest.mark.parametrize("name", [
+    "José", "Siobhán", "Zoë",          # diacritics
+    "O'Brien", "D'Angelo",             # apostrophes
+    "MacDonald", "McKenzie",           # internal caps
+    "Jean-Pierre", "Mary-Kate",        # hyphenated
+    "Владимир", "Ναταλία",             # non-Latin
+    "Ng", "Li",                        # short
+    "Emily", "Jamal",                  # ASCII control
+])
+def test_name_redaction_does_not_depend_on_orthography(name):
+    """R15. `[A-Z][a-z]+` is ASCII-only, so redaction was 100% for ASCII names and 0% for
+    diacritics, apostrophes, internal caps and non-Latin scripts — the same disparate-impact
+    failure the Anglo name ALLOWLIST had, in a different dimension. And proxy_symmetry()
+    published "symmetric, fully redacted" because all ten of its probes were inside the
+    covered orthography: the harness could not see its own blind spot."""
+    out, types = guardrails.redact_pii(f"Hi, this is {name}. I want to cancel.")
+    assert "REDACTED_NAME" in out and "name" in types, f"{name} leaked: {out}"
+    assert out.endswith("I want to cancel."), f"over-consumed the tail: {out}"
+
+
+def test_credentials_scrub_the_value_not_the_label():
+    """R15. The sensitive-term pattern replaced the matched WORD, so "my password is hunter2"
+    became "my [REDACTED_SENSITIVE] is hunter2" — label removed, secret kept, in a durable
+    transcript. Worse than not matching, because the telemetry then reports a redaction that
+    protected nothing."""
+    for text, secret in [("my password is hunter2", "hunter2"),
+                         ("api key sk-abc123XYZ", "sk-abc123XYZ"),
+                         ("routing number 021000021", "021000021")]:
+        out, types = guardrails.redact_pii(text)
+        assert secret not in out, f"the VALUE survived: {out}"
+        assert "credential" in types
+
+
+def test_a_declined_name_match_is_not_reported_as_a_redaction():
+    """The name patterns use a callback that may decline (phrase is not name-shaped). The type
+    was recorded from .search() regardless, so "I am frustrated with the price" reported a
+    'name' redaction that never happened — a false entry in the telemetry a safety reviewer
+    reads."""
+    out, types = guardrails.redact_pii("I am frustrated with the price and want to cancel.")
+    assert "name" not in types and out.endswith("cancel.")
+
+
+def test_the_fairness_gate_checks_orthography_not_just_group():
+    from evals import agent_fairness
+    sym = agent_fairness.proxy_symmetry()
+    assert sym["orthography_symmetric"] is True, sym["orthography_redaction_rate"]
+    assert set(sym["orthography_redaction_rate"].values()) == {1.0}

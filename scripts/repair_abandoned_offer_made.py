@@ -121,9 +121,17 @@ def main(apply: bool) -> int:
         print("\nDRY RUN — nothing written. Re-run with --apply.")
         return 0
 
+    # NEVER clobber an existing pre-repair baseline. A second --apply used to overwrite it
+    # with the ALREADY-REPAIRED database, destroying the one artifact that lets a reviewer
+    # reproduce the correction (and that pass 14 used as its decisive control to prove the
+    # committed manifest was pre-repair). The backup is the evidence; it is write-once.
     backup = config.DB_PATH + ".pre-repair"
-    shutil.copy(config.DB_PATH, backup)
-    print(f"\nbacked up DB -> {backup}")
+    if os.path.exists(backup):
+        print(f"\npre-repair baseline already exists at {backup} — keeping it. "
+              f"It is the reproducibility artifact and is never overwritten.")
+    else:
+        shutil.copy(config.DB_PATH, backup)
+        print(f"\nbacked up DB -> {backup}")
 
     before = export.conversation_metrics(conn)
     # Write BOTH representations from the same ledger value. persist_conversation derives

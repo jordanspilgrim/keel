@@ -45,8 +45,12 @@ def guardrail_version() -> str:
     parts = [
         # The full tuple: pattern, REPLACEMENT, kind, and the compiled FLAGS. An earlier
         # version hashed only (pattern, kind) and discarded the rest, which left three ways to
-        # change behavior without changing the hash — each verified by mutation, each leaving
-        # all tests green: neutering a replacement token ("My SSN is [REDACTED_SSN]" ->
+        # change behavior without changing the hash — each verified by mutation at the time,
+        # and each now COVERED (the parametrized test in test_enforcement.py fails on all
+        # three; scripts/mutate.py catalogues two). The earlier wording "each leaving all
+        # tests green" was true when written and stopped being true the moment those tests
+        # landed — a stale claim inside the comment explaining a stale-claim bug.
+        # The three: neutering a replacement token ("My SSN is [REDACTED_SSN]" ->
         # "My SSN is 123456789", still reported as caught); dropping re.IGNORECASE from the
         # jailbreak regex ("Ignore All Previous Instructions" stops matching); and gutting
         # check_jailbreak's body (6/6 catches -> 0/6). A hash that a leak can slip past is not
@@ -72,6 +76,58 @@ def guardrail_version() -> str:
 # --- PII / sensitive-data redaction (runs before any log or embed) ---------
 _STREET = (r"\b\d{1,6}\s+(?:[A-Z][a-z]+\.?\s+){1,3}"
            r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Terrace|Ter|Place|Pl)\b")
+# A name TOKEN, Unicode-aware. `[A-Z][a-z]+` matched ASCII only, so redaction was 100% for
+# ASCII names and 0% for diacritics (José, Siobhán), apostrophes (O'Brien), internal caps
+# (MacDonald) and non-Latin scripts (Владимир) — a privacy control that protected one
+# orthography and not others, which is the same disparate-impact bug the name ALLOWLIST had,
+# in a different dimension. \w minus digits/underscore covers every alphabet; the joiner class
+# keeps hyphenated and apostrophised names whole (Jean-Pierre was previously half-redacted).
+_NAME_TOK = r"[^\W\d_][^\W\d_'’\-]*(?:['’\-][^\W\d_][^\W\d_'’\-]*)*"
+
+
+def _titlecased(phrase: str) -> bool:
+    """Every token in `phrase` starts with an uppercase letter — checked with Python's
+    Unicode-aware str.isupper() rather than a regex class, because `re` has no \\p{Lu} and an
+    ASCII [A-Z] is exactly the bug this replaced. Keeping the uppercase requirement matters:
+    without it the Unicode token matches lowercase words too, and "I am Furious about this"
+    redacts as a three-word name."""
+    toks = [t for t in re.split(r"[\s'’\-]+", phrase) if t]
+    return bool(toks) and all(t[0].isupper() for t in toks)
+
+
+def _sub_name(m: "re.Match") -> str:
+    """Redact the LEADING name-shaped run of the captured phrase, keeping the rest.
+
+    Trimming rather than rejecting matters: the token class is Unicode-aware and therefore
+    matches lowercase words too, so the regex happily captures "John Smith and I want". If the
+    callback simply declined that (not every token uppercase), re.sub would NOT retry a shorter
+    span and a real two-word name would go unredacted. So take the uppercase-initial prefix —
+    "John Smith" — redact exactly that, and hand back the remainder untouched.
+
+    Uppercase is decided by Python's Unicode-aware str.isupper(), not a regex class: `re` has
+    no \\p{Lu}, and an ASCII [A-Z] is precisely the bug this replaced (100% redaction for ASCII
+    names, 0% for diacritics, apostrophes, internal caps and non-Latin scripts)."""
+    # Some name patterns capture (cue, phrase); the sign-off one captures the phrase only.
+    if m.re.groups >= 2:
+        cue, phrase = m.group(1), m.group(2)
+    else:
+        cue, phrase = "", m.group(1)
+    parts = re.split(r"(\s+)", phrase)          # keep separators so the tail is verbatim
+    kept: list[str] = []
+    for idx, tok in enumerate(parts):
+        if idx % 2 == 1:                         # a separator
+            kept.append(tok)
+            continue
+        head = tok.lstrip("'’-")
+        if not head or not head[0].isupper() or head.lower() in _NOT_A_NAME_AFTER_CUE:
+            break
+        kept.append(tok)
+    name = "".join(kept).rstrip()
+    if not name:
+        return m.group(0)
+    tail = phrase[len(name):]
+    return (f"{cue} [REDACTED_NAME]{tail}" if cue else f"[REDACTED_NAME]{tail}")
+
 _PII_PATTERNS = [
     # Separators include '.', which the original class ([ -]) omitted: "4111.1111.1111.1111"
     # is a canonical way to write a card and went through unredacted.
@@ -100,32 +156,44 @@ _PII_PATTERNS = [
     #  (a1) STRONG, explicit name-declaration cue + 1-3 Titlecase words: "my name is Jane",
     #  "call me Bob Lee". These cues are unambiguous, so a single Titlecase word is a name.
     (re.compile(r"\b(?i:(my name is|name's|name is|i'm called|call me|they call me))"
-                r"\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b"),
-     r"\1 [REDACTED_NAME]", "name"),
+                r"\s+((?:[^\\W\\d_][^\\W\\d_'’\\-]*(?:['’\\-][^\\W\\d_][^\\W\\d_'’\\-]*)*)(?:\s+(?:[^\\W\\d_][^\\W\\d_'’\\-]*(?:['’\\-][^\\W\\d_][^\\W\\d_'’\\-]*)*)){0,2})"),
+     _sub_name, "name"),
     #  (a2) WEAK cue ("i am"/"i'm"/"this is") + a TWO-word name. A single Titlecase word after
     #  a weak cue is ambiguous ("I'm Disappointed", "This is Comcast" (which IS now scrubbed — see the denylist note)), so the one-word case is
     #  handled separately below, gated on a non-name denylist (the first-name lexicon it replaced was deleted in R13) — catching "I'm John"
     #  without scrubbing "I'm Disappointed". (An uncommon single first name after a weak cue can
     #  still slip; the deterministic action layer + fact allowlist are the real backstops.)
-    (re.compile(r"\b(?i:(i am|i'm|this is))\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b"),
-     r"\1 [REDACTED_NAME]", "name"),
+    (re.compile(r"\b(?i:(i am|i'm|this is))\s+((?:%s)(?:\s+(?:%s)){1,2})" % (_NAME_TOK, _NAME_TOK)),
+     _sub_name, "name"),
     #  (b) "it's/it is <First Last>" — require a two-word name so "it's Friday" isn't caught
     (re.compile(r"\b(?i:(it's|it is))\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b"),
-     r"\1 [REDACTED_NAME]", "name"),
+     _sub_name, "name"),
     #  (c) "<First Last> here/speaking" (name-first introduction)
     (re.compile(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+(?=\s+(?:here|speaking)\b)"),
      "[REDACTED_NAME]", "name"),
     #  (d) a sign-off "- First Last" at line end — but NOT a common closing ("- Best Regards",
     #  "- Many Thanks", "- Kind Regards", "- Take Care"), which are not names.
+    # Sign-off: "- Michael Brown". Captures (dash, name) so _sub_name sees the NAME as group 2
+    # — it previously captured only the dash, so after the callback switch this pattern
+    # silently stopped redacting. Unicode token, so "- José García" is caught too.
     (re.compile(r"(?m)([-–—])\s*(?!(?:Best|Kind|Many|Warm|Warmest|Thank|Thanks|Regards|Sincerely|"
                 r"Cheers|Yours|Take|Talk|Much|All|Good|Have|Speak)\b)"
-                r"[A-Z][a-z]+\s+[A-Z][a-z]+\s*$"),
-     r"\1 [REDACTED_NAME]", "name"),
+                r"((?:%s)\s+(?:%s))\s*$" % (_NAME_TOK, _NAME_TOK)),
+     _sub_name, "name"),
 ]
 _SENSITIVE_TERMS = re.compile(
-    r"\b(health record|medical record|diagnosis|diagnosed|my condition|prescription|password|api key|routing number)\b",
+    r"\b(health record|medical record|diagnosis|diagnosed|my condition|prescription)\b",
     re.IGNORECASE,
 )
+
+# CREDENTIALS: scrub the VALUE, not the label. The pattern above replaced the matched WORD, so
+# "my password is hunter2" became "my [REDACTED_SENSITIVE] is hunter2" — the label removed and
+# the secret kept, in a durable transcript. That is worse than not matching at all, because the
+# telemetry then reports a redaction that did not protect anything. These consume the cue AND
+# whatever follows it up to the end of the clause.
+_CREDENTIALS = re.compile(
+    r"(?i:\b(password|passcode|api[ -]?key|secret[ -]?key|access[ -]?token|routing[ -]?number|"
+    r"account[ -]?number|pin)\b\s*(?:is|:|=)?\s*)(\S+)")
 
 # A single Titlecase word after a WEAK cue ("i'm John") is redacted only if it's a known
 # first name — so "I'm John" is scrubbed but "I'm Disappointed" / "This is Comcast" (which IS now scrubbed — see the denylist note) are not.
@@ -166,8 +234,11 @@ curious interested serious afraid glad sad mad broke busy new old back out in
 # over-redacting a mood is strictly better than under-redacting somebody's name, and far
 # better than doing either one unevenly across ethnic groups.
 
+# Uppercase-initial token in ANY script, not just [A-Z][a-z]+. The ASCII-only form redacted
+# 100% of ASCII names and 0% of diacritics, apostrophes, internal caps and non-Latin scripts —
+# the same disparate-impact failure the name allowlist had, in a different dimension.
 _WEAK_CUE_SINGLE_NAME = re.compile(
-    r"\b(?i:(i am|i'm|this is))\s+([A-Z][a-z]+)\b(?!\s+[A-Z][a-z]+)")  # exactly ONE Titlecase word
+    r"\b(?i:(i am|i'm|this is))\s+((?:%s))\b(?!\s+(?:%s))" % (_NAME_TOK, _NAME_TOK))
 
 
 def redact_pii(text: str) -> tuple[str, list[str]]:
@@ -175,8 +246,13 @@ def redact_pii(text: str) -> tuple[str, list[str]]:
     types: set[str] = set()
     out = text
     for rx, repl, kind in _PII_PATTERNS:  # card before phone so 16-digit runs aren't split
-        if rx.search(out):
-            out = rx.sub(repl, out)
+        # Compare BEFORE and AFTER rather than trusting search(). The name patterns use a
+        # callback that may decline to redact (the captured phrase is not name-shaped), so a
+        # match does not imply a redaction — and recording the type anyway reported a
+        # redaction that never happened, in the telemetry a safety reviewer reads.
+        new = rx.sub(repl, out)
+        if new != out:
+            out = new
             types.add(kind)
 
     # Weak-cue single name, gated on the first-name lexicon (see note above).
@@ -197,6 +273,9 @@ def redact_pii(text: str) -> tuple[str, list[str]]:
             return f"{m.group(1)} [REDACTED_NAME]"
         return m.group(0)
     out = _WEAK_CUE_SINGLE_NAME.sub(_sub_weak_single, out)
+    if _CREDENTIALS.search(out):
+        out = _CREDENTIALS.sub(r"\1[REDACTED_SECRET]", out)
+        types.add("credential")
     if _SENSITIVE_TERMS.search(out):
         out = _SENSITIVE_TERMS.sub("[REDACTED_SENSITIVE]", out)
         types.add("sensitive")

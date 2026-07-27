@@ -217,3 +217,23 @@ def test_a_published_catch_rate_is_bound_to_the_guardrail_version_that_produced_
         assert "supersede" in text.lower(), (
             f"{rel} publishes a catch rate measured under {recorded!r} while the current "
             f"guardrail version is {current!r}, and says nothing about it being stale")
+
+
+def test_no_doc_quotes_a_guardrail_hash_as_current():
+    """R15. BUILD.md quoted the live guardrail hash as "current"; the very next guardrail edit
+    moved it, so the disclosure paragraph about a stale hash was itself quoting a stale hash.
+    Hard-coding a live content hash in prose guarantees that recurrence — the only stable form
+    is a command the reader runs. A RECORDED hash (a fact about a past measurement) is fine and
+    is what this allows: the current one must never be pinned."""
+    from agent import guardrails
+    current = guardrails.guardrail_version()
+    for rel in ("README.md", "BUILD.md", "docs/testing.html", "docs/index.html",
+                "docs/how-it-works.html"):
+        try:
+            text = _read(rel)
+        except FileNotFoundError:
+            continue
+        assert current not in text, (
+            f"{rel} hard-codes the CURRENT guardrail hash {current!r}. It will be wrong the "
+            f"next time a pattern, flag, replacement or classifier prompt changes. Quote the "
+            f"recorded hash and the command instead.")

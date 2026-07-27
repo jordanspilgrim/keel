@@ -28,6 +28,18 @@ SAFETY: mutations are applied to a private copy of the tree under a uniquely-nam
 directory, never to tracked files. Pass 14 observed a shared scratchpad being restored
 underneath a running test, producing a false "all passed" — so the copy is verified to contain
 the mutation immediately before pytest runs and to be unchanged after.
+
+THE ORACLE, and why it is not just the exit code (pass 15 found this in THIS file).
+The first version decided KILLED from `pytest`'s return code alone, with no baseline. That is
+wrong in three ways, each of which makes the harness certify a control it never tested:
+  * On an ALREADY-RED tree every mutant "kills" and it prints "every catalogued control is
+    genuinely verified." Reproduced: one unrelated failing test added, 10/10 KILLED.
+  * A collection or import error also exits non-zero, so a mutant that runs ZERO tests
+    certifies its control.
+  * A mutant can be killed by a test that has nothing to do with the control it names.
+So: a baseline run must be GREEN before any mutant runs; a kill requires exit code 1
+specifically (test failures, not collection errors); and the failing tests are reported so a
+reader can see the kill is attributable rather than incidental.
 """
 
 from __future__ import annotations
@@ -89,11 +101,47 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      '        if False and session.get("_resolving"):\n            # The guard was one-directional',
      "R12 E2E#3: a turn is admitted mid-resolve and races the finalize"),
 
+    ("name_token_ascii_only", "agent/guardrails.py",
+     '_NAME_TOK = r"[^\\W\\d_][^\\W\\d_\'’\\-]*(?:[\'’\\-][^\\W\\d_][^\\W\\d_\'’\\-]*)*"',
+     '_NAME_TOK = r"[A-Z][a-z]+"',
+     "R15: name redaction becomes 100% ASCII / 0% diacritics, apostrophes, non-Latin"),
+
+    ("credentials_keep_the_value", "agent/guardrails.py",
+     '        out = _CREDENTIALS.sub(r"\\1[REDACTED_SECRET]", out)',
+     '        pass  # credential value left in place',
+     "R15: a password/API key/routing number is stored verbatim in the transcript"),
+
     ("db_rebuild_skipped", "db.py",
      "    _relax_not_null_for_pre_persist_queues(conn)",
      "    pass  # migration skipped",
      "R13 D8f: legacy schemas cannot hold a turn-time pre-write"),
 ]
+
+
+def _pytest(tree: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "-m", "pytest", "tests/", "-q", "--no-header",
+                           "-p", "no:randomly"],
+                          cwd=tree, capture_output=True, text=True)
+
+
+def _failing_tests(out: str) -> list[str]:
+    ids = []
+    for ln in out.splitlines():
+        if ln.startswith("FAILED "):
+            ids.append(ln[len("FAILED "):].split(" - ")[0].strip())
+    return ids
+
+
+def _baseline_is_green() -> tuple[bool, str]:
+    """The unmutated tree MUST be green, or every 'kill' below is meaningless."""
+    tmp = tempfile.mkdtemp(prefix="keel-mut-baseline-")
+    tree = os.path.join(tmp, "tree")
+    shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns(
+        ".git", ".venv", "__pycache__", "*.pyc", "keel.db*", ".pytest_cache"))
+    proc = _pytest(tree)
+    shutil.rmtree(tmp, ignore_errors=True)
+    tail = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()][-1:] or [""]
+    return proc.returncode == 0, tail[0].strip()
 
 
 def _run(mut, keep: bool) -> tuple[str, bool, str]:
@@ -110,17 +158,27 @@ def _run(mut, keep: bool) -> tuple[str, bool, str]:
     open(path, "w").write(src.replace(find, repl))
     digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
 
-    proc = subprocess.run([sys.executable, "-m", "pytest", "tests/", "-q", "-x", "--no-header"],
-                          cwd=tree, capture_output=True, text=True)
+    proc = _pytest(tree)
     # the mutation must still be present — guards against a concurrent restore (see docstring)
     if hashlib.sha256(open(path, "rb").read()).hexdigest() != digest:
         shutil.rmtree(tmp, ignore_errors=True)
         return name, False, "TREE MUTATED UNDER THE RUN — result discarded"
-    killed = proc.returncode != 0
-    tail = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()][-1:] or [""]
+    failing = _failing_tests(proc.stdout)
+    # Exit code 1 means TEST FAILURES. 2 is a collection/usage error, 3 internal, 4 usage,
+    # 5 no tests collected — a mutant that breaks the import runs zero tests and must not be
+    # credited with a kill.
+    killed = proc.returncode == 1 and bool(failing)
+    if proc.returncode not in (0, 1):
+        detail = f"NOT A KILL — pytest exit {proc.returncode} (collection/import error, zero tests ran)"
+    elif killed:
+        shown = ", ".join(t.split("::")[-1] for t in failing[:3])
+        detail = f"{len(failing)} test(s) failed: {shown}{' …' if len(failing) > 3 else ''}"
+    else:
+        tail = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()][-1:] or [""]
+        detail = tail[0].strip()
     if not keep:
         shutil.rmtree(tmp, ignore_errors=True)
-    return name, killed, tail[0].strip()
+    return name, killed, detail
 
 
 def main() -> int:
@@ -136,18 +194,36 @@ def main() -> int:
             print(f"  {name:32} {rel:22} {control}")
         return 0
 
+    ok, base_detail = _baseline_is_green()
+    print(f"baseline (unmutated): {base_detail}")
+    if not ok:
+        print("\nABORTING — the baseline suite is NOT green, so every 'kill' below would be "
+              "meaningless: a mutant cannot be shown to break something that is already broken. "
+              "Fix the suite first.")
+        return 2
     print(f"running {len(chosen)} mutant(s) — each must be KILLED (suite goes red)\n")
-    survived = []
+    survived, stale = [], []
     for mut in chosen:
         name, killed, detail = _run(mut, args.keep)
-        print(f"  {'KILLED  ' if killed else 'SURVIVED'}  {name:32} {detail}")
-        if not killed:
+        tag = "KILLED  " if killed else ("ANCHOR  " if detail.startswith("ANCHOR") else "SURVIVED")
+        print(f"  {tag}  {name:32} {detail}")
+        if detail.startswith("ANCHOR"):
+            stale.append((name, detail))
+        elif not killed:
             survived.append((name, mut[4]))
     print()
+    if stale:
+        # NOT a coverage claim either way — the catalogue is out of date and says nothing
+        # about the control. Reporting it under "can be deleted" was itself misleading.
+        print(f"{len(stale)} STALE ANCHOR(S) — the catalogue no longer matches the code, so these "
+              f"controls were NOT tested in either direction:")
+        for name, detail in stale:
+            print(f"    {name}: {detail}")
     if survived:
         print(f"{len(survived)} SURVIVED — these controls can be deleted with a green suite:")
         for name, control in survived:
             print(f"    {name}: {control}")
+    if survived or stale:
         return 1
     print("all mutants killed — every catalogued control is genuinely verified")
     return 0
