@@ -149,6 +149,34 @@ def _baseline_is_green() -> tuple[bool, str]:
     return proc.returncode == 0, tail[0].strip()
 
 
+# Controls this repo PUBLICLY claims to enforce. Every one must have a mutant, or the
+# catalogue is trailing the code — which is how it worked until R16: entries were curated from
+# the PREVIOUS pass's findings, so the newest fix was never covered and each pass found the
+# same "shipped, untested" shape in whatever landed last. Adding a claimed control here without
+# a mutant fails the harness, so the catalogue cannot silently fall behind again.
+CLAIMED_CONTROLS = {
+    "extended_drops_abandoned":          "every terminal offer state is visible to extended()",
+    "ceiling_fallback_upgrades":         "a failure path never pays more than the happy path",
+    "ssn_cue_drops_is":                  "SSN redaction covers the commonest phrasing",
+    "unknown_tool_wording":              "unknown tools are not counted as over-ceiling offers",
+    "fulfillment_insert_or_ignore":      "a durable promise is never a silent no-op",
+    "hash_drops_scope_classifier":       "the guardrail hash covers the scope classifier",
+    "hash_drops_pii_replacement":        "the guardrail hash covers replacements and flags",
+    "close_dangling_batch":              "batch and live persist identical ledger evidence",
+    "resolving_admission_guard":         "no turn is admitted mid-resolve",
+    "db_rebuild_skipped":                "legacy schemas can hold a turn-time pre-write",
+    "strong_cue_inlines_a_broken_token": "the strongest name cue redacts every orthography",
+    "credentials_keep_the_value":        "a credential's VALUE is destroyed, not its label",
+    "name_token_ascii_only":             "name redaction does not depend on orthography",
+}
+
+
+def _catalogue_is_complete() -> list[str]:
+    named = {m[0] for m in MUTANTS}
+    return sorted(CLAIMED_CONTROLS - named if isinstance(CLAIMED_CONTROLS, set)
+                  else set(CLAIMED_CONTROLS) - named)
+
+
 def _run(mut, keep: bool) -> tuple[str, bool, str]:
     name, rel, find, repl, control = mut
     tmp = tempfile.mkdtemp(prefix=f"keel-mut-{name}-")
@@ -198,6 +226,14 @@ def main() -> int:
         for name, rel, _f, _r, control in chosen:
             print(f"  {name:32} {rel:22} {control}")
         return 0
+
+    missing = _catalogue_is_complete()
+    if missing:
+        print("CATALOGUE INCOMPLETE — these controls are claimed but have no mutant, so nothing "
+              "verifies them:")
+        for name in missing:
+            print(f"    {name}: {CLAIMED_CONTROLS[name]}")
+        return 2
 
     ok, base_detail = _baseline_is_green()
     print(f"baseline (unmutated): {base_detail}")

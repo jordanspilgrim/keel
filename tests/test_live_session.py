@@ -715,3 +715,29 @@ def test_telemetry_flush_rolls_back_and_does_not_leave_a_pending_write(conn, mon
     conn.commit()                                 # an unrelated later commit
     rows = conn.execute("SELECT count(*) c FROM guardrail_events WHERE session_key='flush-fail'").fetchone()["c"]
     assert rows == 0, "a failed flush must roll back, not leave writes for a later commit"
+
+
+def test_an_off_scope_turn_with_an_offer_on_the_table_is_bounded_not_decided(conn, monkeypatch):
+    """R16-F5. Only 'block' returned early, so an off-scope message sent while an offer was
+    presented fell through to the customer-decision branch: it went verbatim to the decision
+    classifier (a model call) and could write a durable outcome='saved' plus a fulfillment
+    row — while a ('off_scope','bounded') guardrail row asserted the turn was bounded and the
+    bounded reply was never sent. check_scope fails CLOSED, so during any classifier outage
+    every live accept/reject turn took this path."""
+    seen = []
+    monkeypatch.setattr(guardrails, "check_scope", lambda t: {"in_scope": False, "reason": "off topic"})
+    monkeypatch.setattr(runtime, "classify_customer_decision",
+                        lambda m, o: seen.append(m) or "accept")
+    monkeypatch.setattr(runtime, "_agent_turn", _fake_agent())
+    s = runtime.new_session(1, conn)
+    s["_session_id"] = "offscope"
+    _present(s["rec"], "1-month pause")
+
+    r = runtime.live_turn(s, "write me a poem about the ocean", conn)
+
+    assert seen == [], "an off-scope turn must never reach the decision classifier"
+    assert s["outcome"] is None, "an off-scope turn must not terminate the conversation"
+    assert any(e[0] == "off_scope" for e in r["new_guardrail_events"])
+    assert conn.execute("SELECT count(*) c FROM offer_fulfillment_requests").fetchone()["c"] == 0
+    assert not any("poem about the ocean" in str(m.get("content", ""))
+                   for m in s["input_list"]), "off-scope content must be withheld from context"

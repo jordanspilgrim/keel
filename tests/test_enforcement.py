@@ -885,3 +885,19 @@ def test_guardrail_version_is_stable_across_processes():
         cwd=_ROOT_DIR, capture_output=True, text=True).stdout.strip() for _ in range(3)]
     assert len(set(out)) == 1, f"guardrail_version differs across processes: {out}"
     assert out[0].startswith("g-") and len(out[0]) == 14, out[0]
+
+
+def test_a_failing_catch_rate_is_named_even_when_the_version_also_moved(conn):
+    """R16-F3 sub-defect. program_state was an if/elif chain with the version check FIRST, so
+    whenever the recorded guardrail version differed the catch-rate floor and the staleness
+    check below it were unreachable — a catastrophic 5% catch rate was never named, and the
+    only remedy offered ('re-run the red-team') described a different problem. Stale and
+    failing are separate facts."""
+    from agent import safety
+    db.record_health(conn, "guardrail_catch_rate", 0.05, "5/100",
+                     version="g-someoldversion")   # both below floor AND a version mismatch
+    st = safety.program_state(conn)
+    joined = " | ".join(st["reasons"])
+    assert "catch rate" in joined, f"the breach was never named: {st['reasons']}"
+    assert "re-run the red-team" in joined, f"the staleness was dropped: {st['reasons']}"
+    assert st["healthy"] is False

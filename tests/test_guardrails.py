@@ -251,12 +251,23 @@ def test_credentials_scrub_the_value_not_the_label():
     became "my [REDACTED_SENSITIVE] is hunter2" — label removed, secret kept, in a durable
     transcript. Worse than not matching, because the telemetry then reports a redaction that
     protected nothing."""
+    # A separator is REQUIRED now (verb or punctuation) — "api key sk-abc123XYZ" with no
+    # separator is not treated as a credential, because matching it also matched ordinary
+    # prose like "The password reset link never arrived" and ate the following word.
     for text, secret in [("my password is hunter2", "hunter2"),
-                         ("api key sk-abc123XYZ", "sk-abc123XYZ"),
-                         ("routing number 021000021", "021000021")]:
+                         ("api key: sk-abc123XYZ", "sk-abc123XYZ"),
+                         ("routing number is 021000021", "021000021"),
+                         # multi-token secrets: one \\S+ token left most of these behind
+                         ("my password is correct horse battery staple", "battery staple"),
+                         ("my routing number is 021 000 021", "000 021"),
+                         ("my pin is 4821, please help", "4821")]:
         out, types = guardrails.redact_pii(text)
         assert secret not in out, f"the VALUE survived: {out}"
         assert "credential" in types
+    # ...and ordinary prose containing a cue word is left ALONE, with no false event
+    for keep in ("The password reset link never arrived.", "I forgot my password and need help"):
+        out, types = guardrails.redact_pii(keep)
+        assert out == keep and "credential" not in types, f"over-redacted: {out!r}"
 
 
 def test_a_declined_name_match_is_not_reported_as_a_redaction():

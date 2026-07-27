@@ -1507,9 +1507,21 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
     # before the agent — the input never reaches a model on any live path. (Terminal-state
     # branches above still win, since their reply is a fact about the conversation, not a
     # response to this message.)
-    if dec["action"] == "block":
+    if dec["action"] in ("block", "bound"):
+        # 'bound' (off-scope) must return here too. It previously fell THROUGH to the
+        # customer-decision branch below, so an off-scope message sent while an offer was on
+        # the table went verbatim to classify_customer_decision — i.e. to a model — and could
+        # write a durable outcome='saved' plus a fulfillment row, while a
+        # ('off_scope','bounded') guardrail row asserted the turn had been bounded and the
+        # bounded reply was never sent. _advance handles both actions; this path handled only
+        # one. It is not an edge case: check_scope FAILS CLOSED, so during any scope-classifier
+        # outage every live accept/reject turn took it.
         session["transcript"].append({"role": "user", "content": shown})
         session["transcript"].append({"role": "assistant", "content": dec["reply"]})
+        if dec["action"] == "bound":
+            # keep the model context free of off-scope content, exactly as _advance does
+            session["input_list"].append({"role": "user", "content": dec["context"]})
+            session["input_list"].append({"role": "assistant", "content": dec["reply"]})
         _emit(on_step, "reply", dec["reply"])
         return _turn_result(conn=conn, session=session, reply=dec["reply"], new_events=rec["guardrail"][before:])
     # H2 — CUSTOMER-EARNED ACCEPTANCE. If a retention offer is on the table, classify the

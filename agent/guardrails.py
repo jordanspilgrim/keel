@@ -232,9 +232,18 @@ _SENSITIVE_TERMS = re.compile(
 # the secret kept, in a durable transcript. That is worse than not matching at all, because the
 # telemetry then reports a redaction that did not protect anything. These consume the cue AND
 # whatever follows it up to the end of the clause.
-_CREDENTIALS = re.compile(
-    r"(?i:\b(password|passcode|api[ -]?key|secret[ -]?key|access[ -]?token|routing[ -]?number|"
-    r"account[ -]?number|pin)\b\s*(?:is|:|=)?\s*)(\S+)")
+_CRED_CUES = (r"password|passcode|api[ -]?key|secret[ -]?key|access[ -]?token|"
+              r"routing[ -]?number|account[ -]?number|pin")
+# A separator is REQUIRED — either a verb ("password is X") or punctuation ("api key: X").
+# Making it optional matched ordinary prose: "The password reset link never arrived" became
+# "The password[REDACTED_SECRET] link never arrived" with a false credential event written
+# into the durable transcript and the theme labeler's input.
+_CRED_SEP = r"(?:\s+(?:is|are)\s*[:=]?\s*|\s*[:=]\s*)"
+# The secret runs to a CLAUSE terminator, not one \S+ token. A single token left most of a
+# passphrase, a spaced routing number, or a PIN-plus-text behind while `types` reported a
+# successful redaction — reintroducing the exact "reports a redaction that protected nothing"
+# property this pattern was written to eliminate.
+_CREDENTIALS = re.compile(r"((?i:\b(?:" + _CRED_CUES + r")\b)" + _CRED_SEP + r")([^\n,.;!?]+)")
 
 # A single Titlecase word after a WEAK cue ("i'm John") is redacted only if it's a known
 # first name — so "I'm John" is scrubbed but "I'm Disappointed" / "This is Comcast" (which IS now scrubbed — see the denylist note) are not.

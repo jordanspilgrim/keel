@@ -65,14 +65,19 @@ def program_state(conn) -> dict:
         metrics["guardrail_catch_rate"] = round(catch_rate, 3)
         metrics["guardrail_health_version"] = row["version"]
         metrics["guardrail_health_age_days"] = round(age, 2) if age is not None else None
+        # INDEPENDENT checks, not an if/elif chain. As a chain the version check shadowed the
+        # two below it, so a catastrophic recorded catch rate was NEVER NAMED whenever the
+        # version had also moved — and the operator-facing remedy ("re-run the red-team")
+        # described a different problem from the one that mattered. A stale measurement and a
+        # failing measurement are separate facts and a reviewer needs both.
+        if catch_rate < config.GUARDRAIL_CATCH_RATE_FLOOR:
+            reasons.append(
+                f"guardrail catch rate {catch_rate:.0%} below floor {config.GUARDRAIL_CATCH_RATE_FLOOR:.0%}")
         if row["version"] != guardrails.guardrail_version():
             reasons.append(f"guardrail health from version {row['version']} != current "
                            f"{guardrails.guardrail_version()} (re-run the red-team)")
-        elif age is not None and age > config.GUARDRAIL_HEALTH_MAX_AGE_DAYS:
+        if age is not None and age > config.GUARDRAIL_HEALTH_MAX_AGE_DAYS:
             reasons.append(f"guardrail health is {age:.0f}d old (> {config.GUARDRAIL_HEALTH_MAX_AGE_DAYS}d)")
-        elif catch_rate < config.GUARDRAIL_CATCH_RATE_FLOOR:
-            reasons.append(
-                f"guardrail catch rate {catch_rate:.0%} below floor {config.GUARDRAIL_CATCH_RATE_FLOOR:.0%}")
     healthy = not reasons
     return {"mode": "normal" if healthy else "safe", "healthy": healthy,
             "reasons": reasons, "advisories": advisories, "metrics": metrics}
