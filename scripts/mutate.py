@@ -106,6 +106,11 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      '_NAME_TOK = r"[A-Z][a-z]+"',
      "R15: name redaction becomes 100% ASCII / 0% diacritics, apostrophes, non-Latin"),
 
+    ("strong_cue_inlines_a_broken_token", "agent/guardrails.py",
+     '                r"\\s+((?:%s)(?:\\s+(?:%s)){0,2})" % (_NAME_TOK, _NAME_TOK)),',
+     '                r"\\s+((?:[^\\\\W\\\\d_]+)(?:\\\\s+(?:[^\\\\W\\\\d_]+)){0,2})"),',
+     "R16 CRITICAL: 'my name is William' leaks entirely AND reports types=[]"),
+
     ("credentials_keep_the_value", "agent/guardrails.py",
      '        out = _CREDENTIALS.sub(r"\\1[REDACTED_SECRET]", out)',
      '        pass  # credential value left in place',

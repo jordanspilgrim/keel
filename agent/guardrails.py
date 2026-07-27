@@ -95,6 +95,27 @@ def _titlecased(phrase: str) -> bool:
     return bool(toks) and all(t[0].isupper() for t in toks)
 
 
+def _sub_name_min2(m: "re.Match") -> str:
+    """_sub_name for cues that require a TWO-word name ("it's <First Last>", "<First Last>
+    here"). Those cues are weak on their own — "it's Friday", "Monday here" — and the original
+    patterns relied on the REGEX demanding two Titlecase words to stay off them. The Unicode
+    token plus a trimming callback broke that: the regex now matches "Friday and I" (the token
+    class is case-blind) and the trimmer reduces it to the single word "Friday". So the
+    two-word requirement has to be re-asserted AFTER trimming, or these cues start scrubbing
+    ordinary sentences."""
+    out = _sub_name(m)
+    if out == m.group(0):
+        return out
+    phrase = m.group(2) if m.re.groups >= 2 else m.group(1)
+    kept = out[:out.index("[REDACTED_NAME]")] if "[REDACTED_NAME]" in out else ""
+    # how many tokens of the original phrase were actually consumed
+    tail = out.split("[REDACTED_NAME]", 1)[1] if "[REDACTED_NAME]" in out else ""
+    consumed = phrase[:len(phrase) - len(tail)] if tail else phrase
+    if len([t for t in consumed.split() if t]) < 2:
+        return m.group(0)
+    return out
+
+
 def _sub_name(m: "re.Match") -> str:
     """Redact the LEADING name-shaped run of the captured phrase, keeping the rest.
 
@@ -156,7 +177,7 @@ _PII_PATTERNS = [
     #  (a1) STRONG, explicit name-declaration cue + 1-3 Titlecase words: "my name is Jane",
     #  "call me Bob Lee". These cues are unambiguous, so a single Titlecase word is a name.
     (re.compile(r"\b(?i:(my name is|name's|name is|i'm called|call me|they call me))"
-                r"\s+((?:[^\\W\\d_][^\\W\\d_'’\\-]*(?:['’\\-][^\\W\\d_][^\\W\\d_'’\\-]*)*)(?:\s+(?:[^\\W\\d_][^\\W\\d_'’\\-]*(?:['’\\-][^\\W\\d_][^\\W\\d_'’\\-]*)*)){0,2})"),
+                r"\s+((?:%s)(?:\s+(?:%s)){0,2})" % (_NAME_TOK, _NAME_TOK)),
      _sub_name, "name"),
     #  (a2) WEAK cue ("i am"/"i'm"/"this is") + a TWO-word name. A single Titlecase word after
     #  a weak cue is ambiguous ("I'm Disappointed", "This is Comcast" (which IS now scrubbed — see the denylist note)), so the one-word case is
@@ -166,11 +187,11 @@ _PII_PATTERNS = [
     (re.compile(r"\b(?i:(i am|i'm|this is))\s+((?:%s)(?:\s+(?:%s)){1,2})" % (_NAME_TOK, _NAME_TOK)),
      _sub_name, "name"),
     #  (b) "it's/it is <First Last>" — require a two-word name so "it's Friday" isn't caught
-    (re.compile(r"\b(?i:(it's|it is))\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b"),
-     _sub_name, "name"),
+    (re.compile(r"\b(?i:(it's|it is))\s+((?:%s)(?:\s+(?:%s)){1,2})" % (_NAME_TOK, _NAME_TOK)),
+     _sub_name_min2, "name"),
     #  (c) "<First Last> here/speaking" (name-first introduction)
-    (re.compile(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+(?=\s+(?:here|speaking)\b)"),
-     "[REDACTED_NAME]", "name"),
+    (re.compile(r"\b((?:%s)\s+(?:%s))(?=\s+(?:here|speaking)\b)" % (_NAME_TOK, _NAME_TOK)),
+     _sub_name_min2, "name"),
     #  (d) a sign-off "- First Last" at line end — but NOT a common closing ("- Best Regards",
     #  "- Many Thanks", "- Kind Regards", "- Take Care"), which are not names.
     # Sign-off: "- Michael Brown". Captures (dash, name) so _sub_name sees the NAME as group 2

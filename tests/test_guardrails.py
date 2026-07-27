@@ -273,3 +273,52 @@ def test_the_fairness_gate_checks_orthography_not_just_group():
     sym = agent_fairness.proxy_symmetry()
     assert sym["orthography_symmetric"] is True, sym["orthography_redaction_rate"]
     assert set(sym["orthography_redaction_rate"].values()) == {1.0}
+
+
+# --- R16: the CUE x ORTHOGRAPHY grid ---------------------------------------------
+# Every name finding across passes 14-16 existed because the probe sets varied ONE axis while
+# holding another fixed: names varied with the cue fixed, then orthography varied with the cue
+# fixed, then the cue varied with orthography fixed. Each pass fixed the axis it probed and
+# left the others. R16's CRITICAL was exactly this — _NAME_TOK was fixed while a hand-inlined
+# copy in the STRONGEST cue kept doubled backslashes, so "my name is William" leaked entirely
+# AND reported types=[] (telemetry asserting no PII was present). The grid is the fix for the
+# class, not for the instance.
+_STRONG_CUES = [
+    "my name is {n} and I want to cancel.",
+    "call me {n} please.",
+    "they call me {n}.",
+    "Hi, this is {n}. I want to cancel.",
+]
+_ORTHOGRAPHIES = [
+    "Jane Doe", "William Baker", "Wendy Dean",        # ASCII incl. the W/lowercase-d trap
+    "José García", "Siobhán Murphy", "Renée Zoë",     # diacritics
+    "O'Brien Kelly", "D'Angelo Rossi",                # apostrophes
+    "MacDonald Stewart", "McKenzie Fraser",           # internal caps
+    "Jean-Pierre Dubois", "Mary-Kate Olsen",          # hyphenated
+    "Владимир Петров", "Ναταλία Παπάς",               # non-Latin
+    "Ng Wei", "Li Chen",                              # short
+]
+
+
+@pytest.mark.parametrize("cue", _STRONG_CUES)
+@pytest.mark.parametrize("name", _ORTHOGRAPHIES)
+def test_every_strong_cue_redacts_every_orthography(cue, name):
+    """No cue x orthography cell may leak. Varying one axis at a time is what let three
+    consecutive passes each fix a name bug and ship another."""
+    text = cue.format(n=name)
+    out, types = guardrails.redact_pii(text)
+    first = name.split()[0]
+    assert first not in out, f"LEAK on cue={cue!r} name={name!r}: {out!r}"
+    assert "name" in types, f"redacted but not reported on {name!r}: {out!r}"
+
+
+@pytest.mark.parametrize("name", ["William", "Wendy", "Edward", "David", "Walter"])
+def test_the_w_and_lowercase_d_trap(name):
+    """The R16 CRITICAL, pinned by its exact shape. The broken class excluded the literal
+    characters W and d, so W-initial names were not redacted AT ALL (types=[], telemetry
+    clean) and names containing a lowercase d leaked a fragment WHILE reporting types=['name']
+    — a log asserting a successful redaction over text that still carried the name."""
+    out, types = guardrails.redact_pii(f"my name is {name} and I want to cancel.")
+    assert name not in out, f"{name} leaked: {out!r}"
+    assert types == ["name"], f"{name} redaction not reported: {types}"
+    assert out.endswith("and I want to cancel."), f"over-consumed: {out!r}"
