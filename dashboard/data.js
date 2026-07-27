@@ -169,60 +169,60 @@ window.KEEL_DATA = {
       "segment_selection": "loss-ranked over the seeded churn_reason label, gated on current-spec eval-eligible baseline conversations; consumed by Act via the persisted signal id (clustering does NOT drive it)",
       "intervention_signal_id": 6,
       "intervention_signal": {
+        "segment": "Price too high",
+        "recommended_lever": "discount",
+        "recommended_action": "enable the discount lever for the 'Price too high' segment",
+        "lever_compatible": true,
         "confidence": 1.0,
-        "eval_eligibility": {
-          "coverage": 1.0,
-          "eligible": 47,
-          "excluded": 33,
-          "graded": 80,
-          "rule": "current-spec eval verdict = pass",
-          "spec_version": "spec-c5868d7d7b08",
-          "total": 80
-        },
         "evidence": {
-          "loss": 24.0,
           "n": 30,
           "save_rate": 0.2,
+          "loss": 24.0,
           "segment_ranking": [
             {
-              "loss": 24.0,
-              "n": 30,
               "reason": "Price too high",
-              "save_rate": 0.2
+              "n": 30,
+              "save_rate": 0.2,
+              "loss": 24.0
             },
             {
-              "loss": 6.0,
-              "n": 8,
               "reason": "No longer needed",
-              "save_rate": 0.25
+              "n": 8,
+              "save_rate": 0.25,
+              "loss": 6.0
             },
             {
-              "loss": 6.0,
-              "n": 6,
               "reason": "Switched to competitor",
-              "save_rate": 0.0
+              "n": 6,
+              "save_rate": 0.0,
+              "loss": 6.0
             }
           ]
         },
-        "lever_compatible": true,
         "offer_effectiveness": [
           {
-            "avg_margin_cost": 11.85,
-            "n": 25,
             "offer": "pause",
-            "save_rate": 0.36
+            "n": 44,
+            "save_rate": 0.205,
+            "avg_margin_cost": 6.73
           },
           {
-            "avg_margin_cost": 0.0,
-            "n": 22,
             "offer": "none",
-            "save_rate": 0.0
+            "n": 3,
+            "save_rate": 0.0,
+            "avg_margin_cost": 0.0
           }
         ],
-        "recommended_action": "enable the discount lever for the 'Price too high' segment",
-        "recommended_lever": "discount",
-        "segment": "Price too high",
-        "unaddressable_higher_loss": []
+        "unaddressable_higher_loss": [],
+        "eval_eligibility": {
+          "rule": "current-spec eval verdict = pass",
+          "spec_version": "spec-c5868d7d7b08",
+          "total": 80,
+          "graded": 80,
+          "eligible": 47,
+          "excluded": 33,
+          "coverage": 1.0
+        }
       },
       "guardrail_version": "g-941a95159f9b",
       "variables_changed": [

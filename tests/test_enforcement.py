@@ -9,6 +9,7 @@ actions transition to a human, and that malformed offers are rejected — the
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -766,16 +767,26 @@ def test_guardrail_version_is_derived_from_content_not_a_hand_edited_string():
         "_SCOPE_INSTRUCTIONS": lambda: "you are a helpful assistant",
         "_SCOPE_SCHEMA": lambda: {"type": "object"},
         "_STREET": lambda: r"\bnope\b",
+        # R14-H2: three more inputs that changed behavior without changing the hash, each
+        # verified by mutation and each leaving all tests green. A hash a leak can slip past
+        # is decoration, not a code-identity check.
+        "_PII_PATTERNS_replacement": lambda: [
+            (rx, (r"\1" if kind == "ssn" else repl), kind)
+            for rx, repl, kind in guardrails._PII_PATTERNS],   # token neutered, still "caught"
+        "_JAILBREAK_RX_flags": lambda: re.compile(guardrails._JAILBREAK_RX.pattern),  # no IGNORECASE
     }
+    # the replacement/flags mutations target differently-named attributes
+    _ATTR = {"_PII_PATTERNS_replacement": "_PII_PATTERNS", "_JAILBREAK_RX_flags": "_JAILBREAK_RX"}
     for attr, weaken in mutations.items():
-        original = getattr(guardrails, attr)
+        target = _ATTR.get(attr, attr)
+        original = getattr(guardrails, target)
         try:
-            setattr(guardrails, attr, weaken())
+            setattr(guardrails, target, weaken())
             assert guardrails.guardrail_version() != before, \
                 f"weakening {attr} must invalidate the recorded catch rate — it decides " \
                 f"whether a probe is caught, so a stale rate would be reported as current"
         finally:
-            setattr(guardrails, attr, original)
+            setattr(guardrails, target, original)
     assert guardrails.guardrail_version() == before
 
 
@@ -785,3 +796,68 @@ def test_the_dead_output_gate_is_gone():
     degradation while the live gate fails closed. DISPOSITION_SCHEMA was likewise orphaned."""
     assert not hasattr(guardrails, "screen_output")
     assert not hasattr(runtime, "DISPOSITION_SCHEMA")
+
+
+# --- R14-M2: four R13 fixes that reverted with a green suite ---------------------
+def test_ceiling_fallback_holds_a_presented_offer_at_its_presented_terms(conn):
+    """R14-M2. test_ceiling_fallback_never_upgrades_the_offer is named for exactly this
+    property and CANNOT reach it: it authorizes 10% and 20% and never calls present(), so it
+    exercises the unpresented branch only. Deleting the already-presented branch left all 240
+    tests green while an offer committed to the customer at 5% was re-presented at its 20%
+    ceiling — a 4x upgrade, logged as 'capped_to_ceiling'."""
+    rec = _rec()
+    o = offers.authorize(rec["offers"], "discount", {"pct": 20})
+    offers.present(rec["offers"], o, {"pct": 5})          # COMMITTED to the customer at 5%
+
+    text = runtime._ceiling_fallback(rec, "discount")
+
+    assert "5% discount" in text and "20%" not in text, text
+    assert offers.presented(rec["offers"]).presented_terms == {"pct": 5}, \
+        "the failure path must not overwrite what the customer was already told"
+
+
+def test_ssn_cue_with_the_word_is_reaches_neither_model_nor_store(conn, monkeypatch):
+    """R14-M2 / R13-D8b. 'My SSN is 123456789' is the commonest phrasing and was missed; the
+    separator class allowed punctuation but not the word 'is'. End-to-end, because the unit
+    assertion alone left the mutant alive."""
+    monkeypatch.setattr(runtime, "_agent_turn",
+                        lambda il, cid, sub, c, rec, system=runtime.SYSTEM, on_step=None: "ok")
+    rec = _rec()
+    dec = runtime._screen_input("My SSN is 123456789", rec, classify_scope=False)
+    assert "123456789" not in dec["shown"], dec["shown"]
+    assert any(e[0] == "pii" for e in rec["guardrail"]), "the redaction must also be recorded"
+
+
+def test_an_unknown_tool_is_not_counted_as_an_over_ceiling_offer(conn):
+    """R14-M2 / R13-D8h. policy.py emits 'Unknown action tool {name}.' while the classifier
+    tested for 'unknown tool' — so unknown tools landed on the 'Over-ceiling offers capped'
+    safety tile, the exact mislabel the bucket split exists to prevent."""
+    rec = _rec()
+    out = runtime._resolve_call("frobnicate", {}, 1, {"price": 29.0}, conn, rec)
+    assert out["status"] == "rejected"
+    kinds = [e[0] for e in rec["guardrail"]]
+    assert "invalid_args" in kinds and "over_limit" not in kinds, kinds
+
+
+def test_the_fulfillment_pre_write_surfaces_a_schema_failure_instead_of_swallowing_it(tmp_path):
+    """R14-M2 / R13-D8f. INSERT OR IGNORE is right for the session-key uniqueness guard but
+    also swallows NOT NULL, which is how the durable write became a silent no-op while the
+    customer still got 'our team will apply it'. The migration fixes the schema; this asserts
+    the insert no longer hides a failure when the schema is wrong anyway."""
+    import sqlite3
+    path = str(tmp_path / "legacy.db")
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE conversations (id INTEGER PRIMARY KEY);
+        CREATE TABLE offer_fulfillment_requests (
+            id INTEGER PRIMARY KEY,
+            conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+            offer TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
+            session_key TEXT);
+    """)
+    raw.commit(); raw.close()
+    conn = db.connect(path)                      # deliberately WITHOUT init_db's migration
+    with pytest.raises(sqlite3.IntegrityError):
+        runtime._queue_fulfillment_live(conn, "sess", "1-month pause")
+    assert conn.execute("SELECT count(*) c FROM offer_fulfillment_requests").fetchone()["c"] == 0
+    conn.close()

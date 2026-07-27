@@ -545,7 +545,11 @@ def _validate_contract(contract: dict, rec: dict) -> tuple[bool, str]:
     #     current ledger state, so the SERVER can't author a claim that never happened
     #     (a "we sorted it out" with no save, "you declined" with no rejected offer).
     states = {o.state for o in rec["offers"]}
-    extended = states & {"presented", "accepted", "rejected"}  # an offer was actually made
+    # Use the SHARED accessor, not a parallel set literal. This was the last private copy of
+    # offers.extended()'s state list, and it had drifted exactly as the original did: it never
+    # learned 'abandoned', so a conversation whose offer went unanswered was judged to have
+    # presented nothing. A second list of the same states is a second thing to forget.
+    extended = offers.extended(rec["offers"]) is not None  # an offer was actually made
     if ack == "closing" and "accepted" not in states:
         return False, "acknowledgement 'closing' claims a save, but no offer was accepted"
     if ack == "cant_meet" and not extended:
@@ -1450,6 +1454,10 @@ def live_turn(session: dict, user_text: str, conn, *, on_step=None, decision: st
     if session.get("outcome") == "cancelled" or rec.get("cancellation_routed"):
         _queue_cancellation_live(conn, skey)  # idempotent self-heal (a prior write may have failed)
         session["outcome"] = "cancelled"
+        # Retry the finalize too, exactly as the saved/lost branch does. Without this the
+        # cancelled terminal was the only one that re-asserted its queue row but never
+        # re-attempted the persist+grade, so a swallowed finalize failure stayed unrecovered.
+        _finalize_if_terminal(session, conn)
         session["transcript"].append({"role": "user", "content": shown})
         session["transcript"].append({"role": "assistant", "content": _CANCELLED_REPLY})
         _emit(on_step, "guardrail", "Cancellation already routed — not running the agent", gtype="cancelled")
@@ -1615,7 +1623,9 @@ def resolve_session(session: dict, conn, *, outcome: str | None = None,
     try:
         # Acceptance was already earned DURING the conversation (the live classifier /
         # button, mirroring the batch simulator) — resolve does NOT mark_accepted here. A
-        # lost close still transitions any dangling presented offer to 'rejected'.
+        # lost close still transitions any dangling presented offer — to 'abandoned', NOT
+        # 'rejected': the customer never declined it, they never answered. That distinction
+        # is exactly what the R12 CRITICAL turned on.
         _close_dangling_offer(rec, outcome)
         disp = _disposition(session["transcript"], scenario, rec, outcome, offer_accepted)
         record = {"customer_id": session["customer_id"], "scenario_id": None,

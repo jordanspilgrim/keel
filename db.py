@@ -254,8 +254,17 @@ def _relax_not_null_for_pre_persist_queues(conn: sqlite3.Connection) -> None:
     conv = next((r for r in info if r["name"] == "conversation_id"), None)
     if conv is None or not conv["notnull"]:
         return  # already nullable — nothing to do
-    conn.executescript("""
-        PRAGMA foreign_keys=OFF;
+    # Re-entrant and atomic. executescript() autocommits per statement, so a crash
+    # after DROP stranded rows in _ofr_rebuild and a crash BEFORE it made every subsequent
+    # init_db raise "table _ofr_rebuild already exists" permanently. Drop any leftover first,
+    # and wrap the move in one transaction. PRAGMA foreign_keys is toggled OUTSIDE the
+    # transaction because it is a no-op inside one.
+    conn.execute("DROP TABLE IF EXISTS _ofr_rebuild")
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.executescript("""
         CREATE TABLE _ofr_rebuild (
             id                INTEGER PRIMARY KEY,
             conversation_id   INTEGER REFERENCES conversations(id),
@@ -269,8 +278,13 @@ def _relax_not_null_for_pre_persist_queues(conn: sqlite3.Connection) -> None:
             FROM offer_fulfillment_requests;
         DROP TABLE offer_fulfillment_requests;
         ALTER TABLE _ofr_rebuild RENAME TO offer_fulfillment_requests;
-        PRAGMA foreign_keys=ON;
     """)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 def init_db(conn: sqlite3.Connection) -> None:

@@ -197,3 +197,23 @@ def test_build_md_cites_the_current_median_and_committed_run():
     assert man["run_id"] in build, "BUILD.md does not cite the committed run_id"
     for value in (sp["median"], sp["min"], sp["max"]):
         assert str(value) in build, f"BUILD.md must cite {value} from the current aggregate"
+
+
+def test_a_published_catch_rate_is_bound_to_the_guardrail_version_that_produced_it():
+    """R14-H1. The kill switch gates on `program_health.version == guardrails.guardrail_version()`,
+    but nothing bound the PUBLISHED catch rate to that check — so R13's guardrail edits moved the
+    hash and four public surfaces went on advertising "100% (14/14)" as current, with no staleness
+    note anywhere (`grep "re-run the red-team"` over the docs returned nothing).
+
+    Any surface printing a catch rate must either be measured under the CURRENT hash or say it is
+    superseded. This test enforces the second half; the first half is what re-running the demo does."""
+    from agent import guardrails
+    current = guardrails.guardrail_version()
+    recorded = json.loads(_read("dashboard/manifest.json")).get("guardrail_version")
+    if recorded == current:
+        return  # measured under the live hash — nothing to disclose
+    for rel in ("README.md", "docs/testing.html"):
+        text = _read(rel)
+        assert "supersede" in text.lower(), (
+            f"{rel} publishes a catch rate measured under {recorded!r} while the current "
+            f"guardrail version is {current!r}, and says nothing about it being stale")

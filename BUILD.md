@@ -357,9 +357,25 @@ as canonical); the full distribution is persisted to `dashboard/demo_aggregate.j
 manifest under `dashboard/manifests/`.
 
 **The kill switch trips on this batch, and that is stated rather than quietly passed over.**
-`safety.program_state()` against the shipped DB returns `healthy=False, mode=safe`, reason
-`eval pass rate 69% below floor 80%` — so a live session opened against the committed database
-starts in safe mode and routes to a human. An earlier build at 75% was treated as blocking for
+`safety.program_state()` against the shipped DB returns `healthy=False, mode=safe`, for TWO
+reasons — `eval pass rate 69% below floor 80%` **and** `guardrail health from version
+g-941a95159f9b != current g-b3adb3fdc100 (re-run the red-team)`. So a live session opened
+against the committed database starts in safe mode and routes to a human.
+
+The second reason is worth dwelling on, because this paragraph got it wrong first. When it was
+written (5ca72b0) there was genuinely only one reason. The very next commit (8814a24) edited
+three inputs to the guardrail content hash — a broader SSN cue, months/weekdays removed from
+the non-name denylist, and the scope classifier added to the hash — which superseded the
+recorded red-team measurement and added the second reason, while editing this same file for
+unrelated purposes. A disclosure paragraph that under-discloses is the worst possible thing to
+get wrong in a document arguing for honesty, and it took a 14th review pass to catch it.
+
+**What that means for the published catch rate:** the committed 100% (14/14) was measured under
+guardrail version `g-941a95159f9b` and has NOT been re-measured under `g-b3adb3fdc100`. It is
+*unvalidated*, not *known-wrong* — all three changes broaden detection, and the off-scope
+classifier surface is byte-identical across the boundary — but the honest label is
+"superseded, not re-measured", and the kill switch is correctly refusing to treat it as
+current. That is the design working: it caught its own commit. An earlier build at 75% was treated as blocking for
 exactly this reason, so it would be inconsistent to wave this one through. Two things are true
 at once and both belong in the record: the floor aggregates over BOTH arms (`agent/safety.py`),
 and the baseline arm is a deliberately un-improved control, so retaining it mechanically drags
@@ -411,7 +427,7 @@ A 6-dimension adversarial pass (refute-by-default verified) found **2 HIGH** int
 |---|---|---|
 | F1 (HIGH) | `run_median` rewrote `manifest.json`/`demo_aggregate.json` to the median run but never re-exported `data.js` — so the dashboard (the flagship surface) rendered whatever ran LAST (+23.3pp), while three docs claimed it showed the median | `run_median` re-renders `data.js`/`data.json` from the committed run's export payload; a `data.js ↔ manifest` provenance test guards it · `test_dashboard_data_renders_the_committed_median_run` |
 | F2 (HIGH) | `docs/testing.html`'s flywheel block still advertised pre-R9 numbers (n=20, 15%→60% / +45pp, eval 92%) — above the entire honest k=5 distribution | Rewritten to that pass's committed median (n=60). *(Numbers in this row are historical to that review; the live docs always carry the CURRENT committed median — see Phase 5 above.)* |
-| F3 (MED) | Name-redaction pattern (a) scrubbed a single Titlecase word after weak cues ("I'm Disappointed", "This is Comcast") and common sign-offs | Strong cues allow one word, weak cues require two; sign-offs exclude common closings · over/under-redaction tests |
+| F3 (MED) | Name-redaction pattern (a) scrubbed a single Titlecase word after weak cues ("I'm Disappointed", "This is Comcast") and common sign-offs | Strong cues allow one word, weak cues required two at the time; R12/R13 replaced that gate with a non-name denylist, so a weak cue plus ONE Titlecase word now redacts; sign-offs exclude common closings · over/under-redaction tests |
 | F4 (MED) | The model-authored escalate reason was persisted un-redacted into the new `escalation_requests.reason` | `redact_pii` on the reason before the durable write (live + batch) · `test_queue_escalation_live_redacts_the_model_authored_reason` |
 | F5/F6 (MED) | Two stale "135" test counts (testing.html, BUILD.md) the count-guard's regex missed | Corrected to the real count; regex broadened to catch comma-separated adjective lists; the misplaced whole-suite count removed from BUILD.md's phase row |
 | F7/F8 (LOW) | The escalation self-heal read the reason from `session` (never set); batch escalations persisted `reason=NULL` | Both source the reason from `rec` · `test_escalation_self_heal_uses_rec_reason_not_session` |

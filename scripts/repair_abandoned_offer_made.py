@@ -24,6 +24,17 @@ all three rather than asking you to trust them:
      denominators with failures. If this made the product look better, that would be a
      reason to distrust it.
 
+R14 corrections to this script's own honesty, all found by review:
+  * It claimed to "re-export the dashboard". It did not -- the export was performed by hand.
+    --apply now actually recomputes and rewrites every derived artifact.
+  * It said "the script ASSERTS all three" safety properties. Only two were asserted; the
+    unasserted one was the ANTI-RIGGING property (that the correction moves numbers DOWN).
+    All three are now real asserts.
+  * It repaired `conversations.offer_made` but not `disposition_json.offer_made`, which is
+    the field the JUDGE reads -- leaving 68 rows in a shape production code cannot produce.
+    Both are now written from the same ledger, and a fourth assert refuses to leave them
+    disagreeing.
+
 Run:  .venv/bin/python scripts/repair_abandoned_offer_made.py [--apply]
 Without --apply it is a dry run and writes nothing.
 """
@@ -42,6 +53,7 @@ import db  # noqa: E402
 import economics  # noqa: E402
 import run_demo  # noqa: E402
 from agent import offers as O  # noqa: E402
+from analytics import themes  # noqa: E402
 from dashboard import export  # noqa: E402
 
 
@@ -98,6 +110,13 @@ def main(apply: bool) -> int:
         f"margin-adjusted lift.")
     print("  added realized margin cost : 0.0  (margin-adjusted lift cannot move)")
 
+    # PROPERTY 3, now actually asserted rather than described. The correction must move
+    # offer-effectiveness numbers DOWN (bigger denominators, no new successes). If a repair
+    # ever made the product look BETTER, that alone would be reason to distrust it.
+    conn_ro = db.connect()
+    before_eff = {o["offer"]: o for o in themes.offer_effectiveness(
+        themes.build_conversation_views(conn_ro))}
+
     if not apply:
         print("\nDRY RUN — nothing written. Re-run with --apply.")
         return 0
@@ -107,16 +126,80 @@ def main(apply: bool) -> int:
     print(f"\nbacked up DB -> {backup}")
 
     before = export.conversation_metrics(conn)
-    conn.executemany("UPDATE conversations SET offer_made=? WHERE id=?",
-                     [(off, cid) for cid, _out, off in repairs])
+    # Write BOTH representations from the same ledger value. persist_conversation derives
+    # them from a single _offer_made(rec) call, so leaving them divergent puts rows in the
+    # DB that production code cannot produce -- and disposition_json.offer_made is the one
+    # the judge actually reads (evals/judge.py build_judge_input).
+    conn.executemany(
+        "UPDATE conversations SET offer_made=?, "
+        "disposition_json=json_set(disposition_json, '$.offer_made', ?) WHERE id=?",
+        [(off, off, cid) for cid, _out, off in repairs])
     conn.commit()
     after = export.conversation_metrics(conn)
     assert before["save_rate"] == after["save_rate"], "save rate moved — aborting"
     assert before["madj_save_rate"] == after["madj_save_rate"], "madj moved — aborting"
     print(f"whole-DB save_rate {before['save_rate']} -> {after['save_rate']} (unchanged, as required)")
     print(f"whole-DB madj      {before['madj_save_rate']} -> {after['madj_save_rate']} (unchanged, as required)")
+    disagree = conn.execute(
+        "SELECT count(*) c FROM conversations "
+        "WHERE ifnull(offer_made,'') != ifnull(json_extract(disposition_json,'$.offer_made'),'')"
+    ).fetchone()["c"]
+    assert disagree == 0, (
+        f"REFUSING to finish: {disagree} rows have offer_made disagreeing with "
+        f"disposition_json.offer_made — the judge reads the latter, so a divergence would "
+        f"feed it evidence that contradicts the column.")
+    print("  column vs disposition_json  : 0 disagreeing rows")
+
+    after_eff = {o["offer"]: o for o in themes.offer_effectiveness(
+        themes.build_conversation_views(conn))}
+    for kind, aft in after_eff.items():
+        bef = before_eff.get(kind)
+        if bef is None or kind == "none":
+            continue
+        assert aft["save_rate"] <= bef["save_rate"] + 1e-9 and aft["n"] >= bef["n"], (
+            f"REFUSING: repair made '{kind}' look BETTER "
+            f"(save_rate {bef['save_rate']} -> {aft['save_rate']}, n {bef['n']} -> {aft['n']}). "
+            f"A correction that flatters the product is a reason to distrust it, not to ship it.")
+        print(f"  offer-effectiveness {kind:9}: save_rate {bef['save_rate']} -> {aft['save_rate']}"
+              f"  n {bef['n']} -> {aft['n']}  (down, as required)")
+
+    _reexport(conn)
     print(f"repaired {len(repairs)} rows")
     return 0
+
+
+def _reexport(conn) -> None:
+    """Actually re-export every derived artifact from the repaired DB.
+
+    The previous version of this script CLAIMED to do this and did not -- the dashboard was
+    hand-edited, which left dashboard/manifest.json and data.js's provenance block carrying
+    the pre-repair, survivorship-inflated offer_effectiveness (pause save_rate 0.36 / n=25
+    against a true 0.205 / n=44) inside the block labelled Provenance. A file a skeptic opens
+    to CHECK the repair must not itself be unrepaired."""
+    man = json.load(open("dashboard/manifest.json"))
+    run_id, target = man["run_id"], man["treated_segment"]
+
+    signal = themes.recommend_intervention(conn, run_id=run_id, phase="baseline", eligible_only=True)
+    man["intervention_signal"] = signal
+    before = run_demo._segment_metrics(conn, target, run_id, "baseline")
+    after = run_demo._segment_metrics(conn, target, run_id, "after")
+    assert round((after["save_rate"] - before["save_rate"]) * 100, 1) == man["lift"]["segment_save_pp"], \
+        "REFUSING: re-export moved the headline lift"
+
+    old = json.load(open("dashboard/data.json"))
+    safety = dict(old["safety"]); catch = safety.pop("catch_rate"); safety.pop("compliance", None)
+    prov = dict(old["meta"]["provenance"]); prov["intervention_signal"] = signal
+    data = export.build_data(conn, before=before, after=after, guardrail_counts=safety,
+                             catch_rate=catch, provenance=prov)
+    export.write_data(data)
+
+    for path in ("dashboard/manifest.json",
+                 f"dashboard/manifests/manifest-{run_id}.json"):
+        if os.path.exists(path):
+            with open(path, "w") as fh:
+                json.dump(man, fh, indent=2, sort_keys=True)
+                fh.write("\n")
+    print("  re-exported: manifest.json, manifests/, data.js, data.json")
 
 
 if __name__ == "__main__":

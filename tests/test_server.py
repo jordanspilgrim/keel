@@ -292,3 +292,15 @@ def test_live_session_count_is_capped(client, monkeypatch):
     monkeypatch.setattr(server, "_MAX_LIVE_SESSIONS", 2)
     ids = [client.post("/api/chat/start", json={"customer_id": 1}) for _ in range(3)]
     assert [r.status_code for r in ids].count(503) >= 1, [r.status_code for r in ids]
+
+
+def test_a_cancelled_conversation_admits_no_further_agent_turns(client, monkeypatch):
+    """R14-L3: runtime enumerates four terminals; the server enumerated three, so `cancelled`
+    was the one terminal /api/chat/turn still admitted — a classifier call and two transcript
+    entries per turn, unbounded. Recovery for a swallowed finalize is /api/chat/resolve plus
+    the retry in runtime's cancelled branch, not an open agent turn on a closed conversation."""
+    import server
+    sid = client.post("/api/chat/start", json={"customer_id": 1}).json()["session_id"]
+    server.SESSIONS[sid]["outcome"] = "cancelled"
+    r = client.post("/api/chat/turn", json={"session_id": sid, "message": "actually wait"})
+    assert r.status_code == 409 and "cancelled" in r.json()["detail"]

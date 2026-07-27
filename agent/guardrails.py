@@ -43,8 +43,17 @@ def guardrail_version() -> str:
     SOURCE of the functions that use them.
     """
     parts = [
-        repr(sorted((rx.pattern, kind) for rx, _repl, kind in _PII_PATTERNS)),
+        # The full tuple: pattern, REPLACEMENT, kind, and the compiled FLAGS. An earlier
+        # version hashed only (pattern, kind) and discarded the rest, which left three ways to
+        # change behavior without changing the hash — each verified by mutation, each leaving
+        # all tests green: neutering a replacement token ("My SSN is [REDACTED_SSN]" ->
+        # "My SSN is 123456789", still reported as caught); dropping re.IGNORECASE from the
+        # jailbreak regex ("Ignore All Previous Instructions" stops matching); and gutting
+        # check_jailbreak's body (6/6 catches -> 0/6). A hash that a leak can slip past is not
+        # a code-identity check, it is decoration.
+        repr(sorted((rx.pattern, rx.flags, repl, kind) for rx, repl, kind in _PII_PATTERNS)),
         repr(sorted(getattr(p, "pattern", p) for p in _JAILBREAK_PATTERNS)),
+        repr(_JAILBREAK_RX.flags),
         repr(sorted(_NOT_A_NAME_AFTER_CUE)),
         _STREET, _WEAK_CUE_SINGLE_NAME.pattern, _SENSITIVE_TERMS.pattern,
         config.MINI_MODEL,
@@ -56,7 +65,7 @@ def guardrail_version() -> str:
         # probe set. The sibling judge._spec_version() hashes instructions AND schema.
         _SCOPE_INSTRUCTIONS, repr(_SCOPE_SCHEMA),
         "".join(inspect.getsource(f) for f in
-                (redact_pii, screen_input, classify_injection, check_scope)),
+                (redact_pii, screen_input, classify_injection, check_scope, check_jailbreak)),
     ]
     return "g-" + hashlib.sha256("||".join(parts).encode()).hexdigest()[:12]
 
@@ -94,8 +103,8 @@ _PII_PATTERNS = [
                 r"\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b"),
      r"\1 [REDACTED_NAME]", "name"),
     #  (a2) WEAK cue ("i am"/"i'm"/"this is") + a TWO-word name. A single Titlecase word after
-    #  a weak cue is ambiguous ("I'm Disappointed", "This is Comcast"), so the one-word case is
-    #  handled separately below, gated on a common-first-name lexicon — catching "I'm John"
+    #  a weak cue is ambiguous ("I'm Disappointed", "This is Comcast" (which IS now scrubbed — see the denylist note)), so the one-word case is
+    #  handled separately below, gated on a non-name denylist (the first-name lexicon it replaced was deleted in R13) — catching "I'm John"
     #  without scrubbing "I'm Disappointed". (An uncommon single first name after a weak cue can
     #  still slip; the deterministic action layer + fact allowlist are the real backstops.)
     (re.compile(r"\b(?i:(i am|i'm|this is))\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b"),
@@ -119,7 +128,7 @@ _SENSITIVE_TERMS = re.compile(
 )
 
 # A single Titlecase word after a WEAK cue ("i'm John") is redacted only if it's a known
-# first name — so "I'm John" is scrubbed but "I'm Disappointed" / "This is Comcast" are not.
+# first name — so "I'm John" is scrubbed but "I'm Disappointed" / "This is Comcast" (which IS now scrubbed — see the denylist note) are not.
 # Best-effort common-name lexicon (not exhaustive); the fact allowlist is the real backstop.
 # NOTE: _COMMON_FIRST_NAMES (a US-census top-names list) was DELETED here in R13. It was
 # already dead after R12 replaced the name ALLOWLIST gate with a non-name denylist, and

@@ -462,6 +462,27 @@ def test_extended_covers_every_terminal_state_the_ledger_can_reach():
         assert offers.extended(rec["offers"]) is not None, \
             f"state {rec['offers'][0].state!r} is reachable but invisible to extended()"
     assert terminal_states == {"abandoned", "rejected", "accepted"}, terminal_states
+    # ...and the INVARIANT, derived rather than hand-listed. The version above pins three
+    # INSTANCES, so adding a fifth terminal state the way R12 added the fourth — a new mark_*
+    # plus a branch in _close_dangling_offer — left the suite green while extended() returned
+    # None and the offer vanished from offer_made, analytics and the judge envelope again.
+    # Every state any mark_* helper can produce must be classifiable by extended().
+    import inspect as _inspect
+    produced = set()
+    for name, fn in vars(offers).items():
+        if not (name.startswith("mark_") and callable(fn)):
+            continue
+        for line in _inspect.getsource(fn).splitlines():
+            if ".state = " in line and '"' in line:
+                produced.add(line.split('"')[1])
+    assert produced, "no mark_* helpers found — this invariant check has stopped working"
+    for state in produced:
+        led = [offers.Offer(id="x", kind="pause", authorized_terms={"months": 1},
+                            state=state, presented_terms={"months": 1})]
+        assert offers.extended(led) is not None, (
+            f"offers.{state!r} is reachable via a mark_* helper but extended() cannot see it — "
+            f"this is the exact shape of the R12 CRITICAL: a state added in one place and not "
+            f"taught to the accessor every consumer reads")
 
 
 def test_write_before_promise_works_on_a_pre_r12_database(tmp_path):

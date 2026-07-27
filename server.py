@@ -167,9 +167,15 @@ def chat_turn(req: TurnReq):
             raise HTTPException(400, "this conversation has already ended")
         if session.get("outcome") == "escalated":
             raise HTTPException(409, "this conversation was escalated to a human — no more agent turns")
-        if session.get("outcome") in ("saved", "lost"):
+        if session.get("outcome") in ("saved", "lost", "cancelled"):
             # A customer decision is TERMINAL (as in the batch path) — re-entering the agent
             # could otherwise overwrite an earned save with a contradictory outcome.
+            # 'cancelled' was missing here while runtime enumerates all four terminals, so a
+            # cancelled session was the ONE terminal /api/chat/turn still admitted — costing a
+            # classifier call and two transcript entries per turn, unbounded. Recovery for a
+            # swallowed finalize is /api/chat/resolve (finalize-only, still admitted), plus the
+            # retry now in runtime's cancelled branch — not an open agent turn on a closed
+            # conversation.
             raise HTTPException(409, f"this conversation is already closed as '{session['outcome']}' "
                                      f"— no more agent turns")
         if session.get("_busy"):

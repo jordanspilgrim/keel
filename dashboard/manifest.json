@@ -1,7 +1,22 @@
 {
-  "generated_at": "2026-07-25T07:30:18.467857+00:00",
-  "run_id": "run-20260725T071548",
-  "cohort_size": 80,
+  "after": {
+    "conversations": 80,
+    "eval_coverage": 0.975,
+    "eval_pass_rate": 0.8,
+    "overall_save_rate": 0.2375,
+    "playbook_sha": "a68e48936007",
+    "policy": "discounts_enabled",
+    "segment_save_rate": 0.25,
+    "starting_state_sha": "world-cc0b6f6f6e67"
+  },
+  "baseline": {
+    "conversations": 80,
+    "overall_save_rate": 0.1125,
+    "playbook_sha": "add93744da2a",
+    "policy": "discounts_disabled",
+    "segment_save_rate": 0.1,
+    "starting_state_sha": "world-cc0b6f6f6e67"
+  },
   "cohort_scenario_ids": [
     1,
     2,
@@ -84,11 +99,16 @@
     332,
     335
   ],
-  "paired_cohort": true,
-  "treated_cohort_n": 60,
-  "treated_segment": "Price too high",
-  "segment_selection": "loss-ranked over the seeded churn_reason label, gated on current-spec eval-eligible baseline conversations; consumed by Act via the persisted signal id (clustering does NOT drive it)",
-  "intervention_signal_id": 6,
+  "cohort_size": 80,
+  "generated_at": "2026-07-25T07:30:18.467857+00:00",
+  "guardrail_catch_rate": 1.0,
+  "guardrail_version": "g-941a95159f9b",
+  "held_constant": [
+    "cohort_scenarios",
+    "starting_subscription_state",
+    "eligibility"
+  ],
+  "identical_starting_state": true,
   "intervention_signal": {
     "confidence": 1.0,
     "eval_eligibility": {
@@ -128,14 +148,14 @@
     "lever_compatible": true,
     "offer_effectiveness": [
       {
-        "avg_margin_cost": 11.85,
-        "n": 25,
+        "avg_margin_cost": 6.73,
+        "n": 44,
         "offer": "pause",
-        "save_rate": 0.36
+        "save_rate": 0.205
       },
       {
         "avg_margin_cost": 0.0,
-        "n": 22,
+        "n": 3,
         "offer": "none",
         "save_rate": 0.0
       }
@@ -145,48 +165,28 @@
     "segment": "Price too high",
     "unaddressable_higher_loss": []
   },
-  "guardrail_version": "g-941a95159f9b",
+  "intervention_signal_id": 6,
+  "lift": {
+    "overall_save_pp": 12.5,
+    "segment_madj_pp": 12.0,
+    "segment_save_pp": 15.0
+  },
+  "models": {
+    "embedding": "text-embedding-3-small",
+    "flagship": "gpt-5",
+    "mini": "gpt-5-mini"
+  },
+  "note": "Paired before/after on identical seeded customers run from a byte-identical starting subscription state (same starting_state_sha in both arms \u2192 eligibility held constant). TWO variables changed together (discount policy + agent playbook), so this is a synthetic PAIRED demonstration of the flywheel on the treated (price-sensitive) segment \u2014 not an isolated causal estimate. Numbers vary run to run.",
+  "outcome_parity_gap": 0.023,
+  "outcome_parity_observational": true,
+  "paired_cohort": true,
+  "run_id": "run-20260725T071548",
+  "segment_selection": "loss-ranked over the seeded churn_reason label, gated on current-spec eval-eligible baseline conversations; consumed by Act via the persisted signal id (clustering does NOT drive it)",
+  "starting_state_sha": "world-cc0b6f6f6e67",
+  "treated_cohort_n": 60,
+  "treated_segment": "Price too high",
   "variables_changed": [
     "discount_policy",
     "agent_playbook"
-  ],
-  "held_constant": [
-    "cohort_scenarios",
-    "starting_subscription_state",
-    "eligibility"
-  ],
-  "identical_starting_state": true,
-  "starting_state_sha": "world-cc0b6f6f6e67",
-  "models": {
-    "flagship": "gpt-5",
-    "mini": "gpt-5-mini",
-    "embedding": "text-embedding-3-small"
-  },
-  "baseline": {
-    "policy": "discounts_disabled",
-    "playbook_sha": "add93744da2a",
-    "conversations": 80,
-    "starting_state_sha": "world-cc0b6f6f6e67",
-    "segment_save_rate": 0.1,
-    "overall_save_rate": 0.1125
-  },
-  "after": {
-    "policy": "discounts_enabled",
-    "playbook_sha": "a68e48936007",
-    "conversations": 80,
-    "starting_state_sha": "world-cc0b6f6f6e67",
-    "segment_save_rate": 0.25,
-    "overall_save_rate": 0.2375,
-    "eval_pass_rate": 0.8,
-    "eval_coverage": 0.975
-  },
-  "lift": {
-    "segment_save_pp": 15.0,
-    "segment_madj_pp": 12.0,
-    "overall_save_pp": 12.5
-  },
-  "guardrail_catch_rate": 1.0,
-  "outcome_parity_gap": 0.023,
-  "outcome_parity_observational": true,
-  "note": "Paired before/after on identical seeded customers run from a byte-identical starting subscription state (same starting_state_sha in both arms \u2192 eligibility held constant). TWO variables changed together (discount policy + agent playbook), so this is a synthetic PAIRED demonstration of the flywheel on the treated (price-sensitive) segment \u2014 not an isolated causal estimate. Numbers vary run to run."
+  ]
 }
