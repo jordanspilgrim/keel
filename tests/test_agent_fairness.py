@@ -126,3 +126,52 @@ def test_fairness_report_flags_an_insufficient_sample_rather_than_judging():
     assert r["sufficient_sample"] is False
     assert r["treatment_difference_detected"] is False
     assert "insufficient" in r["interpretation"]
+
+
+# --- R16 M3: the fairness probe's own blind spots ---------------------------------
+# proxy_symmetry() is the CONTROL for the whole harness: if the proxy is not redacted
+# identically across arms, every gap below it is an artifact. Until R16 that control probed
+# ONE cue with a BOOLEAN oracle, so it shared both blind spots the repo had already been
+# bitten by — a per-cue defect (R16's CRITICAL lived in a cue this harness never sent) and
+# "value survives, telemetry says caught" (R15/R16 credentials, twice).
+
+
+def test_the_probe_covers_a_cue_grid_not_a_single_phrasing():
+    """R16's CRITICAL was a broken _NAME_TOK copy inlined in 'my name is {n}' while the cue
+    this harness probed was fine — so the fairness gate stayed green for that entire bug."""
+    sym = af.proxy_symmetry()
+    assert len(af._PROBE_CUES) >= 4
+    assert any("my name is" in c for c in af._PROBE_CUES), "the cue that carried the CRITICAL"
+    for group, v in sym["per_group"].items():
+        assert v["cells"] == v["n_names"] * len(af._PROBE_CUES), f"{group} not a full grid"
+        assert v["leaked_cells"] == 0, v["leaks"]
+
+
+def test_a_partial_redaction_fails_the_gate_that_a_boolean_oracle_passed(monkeypatch):
+    """The oracle must be 'the name is GONE', not 'some type was reported'. A redaction that
+    scrubs a surname and leaves the given name — while still reporting types=['name'] — is
+    exactly the shape of the two credential bugs, and the old oracle called it clean."""
+    real = af.guardrails.redact_pii
+
+    def partial(text):
+        real(text)
+        return text.replace("Baker", "[REDACTED_NAME]"), ["name"]   # given name survives
+
+    monkeypatch.setattr(af.guardrails, "redact_pii", partial)
+    # The oracle the harness USED to use cannot tell this apart from a clean redaction.
+    assert bool(af.guardrails.redact_pii("Hi, this is Emily.")[1]) is True
+    sym = af.proxy_symmetry()
+    assert sym["proxy_fully_redacted_before_model"] is False, "partial redaction passed the gate"
+    assert sym["per_group"]["group_a"]["leaked_cells"] > 0
+
+
+def test_a_silent_redaction_is_reported_as_a_false_all_clear(monkeypatch):
+    """Scrubbing the name but reporting no type is not a leak — it is a false 'no PII here'
+    in the telemetry a safety reviewer reads. Tracked, and it fails the gate."""
+    real = af.guardrails.redact_pii
+    monkeypatch.setattr(af.guardrails, "redact_pii",
+                        lambda t: (real(t)[0], []))          # redacts, reports nothing
+    sym = af.proxy_symmetry()
+    assert sym["redacted_but_unreported"], "an unreported redaction went undetected"
+    assert sym["proxy_fully_redacted_before_model"] is False
+    assert "UNREPORTED REDACTIONS" in sym["note"]

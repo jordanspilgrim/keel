@@ -237,3 +237,141 @@ def test_no_doc_quotes_a_guardrail_hash_as_current():
             f"{rel} hard-codes the CURRENT guardrail hash {current!r}. It will be wrong the "
             f"next time a pattern, flag, replacement or classifier prompt changes. Quote the "
             f"recorded hash and the command instead.")
+
+
+# --- R16 M5: the manifest's Learn->Act lineage must actually dereference ------------
+# manifest.json carries the consumed signal TWICE: inline as `intervention_signal`, and by
+# reference as `intervention_signal_id`. The repair script's re-export recomputed the inline
+# copy and left the id alone, so the committed manifest CONTRADICTED ITSELF -- inline said
+# pause 0.205/n=44, following the id gave 0.36/n=25. Nothing detected it because nothing had
+# ever checked the two against each other.
+
+
+def _committed_conn():
+    """Connect to the COMMITTED artifact DB, or skip.
+
+    `keel.db` is deliberately untracked — it is a run artifact, not source. A fresh clone,
+    CI, and the mutation harness's copied tree all lack it, and an artifact-consistency test
+    that explodes there is a broken test, not a finding. (It also silently turned the
+    mutation baseline red, which aborts the whole harness.) The LOGIC these guard is covered
+    portably by the temp-DB tests below; this pair checks the SHIPPED artifact.
+    """
+    import db
+    conn = db.connect()
+    have = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='signals'").fetchone()
+    if have is None:
+        pytest.skip("committed keel.db not present (untracked artifact) — logic covered by "
+                    "the temp-DB tests")
+    return conn
+
+def _canonical_manifest() -> dict:
+    with open(os.path.join(_ROOT, "dashboard", "manifest.json")) as fh:
+        return json.load(fh)
+
+
+def test_the_committed_manifest_signal_id_resolves_to_its_inline_signal():
+    """The id and the inline blob are two representations of ONE fact. If they can disagree,
+    the cheaper-to-read one silently wins and the lineage claim is decorative."""
+    from analytics import themes
+
+    man = _canonical_manifest()
+    conn = _committed_conn()
+    consumed = themes.resolve_signal_for_run(
+        conn, man["intervention_signal_id"], man["run_id"])
+    assert consumed is not None, (
+        f"intervention_signal_id={man['intervention_signal_id']} does not resolve to a "
+        f"signal belonging to run {man['run_id']!r}")
+    assert man["intervention_signal"] == consumed, (
+        "manifest.intervention_signal disagrees with the row its own id points at")
+
+
+def test_the_post_repair_recomputation_is_labelled_not_substituted():
+    """`intervention_signal` is the record of what Act CONSUMED. Overwriting it with a
+    recomputation rewrites history to look better than the run was; the corrected numbers
+    belong beside it, marked as something Act never saw."""
+    man = _canonical_manifest()
+    corr = man.get("intervention_signal_recomputed_post_repair")
+    assert corr, "the post-repair recomputation was dropped rather than published"
+    assert "NEVER saw" in corr["note"]
+    consumed_pause = [o for o in man["intervention_signal"]["offer_effectiveness"]
+                      if o["offer"] == "pause"][0]
+    recomputed_pause = [o for o in corr["signal"]["offer_effectiveness"]
+                        if o["offer"] == "pause"][0]
+    # The repair enlarges denominators with failures, so the corrected view must be WORSE.
+    assert recomputed_pause["save_rate"] < consumed_pause["save_rate"]
+    assert recomputed_pause["n"] > consumed_pause["n"]
+
+
+def test_a_signal_id_cannot_be_dereferenced_across_runs():
+    """Signal ids are only meaningful against the database that produced them, and
+    `--median` retains only the committed run's. Without the run_id check a stale id lands
+    on an unrelated row and answers plausibly instead of failing -- which is how 13 of 14
+    retained manifests came to cite a signal that is not theirs."""
+    from analytics import themes
+
+    man = _canonical_manifest()
+    conn = _committed_conn()
+    sid = man["intervention_signal_id"]
+    assert themes.resolve_signal_for_run(conn, sid, "run-does-not-exist") is None
+    assert themes.resolve_signal_for_run(conn, sid, man["run_id"]) is not None
+
+
+def test_load_signal_returns_none_on_an_ephemeral_row_instead_of_raising():
+    """`signals` holds structured JSON experiment signals AND plain-sentence ephemeral theme
+    rankings. json.loads ran unconditionally, so any manifest citing an ephemeral id raised
+    JSONDecodeError out of a `dict | None` API."""
+    from analytics import themes
+
+    conn = _committed_conn()
+    ephemeral = conn.execute(
+        "SELECT id FROM signals WHERE run_id IS NULL LIMIT 1").fetchone()
+    if ephemeral is None:
+        pytest.skip("no ephemeral signal rows in the committed DB")
+    assert themes.load_signal(conn, ephemeral["id"]) is None
+
+
+# --- the same two controls, portably: a temp DB, so a fresh clone / CI / the mutation
+# harness's copied tree all exercise them. The artifact tests above check the SHIPPED
+# manifest; these check the CODE, and are what the mutation catalogue can anchor on.
+
+
+def _temp_signals_db(tmp_path):
+    import db
+    conn = db.connect(str(tmp_path / "t.db"))
+    db.init_db(conn)
+    return conn
+
+
+def test_load_signal_tolerates_the_ephemeral_row_shape(tmp_path):
+    """`signals` holds structured JSON experiment signals AND plain-sentence ephemeral theme
+    rankings (see themes.persist). json.loads ran unconditionally, so any id in the ephemeral
+    space raised JSONDecodeError out of a documented `dict | None`."""
+    from analytics import themes
+
+    conn = _temp_signals_db(tmp_path)
+    tid = conn.execute(
+        "INSERT INTO themes (label, summary, size, save_rate, avg_margin_cost, "
+        "example_ids_json, created_at) VALUES (?,?,?,?,?,?,?)",
+        ("Price sensitivity", "s", 54, 0.11, 0.0, "[]", "t")).lastrowid
+    conn.execute("INSERT INTO signals (theme_id, recommendation, priority_score, created_at) "
+                 "VALUES (?,?,?,?)", (tid, "'Price sensitivity' drives 54 conversations.", 1.0, "t"))
+    conn.commit()
+    eid = conn.execute("SELECT id FROM signals").fetchone()["id"]
+    assert themes.load_signal(conn, eid) is None      # not a signal — must not raise
+    assert themes.load_signal(conn, 99999) is None    # missing — same answer
+
+
+def test_resolve_signal_for_run_refuses_a_cross_run_dereference(tmp_path):
+    """Signal ids only mean anything against the database that produced them, and
+    `--median` retains just the committed run's. Without the run_id check a stale id lands on
+    an unrelated row and answers PLAUSIBLY rather than failing — which is how 13 of the 14
+    retained manifests came to cite a signal that is not theirs."""
+    from analytics import themes
+
+    conn = _temp_signals_db(tmp_path)
+    sid = themes.persist_signal(conn, {"segment": "Price too high"}, run_id="run-A")
+    assert themes.resolve_signal_for_run(conn, sid, "run-A") == {"segment": "Price too high"}
+    assert themes.resolve_signal_for_run(conn, sid, "run-B") is None, \
+        "an id from another run resolved instead of failing"
+    assert themes.resolve_signal_for_run(conn, sid, None) is None

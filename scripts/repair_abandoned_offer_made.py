@@ -183,12 +183,47 @@ def _reexport(conn) -> None:
     hand-edited, which left dashboard/manifest.json and data.js's provenance block carrying
     the pre-repair, survivorship-inflated offer_effectiveness (pause save_rate 0.36 / n=25
     against a true 0.205 / n=44) inside the block labelled Provenance. A file a skeptic opens
-    to CHECK the repair must not itself be unrepaired."""
+    to CHECK the repair must not itself be unrepaired.
+
+    R16 M5 -- the correction to the correction. Fixing the above, the previous version
+    OVERWROTE `intervention_signal` in place with a freshly-recomputed signal while leaving
+    `intervention_signal_id` pointing at the persisted row. That produced a manifest that
+    CONTRADICTED ITSELF: the inline blob said pause 0.205/n=44, and following the id to
+    `signals` row 6 gave 0.36/n=25. That is worse than a stale pointer.
+    `intervention_signal` is the record of what Act actually CONSUMED when it chose the
+    intervention; silently recomputing it rewrites history to look better than the run was.
+    The persisted row is the truth about the run, and persist_signal documents it as
+    immutable.
+
+    So: the consumed signal is read back from the id the manifest cites and never
+    overwritten, and the recomputed one is published BESIDE it, labelled as something Act
+    never saw. The intervention choice is unaffected either way -- the target segment comes
+    from the loss ranking, not from offer_effectiveness -- and the headline-lift assert
+    below is what demonstrates that, rather than a claim in a comment."""
     man = json.load(open("dashboard/manifest.json"))
     run_id, target = man["run_id"], man["treated_segment"]
 
+    # What Act consumed. Authoritative, immutable, read back through the cited id -- and
+    # resolved WITH the run_id, because an id alone can land on an unrelated row from a
+    # different run and answer plausibly instead of failing.
+    consumed = themes.resolve_signal_for_run(conn, man["intervention_signal_id"], run_id)
+    assert consumed is not None, (
+        f"REFUSING: manifest cites intervention_signal_id={man['intervention_signal_id']} "
+        f"but no `signals` row with that id belongs to run {run_id!r} -- the Learn->Act "
+        f"lineage this manifest asserts is not backed by the datastore.")
+    man["intervention_signal"] = consumed
+
+    # The same computation re-run over the repaired data. Published for comparison ONLY.
     signal = themes.recommend_intervention(conn, run_id=run_id, phase="baseline", eligible_only=True)
-    man["intervention_signal"] = signal
+    man["intervention_signal_recomputed_post_repair"] = {
+        "note": ("Recomputed from the repaired data, for comparison only. Act NEVER saw "
+                 "this: at run time it consumed `intervention_signal` (signals row "
+                 f"{man['intervention_signal_id']}), which carried the survivorship-inflated "
+                 "offer_effectiveness this repair corrected. The target segment is selected "
+                 "by loss ranking, not by offer_effectiveness, so the intervention is "
+                 "unchanged -- the lift assert is what shows that."),
+        "signal": signal,
+    }
     before = run_demo._segment_metrics(conn, target, run_id, "baseline")
     after = run_demo._segment_metrics(conn, target, run_id, "after")
     assert round((after["save_rate"] - before["save_rate"]) * 100, 1) == man["lift"]["segment_save_pp"], \
@@ -196,7 +231,10 @@ def _reexport(conn) -> None:
 
     old = json.load(open("dashboard/data.json"))
     safety = dict(old["safety"]); catch = safety.pop("catch_rate"); safety.pop("compliance", None)
-    prov = dict(old["meta"]["provenance"]); prov["intervention_signal"] = signal
+    # Same rule for the dashboard's provenance block: it shows what Act consumed, not a
+    # recomputation. A provenance panel that displays a signal the run never used is exactly
+    # the kind of retroactive polish this whole script exists to avoid.
+    prov = dict(old["meta"]["provenance"]); prov["intervention_signal"] = consumed
     data = export.build_data(conn, before=before, after=after, guardrail_counts=safety,
                              catch_rate=catch, provenance=prov)
     export.write_data(data)

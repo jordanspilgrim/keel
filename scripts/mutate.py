@@ -120,6 +120,32 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      "    _relax_not_null_for_pre_persist_queues(conn)",
      "    pass  # migration skipped",
      "R13 D8f: legacy schemas cannot hold a turn-time pre-write"),
+
+    ("proxy_probe_single_cue", "evals/agent_fairness.py",
+     '_PROBE_CUES = [\n    "my name is {n} and I want to cancel.",\n'
+     '    "call me {n} please.",\n    "they call me {n}.",\n'
+     '    "Hi, this is {n}. I want to cancel.",\n]',
+     '_PROBE_CUES = [\n    "Hi, this is {n}. I want to cancel.",\n]',
+     "R16 M3: the fairness probe reverts to one cue — R16's CRITICAL lived in a cue it never sent"),
+
+    ("proxy_boolean_oracle", "evals/agent_fairness.py",
+     '    out, _types = guardrails.redact_pii(cue.format(n=name))\n'
+     '    return name.split()[0] in out',
+     '    out, _types = guardrails.redact_pii(cue.format(n=name))\n'
+     '    return not _types',
+     "R16 M3: a PARTIAL redaction (name survives, type reported) passes the fairness gate"),
+
+    ("load_signal_assumes_json", "analytics/themes.py",
+     '    try:\n        loaded = json.loads(row["recommendation"])\n'
+     '    except (json.JSONDecodeError, TypeError):\n        return None\n'
+     '    return loaded if isinstance(loaded, dict) else None',
+     '    return json.loads(row["recommendation"])',
+     "R16 M5: citing an ephemeral signal id raises JSONDecodeError out of a `dict | None` API"),
+
+    ("resolve_signal_ignores_run", "analytics/themes.py",
+     '    if row is None or row["run_id"] != run_id:\n        return None',
+     '    if row is None:\n        return None',
+     "R16 M5: a stale id resolves to another run's signal and answers plausibly, not loudly"),
 ]
 
 
@@ -168,6 +194,10 @@ CLAIMED_CONTROLS = {
     "strong_cue_inlines_a_broken_token": "the strongest name cue redacts every orthography",
     "credentials_keep_the_value":        "a credential's VALUE is destroyed, not its label",
     "name_token_ascii_only":             "name redaction does not depend on orthography",
+    "proxy_probe_single_cue":            "the fairness probe is a cue x name grid, not one phrasing",
+    "proxy_boolean_oracle":              "the fairness oracle is 'name gone', not 'type reported'",
+    "load_signal_assumes_json":          "a non-structured signal row answers None, never raises",
+    "resolve_signal_ignores_run":        "a signal id cannot be dereferenced across runs",
 }
 
 

@@ -278,9 +278,38 @@ def persist_signal(conn, signal: dict, run_id: str | None = None) -> int:
 
 def load_signal(conn, signal_id: int) -> dict | None:
     """Load a persisted intervention signal by id — Act consumes the signal THROUGH
-    the datastore (durable Learn→Act lineage), not an in-memory object."""
+    the datastore (durable Learn→Act lineage), not an in-memory object.
+
+    R16: `signals` holds TWO row shapes (see `persist`) — structured experiment signals
+    written as JSON by persist_signal, and ephemeral theme rankings written as a plain
+    SENTENCE. This did `json.loads` unconditionally, so loading an ephemeral id raised
+    JSONDecodeError out of what is documented as returning `dict | None`. That is reachable
+    from any manifest citing an id in the ephemeral space, and the ephemeral space is
+    renumbered on every analytics pass. A non-structured row is not a signal, so it answers
+    None, the same as a missing one."""
     row = conn.execute("SELECT recommendation FROM signals WHERE id=?", (signal_id,)).fetchone()
-    return json.loads(row["recommendation"]) if row else None
+    if row is None:
+        return None
+    try:
+        loaded = json.loads(row["recommendation"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def resolve_signal_for_run(conn, signal_id: int, run_id: str | None) -> dict | None:
+    """Load a signal ONLY if it is the one this run persisted.
+
+    Signal ids are only meaningful against the database that produced them. `run_demo
+    --median` retains just the COMMITTED run's database and discards the rest, so a
+    non-committed run's manifest cites an id that no longer refers to its own signal — and
+    because the id space is dense and reused, it resolves to an unrelated row instead of
+    failing. A reader following the lineage gets a plausible, wrong answer with no error.
+    Checking the row's own run_id is what makes a cross-run dereference fail loudly."""
+    row = conn.execute("SELECT run_id FROM signals WHERE id=?", (signal_id,)).fetchone()
+    if row is None or row["run_id"] != run_id:
+        return None
+    return load_signal(conn, signal_id)
 
 
 def rank_signals(cards: list[dict]) -> list[dict]:
