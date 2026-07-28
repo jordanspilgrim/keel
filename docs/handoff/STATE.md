@@ -1,6 +1,16 @@
 # Keel — state of the work
 
-**As of commit `a103bf8` (pass 16 remediation complete, pass 17 not yet run).**
+**Pass 17 has run against `a103bf8` and the exit bar was NOT met: 0 CRITICAL, 8 HIGH,
+28 MEDIUM, 15 LOW, 0 unverified — 51 of 52 findings confirmed by refute-by-default
+verifiers. Full list: [`R17-FINDINGS.md`](R17-FINDINGS.md). Read that before trusting
+anything below.**
+
+Per the decision rule written down in [`PLAN.md`](PLAN.md) *before* pass 17 ran, this
+outcome means **stop and disclose the residual**, not fix-and-re-review. The reasoning is
+in PLAN.md under "How pass 17 actually read".
+
+To find the current commit, run `git log --oneline -1` — do not trust a SHA written into
+a document, including this one.
 
 This is an internal working document for whoever picks the work up next. It is not part of the
 portfolio narrative — `README.md`, `BUILD.md` and `docs/` are.
@@ -43,10 +53,18 @@ Pre-registered median-of-k: `run_demo.py --median --k=5`, k fixed in advance, fi
 run counted, the committed figure is the **median** and never the max, odd-k only, and a
 structural failure in any run aborts the whole estimate rather than dropping that run.
 
-It was **+23.3pp** before pass 12. The drop is real and was disclosed in advance of the
-re-run — the earlier figure came from a defect (`offers.extended()` was missing the
-`abandoned` state, so unanswered offers vanished from `offer_made` — every one of them a loss,
-purely survivorship-directional).
+It was **+23.3pp** before pass 12, and the commitment to re-run and publish whatever came
+back was made in writing beforehand.
+
+**The cause of the drop is NOT established, and an earlier version of this document got it
+wrong.** It attributed the drop to the `offers.extended()` / `abandoned` defect — but the
+repair script *asserts* that fix cannot move a save rate (no `saved` row is touched, no
+realized margin cost added), and that assert passes. So by the repo's own invariant that
+defect cannot be the cause. Pass 17 flagged the contradiction (`metrics-provenance`,
+MEDIUM). The two runs differed in more than one way (code changed across passes 12–16), so
+the honest statement is: **the earlier figure and the current figure come from different
+code, and no controlled attribution of the difference has been done.** Do not repeat the
+old explanation.
 
 **Do not re-run `run_demo.py` to "check" a number.** It costs real money and overwrites
 committed artifacts. Whatever a single honest run produces is the number.
@@ -71,8 +89,32 @@ committed artifacts. Whatever a single honest run produces is the number.
 
 ## Known-open, disclosed, not fixed
 
+- **All 51 confirmed pass-17 findings.** See [`R17-FINDINGS.md`](R17-FINDINGS.md). None are
+  fixed. The eight HIGHs in one line each:
+  1. `_SENSITIVE_TERMS` scrubs the health **label** and keeps the value, reporting success —
+     the identical bug the adjacent comment says was eliminated for credentials.
+  2. The credential regex is defeated by capitalising the separator (`My PASSWORD IS hunter2`
+     is not redacted at all).
+  3. Published judge-calibration figures were measured under a superseded eval spec *and* a
+     superseded golden set, undisclosed.
+  4. The orthography grid **pins initial capitalisation**; on that axis coverage is 5% vs
+     100%, and the harness certifies `orthography_symmetric`.
+  5. `_name_survives` inspects only the **leading** token, so scrubbing the given name and
+     leaving the surname reads as clean — the exact partial-redaction defect it was written
+     to catch.
+  6. Three of `run_once`'s four integrity gates on the headline number are still deletable
+     with a green suite.
+  7. `docs/testing.html` publishes the safety gate's freshness check as tested; it has no test.
+  8. The kill switch's eval pass-rate and coverage floors are never executed by any test.
+- **Three of the three mechanizations built in pass 16 are themselves defective** (findings 4,
+  5, and the MEDIUM on `mutate.py`'s circular catalogue check, which "certifies a tree with
+  four safety controls physically removed"). Treat the mutation harness's green result as
+  unproven until that is fixed.
+- **The offline socket tripwire is bypassable** by a bytes host, `connect_ex`, and DNS —
+  pass 17 got a real outbound connection off the machine (MEDIUM).
+- `dashboard/data.js` still publishes the post-repair recomputation as the signal Act
+  consumed, contradicting the `manifest.json` fix (MEDIUM). The export was not re-run.
 - Pass 16's remaining **LOW** items.
-- **Pass 17 has not run.** Nothing in `a103bf8` has been through an independent review.
 - The four non-committed retained manifests carry pre-repair `offer_effectiveness` **and** an
   `intervention_signal_id` that does not resolve. Both are disclosed in
   `dashboard/manifests/README.md`; neither is fixable, because the databases that would make
