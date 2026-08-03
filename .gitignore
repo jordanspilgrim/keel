@@ -24,3 +24,8 @@ dashboard/data.json
 
 # OS
 .DS_Store
+
+# Claude Code harness (roster + commands resolve globally, not from this repo)
+.claude/.dlb-role
+.claude/worktrees/
+.claude/settings.local.json
