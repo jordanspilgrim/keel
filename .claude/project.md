@@ -43,7 +43,7 @@ there deliberately, and Phase 1 fixes the code underneath.
   transcript under a `types=['name']` all-clear. That gate demands every rate == 1.0, so it stays
   red until the continuation walk is fixed. Two open-class over-redaction residuals are asserted
   as current behaviour in `tests/test_redaction_control.py` so they are counted, not described.
-- **`scripts/mutate.py`** — exits 1 with **8 SURVIVED and 1 STALE ANCHOR** of 29 mutants. Its
+- **`scripts/mutate.py`** — exits 1 with **21 KILLED and 8 SURVIVED** of 29 mutants. Its
   expectation comes from `docs/controls.json` rather than from a literal inside `mutate.py` whose
   keys were the mutant names, so the catalogue is now complete (29 claims = 29 mutants). A
   SURVIVOR means the control can be deleted with the suite unchanged — nothing tests it.

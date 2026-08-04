@@ -35,7 +35,7 @@ hooks). Without it, `.claude/project.md` has nothing to drive. Deliberately not 
 
 ```bash
 .venv/bin/python -m pytest tests/ -q      # expect exit 1, 1 FAILED — see below
-.venv/bin/python scripts/mutate.py        # expect exit 1, RECOMPUTE — see below
+.venv/bin/python scripts/mutate.py        # expect exit 1, 21 KILLED / 8 SURVIVED — see below
 ```
 
 **BOTH GATES ARE EXPECTED TO BE RED RIGHT NOW. BOTH REDS ARE THE DELIVERABLE, NOT A REGRESSION.**
@@ -79,10 +79,12 @@ exist, and 7 of them SURVIVE**: those controls can be deleted with the suite unc
 nothing tests them. Among them are all three kill-switch floors, the money demo's independent
 variable, and all three judge-calibration gates. Writing those tests is the next item.
 
-Two further rows are NOT part of the 12 and are pre-existing catalogue entries degraded by
-Phase 0's own fixes: `proxy_probe_single_cue` now SURVIVES, and `proxy_boolean_oracle` is an
-ANCHOR MISS — its anchor text no longer exists, so that control is tested in neither direction.
-Both surfaced only when the harness could run again.
+One further row is NOT part of the 12: `proxy_probe_single_cue` SURVIVES, but it is **masked
+rather than unguarded**. Measured — its guard is `test_the_probe_covers_a_cue_grid_not_a_single
+_phrasing`, which asserts `len(_PROBE_CUES) >= 4` and does catch the mutation; that test is
+simply already failing at baseline on a different assert, so no NEW failure appears. It should
+kill again once Phase 1 turns the redactor green. `proxy_boolean_oracle` was an ANCHOR MISS for
+the same window (0.2 rewrote `_name_survives`) and its anchor is now re-pointed and killing.
 
 **Do not "fix" this by reverting the gate, deleting register entries, or relaxing the check.**
 

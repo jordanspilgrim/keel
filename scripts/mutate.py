@@ -141,9 +141,14 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      '_PROBE_CUES = [\n    "Hi, this is {n}. I want to cancel.",\n]',
      "R16 M3: the fairness probe reverts to one cue — R16's CRITICAL lived in a cue it never sent"),
 
+    # ANCHOR RE-POINTED. Phase 0.2 rewrote `_name_survives` from `name.split()[0] in out` to
+    # `any(tok in out for tok in name.split())`, so this mutant's anchor stopped matching and
+    # the harness reported ANCHOR MISS — the control tested in NEITHER direction, which says
+    # less than a survivor does. The fix moved the code out from under the mutant guarding it,
+    # and it was invisible for the whole window in which the harness could not run.
     ("proxy_boolean_oracle", "evals/agent_fairness.py",
      '    out, _types = guardrails.redact_pii(cue.format(n=name))\n'
-     '    return name.split()[0] in out',
+     '    return any(tok in out for tok in name.split())',
      '    out, _types = guardrails.redact_pii(cue.format(n=name))\n'
      '    return not _types',
      "R16 M3: a PARTIAL redaction (name survives, type reported) passes the fairness gate"),
