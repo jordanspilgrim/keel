@@ -6,7 +6,7 @@ stack: "Python 3.14 + OpenAI SDK; pytest 8; SQLite (keel.db, untracked); FastAPI
 base_ref: origin/main
 worktree_isolation: true
 check_cmd: none # no ruff/mypy/flake8/black/pyright installed or declared — do NOT invent one
-test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 392 collected, 2 named fairness failures — see 'Both gates are RED on purpose' below. Do NOT revert the gate to make it green.
+test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 449 collected, 1 named fairness failure (the multi-token residual) — see 'Both gates are RED on purpose' below. Do NOT revert the gate to make it green.
 definition_of_done: "pytest green AND scripts/mutate.py reports all mutants killed — BUT NOT YET, and do not chase either one today: both gates are DELIBERATELY RED mid-remediation (see 'Both gates are RED on purpose' below), so a green result right now means a gate was reverted, not that the work is done. Green is the Phase 1 target, not the current state. A fix is not done until the gate verifying it has itself been attacked with the MIRROR IMAGE of the defect it exists to catch. Exit bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM / <=2 LOW / 0 unverified."
 deploy_targets: none
 acceptance: none # local POC; there is no deploy and no acceptance environment
@@ -18,7 +18,7 @@ top_tier_model: claude-opus-5
 
 ## Both gates are RED on purpose — read this before "fixing" either one
 
-**`pytest` fails on two tests and `scripts/mutate.py` exits 2. Both reds are the deliverable.**
+**`pytest` fails on one test and `scripts/mutate.py` exits 2. Both reds are the deliverable.**
 A green result from either one today means a gate was reverted, not that the work is done.
 
 Pass 17 confirmed all three verification mechanisms were themselves defective — the cue x
@@ -32,19 +32,22 @@ the defect it exists to catch, before that defect is fixed — otherwise you onl
 green afterwards, which is the position this whole exercise exists to escape. So Phase 0 stopped
 there deliberately, and Phase 1 fixes the code underneath.
 
-- **`pytest`** — 392 collected. `2 failed, 390 passed` with `keel.db` present; `2 failed, 387
-  passed, 3 skipped` without it (any fresh worktree — `keel.db` is gitignored, and the 3 skips are
-  the committed-artifact tests). The two failures are
-  `tests/test_agent_fairness.py::test_the_probe_covers_a_cue_grid_not_a_single_phrasing` and
-  `tests/test_guardrails.py::test_the_fairness_gate_checks_orthography_not_just_group`: the
-  repaired grid and oracle catching
-  a live leak in `agent/guardrails.py`, where a lowercase self-identified name survives redaction
-  and the telemetry reports `types=[]`. Counterpart fix: Phase 1.
+- **`pytest`** — 449 collected. `1 failed, 448 passed` with `keel.db` present;
+  `1 failed, 445 passed, 3 skipped` without it (any fresh worktree — `keel.db` is
+  gitignored, and the 3 skips are the committed-artifact tests). The one failure is
+  `tests/test_guardrails.py::test_the_fairness_gate_checks_orthography_not_just_group`.
+  Phase 1 closed the single-token half of the leak — a lowercase self-identified name is now
+  redacted after a declaration or address cue — and the group-axis gate went green on its own.
+  The 120 remaining cells are all MULTI-TOKEN: the continuation-token walk still requires
+  uppercase on tokens 2+, so `Emily watson` and `Sofia van Dijk` leave part of the name in the
+  transcript under a `types=['name']` all-clear. That gate demands every rate == 1.0, so it stays
+  red until the continuation walk is fixed. Two open-class over-redaction residuals are asserted
+  as current behaviour in `tests/test_redaction_control.py` so they are counted, not described.
 - **`scripts/mutate.py`** — exits 2 with `CATALOGUE INCOMPLETE`, naming 12 publicly-claimed controls
   that have no mutant. Its expectation now comes from `docs/controls.json` rather than from a
   literal inside `mutate.py` whose keys were the mutant names. Counterpart fix: Phase 5.
 
-**Do not close either red by reverting a gate, weakening the grid, skipping the two tests, deleting
+**Do not close either red by reverting a gate, weakening the grid, skipping the test, deleting
 register entries, or relaxing the completeness check.**
 
 ## Hard constraints — non-negotiable
