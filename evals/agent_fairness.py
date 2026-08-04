@@ -138,6 +138,30 @@ def _mixed_case(stem: str) -> str:
     return " ".join([head] + [t.lower() for t in rest])
 
 
+def _case_of(name: str) -> str:
+    """Classify a rendered name's case FROM THE STRING ITSELF.
+
+    Deliberately independent of _case_forms. A classifier that asks the generator what it
+    would have produced for a stem is reading the CONFIGURATION again by a longer route, and
+    that is the defect this function was added to remove: the group half of
+    _assert_grid_is_not_pinned used to compute `{label for n in names for label in
+    _case_forms(n)}`, which returns >= 2 labels for every possible input, so its
+    `len(cases) < 2` branch was UNREACHABLE — dead in exactly the way 0.2's leading-token
+    branch was dead, four lines below a docstring promising the opposite.
+
+    Uses str.islower()/isupper() rather than a regex class, so it is correct for every script
+    ('владимир' is lower, 'ВЛАДИМИР' is upper); `re` has no \\p{Lu} and an ASCII [A-Z] is the
+    disparate-impact bug this module already removed once."""
+    if name.islower():
+        return "lower"
+    if name.isupper():
+        return "all_upper"
+    toks = name.split()
+    if len(toks) > 1 and all(t.islower() for t in toks[1:]):
+        return "mixed"
+    return "initial_upper"
+
+
 # Ordered: `initial_upper` is the canonical rendering, so it wins the dedup below.
 _CASE_FORMS = {
     "initial_upper": lambda s: s,
@@ -220,10 +244,25 @@ def _assert_grid_is_not_pinned(grid: list[dict], group_names: dict[str, list[str
             f"orthography grid is missing required composed cells {missing}. Varying two axes "
             f"independently does not cover their product.")
     # The group axis carried the identical defect — all 10 group stems were leading-uppercase.
-    for group, names in group_names.items():
-        cases = {label for n in names for label in _case_forms(n)}
+    #
+    # CLASSIFIED FROM THE STRINGS _group_probe_names ACTUALLY RETURNS. The first version read
+    # `{label for n in names for label in _case_forms(n)}` — the generator, not the emitted
+    # product — and _case_forms returns >= 2 labels for every possible input, so the branch
+    # below could never fire. Its sibling four lines above reads `grid`; this half read config,
+    # inside the function whose docstring says it never does. Verified dead by regressing the
+    # EMITTER and leaving the stems alone: _group_probe_names returning bare stems left the old
+    # check GREEN while proxy_symmetry() reported symmetric=True at rates {1.0, 1.0} over a
+    # case-pinned probe set.
+    #
+    # The earlier reasoning — "the same generator drives both, so neither can be pinned without
+    # the other failing" — covers changes to _case_forms and NOT changes to _group_probe_names.
+    # One of two routes into the same failure.
+    for group in group_names:
+        emitted = _group_probe_names(group)
+        cases = {_case_of(n) for n in emitted}
         if len(cases) < 2:
-            raise ValueError(f"group {group!r} probe names are PINNED on case: {cases}")
+            raise ValueError(f"group {group!r} probe names are PINNED on case: {cases} "
+                             f"across the {len(emitted)} name(s) actually emitted")
 
 
 # Probes that are NOT names. A grid that can only ask "did anything get redacted" cannot tell a

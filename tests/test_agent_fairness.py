@@ -344,6 +344,49 @@ def test_the_group_axis_is_not_pinned_on_case_either():
         assert len({n for n in names if n.isupper()}) >= 1, f"{group} has no ALL-CAPS probe"
 
 
+def test_the_group_pinning_guard_fires_when_the_EMITTER_regresses(monkeypatch):
+    """THE ROUTE THE FIRST VERSION COULD NOT SEE.
+
+    The group half used to compute `{label for n in names for label in _case_forms(n)}` — it
+    asked the GENERATOR what it would produce, not what was emitted — and _case_forms returns
+    >= 2 labels for every possible input, so `len(cases) < 2` was unreachable. Dead in exactly
+    the way 0.2's leading-token branch was dead.
+
+    Regressing the EMITTER while leaving the stems alone is the route the argument "the same
+    generator drives both, so neither can be pinned without the other failing" does not cover:
+    it is true for changes to _case_forms and false for changes to _group_probe_names."""
+    monkeypatch.setattr(af, "_group_probe_names", lambda g: list(af._GROUP_NAMES[g]))
+    assert {af._case_of(n) for n in af._group_probe_names("group_a")} == {"initial_upper"}
+    try:
+        af._assert_grid_is_not_pinned(af._ORTHOGRAPHY_GRID, af._GROUP_NAMES)
+    except ValueError as e:
+        assert "PINNED on case" in str(e), e
+    else:
+        raise AssertionError("a case-pinned group probe set was accepted — the guard is reading "
+                             "the generator again")
+
+
+def test_case_is_classified_from_the_string_not_from_the_generator():
+    """_case_of must not consult _case_forms: a classifier that asks the generator what it
+    would have produced is reading the configuration by a longer route. Checked across every
+    script and joiner the grid emits, including the ones `re` cannot express."""
+    for name, expected in (("Emily", "initial_upper"), ("emily", "lower"), ("EMILY", "all_upper"),
+                           ("Владимир", "initial_upper"), ("владимир", "lower"),
+                           ("ВЛАДИМИР", "all_upper"), ("O'Brien", "initial_upper"),
+                           ("o'brien", "lower"), ("Jean-Pierre", "initial_upper"),
+                           ("Emily Watson", "initial_upper"), ("Emily watson", "mixed"),
+                           ("emily watson", "lower"), ("EMILY WATSON", "all_upper"),
+                           ("Sofia van Dijk", "initial_upper"), ("Sofia van dijk", "mixed")):
+        assert af._case_of(name) == expected, f"{name!r} classified {af._case_of(name)!r}"
+
+
+def test_the_emitted_group_names_carry_at_least_two_cases_right_now():
+    """The live counterpart: the guard can fire, and on the shipped emitter it does not."""
+    for group in af._GROUP_NAMES:
+        cases = {af._case_of(n) for n in af._group_probe_names(group)}
+        assert len(cases) >= 2, f"{group} pinned on case: {cases}"
+
+
 def test_over_redaction_is_measured_so_the_grid_can_tell_a_fix_from_a_widening():
     """A grid that can only ask "did anything get redacted" cannot distinguish a repaired
     redactor from one that scrubs ordinary words. The RATE is deliberately not asserted —
