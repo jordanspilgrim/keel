@@ -6,8 +6,8 @@ stack: "Python 3.14 + OpenAI SDK; pytest 8; SQLite (keel.db, untracked); FastAPI
 base_ref: origin/main
 worktree_isolation: true
 check_cmd: none # no ruff/mypy/flake8/black/pyright installed or declared — do NOT invent one
-test_cmd: ".venv/bin/python -m pytest tests/ -q" # expect 364 passed
-definition_of_done: "pytest green AND scripts/mutate.py reports all mutants killed — BUT see 'The gates lie' below. A fix is not done until the gate verifying it has itself been attacked with the MIRROR IMAGE of the defect it exists to catch. Exit bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM / <=2 LOW / 0 unverified."
+test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 387 collected, 2 named fairness failures — see 'Both gates are RED on purpose' below. Do NOT revert the gate to make it green.
+definition_of_done: "pytest green AND scripts/mutate.py reports all mutants killed — BUT NOT YET, and do not chase either one today: both gates are DELIBERATELY RED mid-remediation (see 'Both gates are RED on purpose' below), so a green result right now means a gate was reverted, not that the work is done. Green is the Phase 1 target, not the current state. A fix is not done until the gate verifying it has itself been attacked with the MIRROR IMAGE of the defect it exists to catch. Exit bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM / <=2 LOW / 0 unverified."
 deploy_targets: none
 acceptance: none # local POC; there is no deploy and no acceptance environment
 product_context: "Portfolio POC of an AI customer-retention flywheel (Act / Measure / Learn) on synthetic data. Its entire value is that its published claims are true, so a false claim is as severe as a crash."
@@ -16,21 +16,35 @@ roster_profile: small
 top_tier_model: claude-opus-5
 ```
 
-## The gates lie — read this before trusting any green result
+## Both gates are RED on purpose — read this before "fixing" either one
 
-`pytest` (364 passed) and `scripts/mutate.py` ("every catalogued control is genuinely verified")
-both currently report green. Pass 17 confirmed **all three** verification mechanisms are themselves
-defective:
+**`pytest` fails on two tests and `scripts/mutate.py` exits 2. Both reds are the deliverable.**
+A green result from either one today means a gate was reverted, not that the work is done.
 
-- the cue x orthography grid **pins initial capitalisation** (5% coverage on that axis, while
-  certifying `orthography_symmetric`);
-- `_name_survives` inspects only the **leading token**, so scrubbing a given name and leaving the
-  surname reads as CLEAN — the mirror image of the bug it was built for;
-- `mutate.py`'s catalogue-completeness check is **circular** and certifies a tree with four safety
-  controls physically removed.
+Pass 17 confirmed all three verification mechanisms were themselves defective — the cue x
+orthography grid pinned initial capitalisation while certifying `orthography_symmetric`;
+`_name_survives` inspected only the leading token, so scrubbing a given name and leaving the surname
+read as CLEAN; and `mutate.py`'s catalogue-completeness check was circular, certifying a tree with
+four safety controls physically removed. **All three are repaired and merged (Phase 0, `914f2ae`).**
 
-A green suite therefore does not currently mean what it claims. Repair the verifier before trusting
-any fix it verified.
+Repairing them is what turned the gates red. A repaired gate must be demonstrated FAILING against
+the defect it exists to catch, before that defect is fixed — otherwise you only learn the suite is
+green afterwards, which is the position this whole exercise exists to escape. So Phase 0 stopped
+there deliberately, and Phase 1 fixes the code underneath.
+
+- **`pytest`** — 387 collected. `2 failed, 385 passed` with `keel.db` present; `2 failed, 382
+  passed, 3 skipped` without it (any fresh worktree — `keel.db` is gitignored, and the 3 skips are
+  the committed-artifact tests). The two failures are
+  `test_the_probe_covers_a_cue_grid_not_a_single_phrasing` and
+  `test_the_fairness_gate_checks_orthography_not_just_group`: the repaired grid and oracle catching
+  a live leak in `agent/guardrails.py`, where a lowercase self-identified name survives redaction
+  and the telemetry reports `types=[]`. Counterpart fix: Phase 1.
+- **`scripts/mutate.py`** — exits 2 with `CATALOGUE INCOMPLETE`, naming 12 publicly-claimed controls
+  that have no mutant. Its expectation now comes from `docs/controls.json` rather than from a
+  literal inside `mutate.py` whose keys were the mutant names. Counterpart fix: Phase 5.
+
+**Do not close either red by reverting a gate, weakening the grid, skipping the two tests, deleting
+register entries, or relaxing the completeness check.**
 
 ## Hard constraints — non-negotiable
 
