@@ -165,6 +165,166 @@ def test_a_partial_redaction_fails_the_gate_that_a_boolean_oracle_passed(monkeyp
     assert sym["per_group"]["group_a"]["leaked_cells"] > 0
 
 
+# --- 0.1: the grid pinned initial capitalisation ----------------------------------
+# The R16 rewrite above fixed the ORTHOGRAPHY axis and reintroduced the same defect on the
+# CASE axis: all 24 probe names were leading-uppercase, so `case` was a constant and the
+# "grid" was a line in that dimension — while 72 of 96 lowercase cells leaked in plaintext
+# and 72 of those reported types == []. Every test below is written to pass BOTH before and
+# after the redactor is fixed: they assert the grid's STRUCTURE, not the current verdict.
+# The verdict is asserted by test_the_probe_covers_a_cue_grid_not_a_single_phrasing above and
+# by test_the_fairness_gate_checks_orthography_not_just_group in test_guardrails.py, both of
+# which were vacuously true over the pinned probe set and now bite.
+
+
+def _probe_record(name, **over):
+    base = {"name": name, "stem": name, "case": "initial_upper", "script": "ascii",
+            "joiner": "none", "length": "normal", "tokens": "single", "internal_caps": "no"}
+    base.update(over)
+    return base
+
+
+def test_no_declared_axis_is_constant_in_the_EMITTED_grid():
+    """Asserted on what the generator produced, never on what it was configured to produce.
+    A declared axis that collapses to one value at generation time is the original defect on
+    a new axis, and an assertion that reads the declaration would certify its own config."""
+    for axis in af._ORTHOGRAPHY_AXES:
+        values = {p[axis] for p in af._ORTHOGRAPHY_GRID}
+        assert len(values) >= 2, f"axis {axis!r} is PINNED in the emitted grid: {values}"
+
+
+def test_the_grid_is_a_true_cross_product_of_stems_and_case():
+    """Every stem appears in every case rendering distinct for it. This is what makes an
+    uncovered composed cell unconstructible rather than merely unlikely: the cells exist
+    because the generator emitted them, not because someone remembered them."""
+    by_stem = {}
+    for p in af._ORTHOGRAPHY_GRID:
+        by_stem.setdefault(p["stem"], set()).add(p["case"])
+    for stem, cases in by_stem.items():
+        assert cases == set(af._case_forms(stem)), f"{stem!r} is missing case renderings"
+    assert len(af._ORTHOGRAPHY_GRID) == sum(len(af._case_forms(s)) for s, *_ in af._NAME_STEMS)
+
+
+def test_case_composes_with_every_spelling_axis_not_merely_alongside_it():
+    """lowercase 'josé' leaks exactly like lowercase 'emily'. A grid that varies case and
+    script INDEPENDENTLY but never lands on lower x diacritic still has a pinned cell."""
+    emitted = {(axis, p[axis], p["case"])
+               for p in af._ORTHOGRAPHY_GRID for axis in af._ORTHOGRAPHY_AXES}
+    missing = [c for c in af._REQUIRED_CELLS if tuple(c) not in emitted]
+    assert not missing, f"required composed cells absent from the emitted grid: {missing}"
+
+
+def test_a_pinned_axis_is_rejected_at_generation_time():
+    """The shipped grid's own defect, reconstructed: every OTHER axis varies and `case` alone
+    is constant — which is precisely how it shipped, and why a spot-check of the probe list
+    looked well-covered."""
+    pinned = [_probe_record("Emily"),
+              _probe_record("José", script="diacritic"),
+              _probe_record("Владимир", script="non_latin"),
+              _probe_record("O'Brien", joiner="apostrophe", internal_caps="yes"),
+              _probe_record("Jean-Pierre", joiner="hyphen"),
+              _probe_record("Ng", length="short"),
+              _probe_record("Emily Watson", tokens="multi")]
+    assert {p["case"] for p in pinned} == {"initial_upper"}, "wrong test case — case must be pinned"
+    try:
+        af._assert_grid_is_not_pinned(pinned, af._GROUP_NAMES)
+    except ValueError as e:
+        assert "'case'" in str(e), e
+    else:
+        raise AssertionError("a grid with a constant case axis was accepted")
+
+
+def test_a_grid_that_varies_every_axis_but_skips_a_COMPOSED_cell_is_rejected():
+    """THE case this guard exists for, and the one a per-axis check cannot see.
+
+    When an axis is PINNED, its cross-product with every other axis is fully covered BY
+    CONSTRUCTION — one case value x three script values is three cells, all present — so a
+    coverage check reports success exactly when the grid is most broken. The inverse is the
+    live hazard: every axis varies, nothing is pinned, a per-axis 'no constant' assertion
+    passes cleanly, and lower x diacritic is still never generated. That is the original
+    defect rebuilt with more steps AND a green structural assertion on top, which is worse,
+    because it now carries a proof of its own soundness."""
+    grid_d = [
+        _probe_record("Emily"), _probe_record("emily", case="lower"),
+        _probe_record("EMILY", case="all_upper"),
+        _probe_record("José", script="diacritic"),        # diacritic, but NEVER lowercase
+        _probe_record("Владимир", script="non_latin"),
+        _probe_record("O'Brien", joiner="apostrophe", internal_caps="yes"),
+        _probe_record("Jean-Pierre", joiner="hyphen"),
+        _probe_record("Ng", length="short"),
+        _probe_record("Emily Watson", tokens="multi"),
+        _probe_record("Emily watson", tokens="multi", case="mixed"),
+    ]
+    for axis in af._ORTHOGRAPHY_AXES:      # the premise: NOTHING is pinned
+        assert len({p[axis] for p in grid_d}) >= 2, f"{axis} pinned — wrong test case"
+    try:
+        af._assert_grid_is_not_pinned(grid_d, af._GROUP_NAMES)
+    except ValueError as e:
+        assert "diacritic" in str(e)
+    else:
+        raise AssertionError("a grid missing lower x diacritic was accepted — the cell where "
+                             "'my name is josé' leaks in plaintext")
+
+
+def test_the_real_grid_passes_its_own_guard():
+    af._assert_grid_is_not_pinned(af._ORTHOGRAPHY_GRID, af._GROUP_NAMES)
+
+
+def test_the_group_axis_is_not_pinned_on_case_either():
+    """All ten group stems were leading-uppercase too. Repairing only the orthography grid
+    would have fixed half the defect and left the other half certifying itself."""
+    for group in af._GROUP_NAMES:
+        names = af._group_probe_names(group)
+        assert len({n for n in names if n.islower()}) >= 1, f"{group} has no lowercase probe"
+        assert len({n for n in names if n.isupper()}) >= 1, f"{group} has no ALL-CAPS probe"
+
+
+def test_over_redaction_is_measured_so_the_grid_can_tell_a_fix_from_a_widening():
+    """A grid that can only ask "did anything get redacted" cannot distinguish a repaired
+    redactor from one that scrubs ordinary words. The RATE is deliberately not asserted —
+    that trade-off belongs to whoever changes the redactor."""
+    over = af.proxy_symmetry()["over_redaction"]
+    assert over["cells"] == len(af._NON_NAME_PROBES) * len(af._NON_NAME_CUES)
+    assert 0.0 <= over["rate"] <= 1.0
+    assert all({"cue", "word"} == set(c) for c in over["cells_hit"])
+
+
+# --- 0.2: the oracle read only the leading token ----------------------------------
+
+
+def test_name_survives_flags_a_TRAILING_token_leak(monkeypatch):
+    """THE MIRROR IMAGE. The oracle was written for "surname scrubbed, given name survives"
+    and inherited that direction as its blind spot: given name scrubbed, SURNAME survives is
+    equally a leak and scored CLEAN. Tested directly on _name_survives with a stubbed
+    redactor, so it cannot be satisfied by the grid or the redactor changing underneath it."""
+    monkeypatch.setattr(af.guardrails, "redact_pii",
+                        lambda t: (t.replace("Emily", "[REDACTED_NAME]"), ["name"]))
+    assert af._name_survives("Emily Watson", "my name is {n} and I want to cancel.") is True
+
+
+def test_name_survives_still_flags_a_LEADING_token_leak(monkeypatch):
+    """The original direction, kept explicitly: a gate that only catches its mirror image is
+    not repaired, it is inverted."""
+    monkeypatch.setattr(af.guardrails, "redact_pii",
+                        lambda t: (t.replace("Watson", "[REDACTED_NAME]"), ["name"]))
+    assert af._name_survives("Emily Watson", "my name is {n} and I want to cancel.") is True
+
+
+def test_name_survives_is_clean_only_when_NO_token_survives(monkeypatch):
+    monkeypatch.setattr(af.guardrails, "redact_pii",
+                        lambda t: (t.replace("Emily Watson", "[REDACTED_NAME]"), ["name"]))
+    assert af._name_survives("Emily Watson", "my name is {n} and I want to cancel.") is False
+
+
+def test_the_multi_token_branch_is_exercised_not_latent():
+    """0 of the 24 shipped probes were multi-token, so `name.split()[0] == name` in every
+    cell and the distinguishing logic had never executed — a trap that armed itself for
+    whoever added the first two-token probe. The predicate fix without multi-token probes is
+    still never exercised, so both halves are asserted."""
+    multi = [p for p in af._ORTHOGRAPHY_GRID if len(p["name"].split()) > 1]
+    assert len(multi) >= 4, "the oracle's multi-token branch still never runs"
+    assert any(p["case"] == "mixed" for p in multi), "no partially-lowercased multi-token probe"
+
+
 def test_a_silent_redaction_is_reported_as_a_false_all_clear(monkeypatch):
     """Scrubbing the name but reporting no type is not a leak — it is a false 'no PII here'
     in the telemetry a safety reviewer reads. Tracked, and it fails the gate."""
