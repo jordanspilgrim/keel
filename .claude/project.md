@@ -6,7 +6,7 @@ stack: "Python 3.14 + OpenAI SDK; pytest 8; SQLite (keel.db, untracked); FastAPI
 base_ref: origin/main
 worktree_isolation: true
 check_cmd: none # no ruff/mypy/flake8/black/pyright installed or declared — do NOT invent one
-test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 387 collected, 2 named fairness failures — see 'Both gates are RED on purpose' below. Do NOT revert the gate to make it green.
+test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 392 collected, 2 named fairness failures — see 'Both gates are RED on purpose' below. Do NOT revert the gate to make it green.
 definition_of_done: "pytest green AND scripts/mutate.py reports all mutants killed — BUT NOT YET, and do not chase either one today: both gates are DELIBERATELY RED mid-remediation (see 'Both gates are RED on purpose' below), so a green result right now means a gate was reverted, not that the work is done. Green is the Phase 1 target, not the current state. A fix is not done until the gate verifying it has itself been attacked with the MIRROR IMAGE of the defect it exists to catch. Exit bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM / <=2 LOW / 0 unverified."
 deploy_targets: none
 acceptance: none # local POC; there is no deploy and no acceptance environment
@@ -32,11 +32,12 @@ the defect it exists to catch, before that defect is fixed — otherwise you onl
 green afterwards, which is the position this whole exercise exists to escape. So Phase 0 stopped
 there deliberately, and Phase 1 fixes the code underneath.
 
-- **`pytest`** — 387 collected. `2 failed, 385 passed` with `keel.db` present; `2 failed, 382
+- **`pytest`** — 392 collected. `2 failed, 390 passed` with `keel.db` present; `2 failed, 387
   passed, 3 skipped` without it (any fresh worktree — `keel.db` is gitignored, and the 3 skips are
   the committed-artifact tests). The two failures are
-  `test_the_probe_covers_a_cue_grid_not_a_single_phrasing` and
-  `test_the_fairness_gate_checks_orthography_not_just_group`: the repaired grid and oracle catching
+  `tests/test_agent_fairness.py::test_the_probe_covers_a_cue_grid_not_a_single_phrasing` and
+  `tests/test_guardrails.py::test_the_fairness_gate_checks_orthography_not_just_group`: the
+  repaired grid and oracle catching
   a live leak in `agent/guardrails.py`, where a lowercase self-identified name survives redaction
   and the telemetry reports `types=[]`. Counterpart fix: Phase 1.
 - **`scripts/mutate.py`** — exits 2 with `CATALOGUE INCOMPLETE`, naming 12 publicly-claimed controls

@@ -107,9 +107,9 @@ python economics.py
   <p class="proves">Proves: <b>Phase 0</b> — reproducible synthetic data (identical SHA across runs) and the unit-economics model reproducing the plan’s headline.</p>
 
   <div class="step"><div class="num">3</div><h2>Run the unit tests <span class="badge free">no API</span></h2></div>
-  <p>387 fast, deterministic tests over the policy layer, guardrails, the response-contract/offer-ledger, enforcement, the live-session state machine, the money-demo integrity properties, and the server — no network (a few seconds; timing varies by machine).</p>
+  <p>392 fast, deterministic tests over the policy layer, guardrails, the response-contract/offer-ledger, enforcement, the live-session state machine, the money-demo integrity properties, and the server — no network (a few seconds; timing varies by machine).</p>
   <pre>python -m pytest tests/ -q
-<span class="c"># ..........................FF.........................................  387 collected, in a few seconds</span>
+<span class="c"># ..........................FF.........................................  392 collected, in a few seconds</span>
 <span class="c"># two fairness tests FAIL, on purpose — see the note below</span></pre>
   <div class="callout warn"><b>The suite is deliberately red right now, and that is the point.</b> Two fairness tests fail: the counterfactual probe grid and the redaction-oracle check. Both were repaired so they stop pinning the case of a name, and both now catch a real leak in the redactor underneath them — a lowercase self-identified name survives redaction while the telemetry reports nothing found. <b>A repaired check has to be shown failing against the defect it exists to catch before that defect is fixed</b>, or you never learn whether it would have caught anything. The fix to the redactor lands next and turns these green. Until then, two failures here is the expected result, not a broken checkout.</div>
   <table>
@@ -178,7 +178,7 @@ PRE-REGISTERED MEDIAN-OF-5  (treated price-sensitive segment · n=60)
     <tr><th>Command</th><th>Phase</th><th>API</th><th>Proves</th></tr>
     <tr><td class="s">python synth.py</td><td>0</td><td>no</td><td>reproducible synthetic data</td></tr>
     <tr><td class="s">python economics.py</td><td>0</td><td>no</td><td>the cost-to-serve model</td></tr>
-    <tr><td class="s">pytest tests/</td><td>secs</td><td>no</td><td>policy, guardrails, response-contract/ledger, enforcement, live session, money-demo, server (387 tests)</td></tr>
+    <tr><td class="s">pytest tests/</td><td>secs</td><td>no</td><td>policy, guardrails, response-contract/ledger, enforcement, live session, money-demo, server (392 tests)</td></tr>
     <tr><td class="s">-m scripts.phase1_accept</td><td>1</td><td>yes</td><td>save / let-churn behavior end-to-end</td></tr>
     <tr><td class="s">-m scripts.phase2_accept</td><td>2</td><td>yes</td><td>100% guardrail catch rate + compliance paths</td></tr>
     <tr><td class="s">-m scripts.phase3_accept</td><td>3</td><td>yes</td><td>grade 100% + judge calibration + known-bad conversation caught</td></tr>
