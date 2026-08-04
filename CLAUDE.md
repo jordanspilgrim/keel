@@ -34,7 +34,7 @@ hooks). Without it, `.claude/project.md` has nothing to drive. Deliberately not 
 ## Gates
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # expect exit 1, 2 FAILED — see below
+.venv/bin/python -m pytest tests/ -q      # expect exit 1, 1 FAILED — see below
 .venv/bin/python scripts/mutate.py        # expect exit 2, CATALOGUE INCOMPLETE — see below
 ```
 
@@ -43,24 +43,32 @@ A repaired gate has to be shown FAILING against the defect it exists to catch, b
 is fixed — otherwise you never learn whether it would have caught anything. So Phase 0 repaired the
 gates and deliberately stopped there; Phase 1 fixes the code underneath them and turns them green.
 
-**`pytest` is EXPECTED to fail on exactly two tests.** Phase 0.1 unpinned the fairness grid's case
-axis and 0.2 made the redaction oracle check every token instead of the leading one. Both repaired
-gates now fail against the live redactor, which still leaks a lowercase self-identified name
-(`"my name is emily"` is not redacted, and reports `types=[]`). **That failure is the proof the
-repair works.** The two, by name:
+**`pytest` is EXPECTED to fail on exactly one test.** Phase 0.1 unpinned the fairness grid's case
+axis and 0.2 made the redaction oracle check every token instead of the leading one. Phase 1 then
+closed the single-token half of the leak the repaired gates exposed — `"my name is emily"` now
+redacts and reports `types=['name']` — which took the group-axis gate green. **That gate going
+green on its own, with no test edited to make it, is the proof the repair works.** The one that
+remains, by name:
 
 ```
-FAILED tests/test_agent_fairness.py::test_the_probe_covers_a_cue_grid_not_a_single_phrasing
 FAILED tests/test_guardrails.py::test_the_fairness_gate_checks_orthography_not_just_group
 ```
 
-392 collected. **With `keel.db` present** (the primary tree): `2 failed, 390 passed`. **Without it**
-(any fresh worktree — `keel.db` is gitignored): `2 failed, 387 passed, 3 skipped`, the 3 skips being
-the committed-artifact tests. Two threads read different numbers off this and both were right; state
-which tree you ran in.
+**Phase 1 closed the single-token half of the leak, so the group-axis gate
+(`test_the_probe_covers_a_cue_grid_not_a_single_phrasing`) is now GREEN and only the orthography
+gate remains red.** The residual is 120 of 408 cells and every one is MULTI-TOKEN: the
+continuation-token walk still requires uppercase on tokens 2+, so `Emily watson` and
+`Sofia van Dijk` leave part of the name in the transcript. Single-token leaks are 0 across every
+cue. That gate asserts every orthography rate == 1.0, so it stays red until the continuation walk
+is fixed — **a still-red gate here is the known residual, not evidence a fix failed.**
 
-**Do not "fix" this by reverting the fairness gate, weakening the grid, skipping the two tests, or
-relaxing their assertions.** The counterpart code fix is Phase 1 (`agent/guardrails.py`).
+449 collected. **With `keel.db` present** (the primary tree): `1 failed, 448 passed`.
+**Without it** (any fresh worktree — `keel.db` is gitignored): `1 failed, 445 passed, 3 skipped`, the 3 skips being the committed-artifact tests. Two threads read different numbers off
+this and both were right; state which tree you ran in.
+
+**Do not "fix" this by reverting the fairness gate, weakening the grid, skipping the test, or
+relaxing its assertions.** The counterpart code fix is the continuation-token walk in
+`agent/guardrails.py`.
 
 **`mutate.py` is EXPECTED to exit 2 right now, and that redness is deliberate.** Phase 0.3
 repaired its completeness check: the expectation now comes from `docs/controls.json`, the

@@ -88,8 +88,15 @@ def guardrail_version() -> str:
         # everything that decides whether a probe is caught"; that was false for 28.6% of the
         # probe set. The sibling judge._spec_version() hashes instructions AND schema.
         _SCOPE_INSTRUCTIONS, repr(_SCOPE_SCHEMA),
+        # _redact_leading_name is hashed EXPLICITLY. _repl_identity covers a callback by its
+        # qualname + source, which was sufficient while _sub_name carried the whole walk; the
+        # cue-strength split moved that body into a shared helper, so hashing only the two
+        # one-line wrappers would leave the name-matching logic changeable without changing the
+        # version — a fourth way to alter behaviour behind a stable hash, in the function whose
+        # docstring exists because there were three.
         "".join(inspect.getsource(f) for f in
-                (redact_pii, screen_input, classify_injection, check_scope, check_jailbreak)),
+                (redact_pii, screen_input, classify_injection, check_scope, check_jailbreak,
+                 _redact_leading_name)),
     ]
     return "g-" + hashlib.sha256("||".join(parts).encode()).hexdigest()[:12]
 
@@ -136,14 +143,57 @@ def _sub_name_min2(m: "re.Match") -> str:
     return out
 
 
-def _sub_name(m: "re.Match") -> str:
+# CLOSED-CLASS ENGLISH FUNCTION WORDS — determiners, prepositions, conjunctions, pronouns,
+# auxiliaries, negators. Consulted ONLY for a lowercase first token after a self-identification
+# cue (see _redact_leading_name), where the cue guarantees the position but nothing guarantees
+# the token is a name.
+#
+# BUILT ON A GRAMMATICAL PRINCIPLE, NOT FROM THE PROBES IT WAS FOUND WITH. Fitting a word list
+# to the failing examples is how a control ends up covering exactly the cases someone happened
+# to think of — the defect this module removed twice, once as a name allowlist and once as a
+# months-and-weekdays list. So this is a closed class or it is nothing, and the consequence is
+# stated rather than hidden: OPEN-CLASS words are NOT covered and cannot be. "my name is spelled
+# wrong" and "my name is wrong on the bill" still over-redact, because `spelled` is a participle
+# and `wrong` an adjective, and admitting those would mean admitting an open-ended vocabulary.
+#
+# DELIBERATELY ABSENT: `an`, `he`, `so`, `no`, `it`, `us`, `be`, `do`, `by`, `as`, `up`, `out`,
+# `if`, `la`, `le`, `du`, `de`, `van`, `von`, `del`, `da`, `di`. Every one is a real name or a
+# name particle in some script, and this list is never allowed to be the reason one is exposed.
+# The particles matter twice over: they are how a large share of Dutch, German, French and
+# Spanish surnames are written, and stopping on them would re-open the leak this phase exists
+# to close.
+_NOT_A_NAME_IN_PROSE = frozenset("""
+the this that these those there their theirs my mine your yours our ours its
+i we me him them who whom whose which what when where while why how
+and or but nor because although though unless until since
+of in on at to for from with within without about into onto over under above below
+between through during after before against toward towards upon than
+is are was were am been being has have had having does did doing
+not never nor none nothing every each all any some both few many much more most
+""".split())
+
+
+def _redact_leading_name(m: "re.Match", *, require_upper_on_first: bool) -> str:
     """Redact the LEADING name-shaped run of the captured phrase, keeping the rest.
 
     Trimming rather than rejecting matters: the token class is Unicode-aware and therefore
     matches lowercase words too, so the regex happily captures "John Smith and I want". If the
     callback simply declined that (not every token uppercase), re.sub would NOT retry a shorter
-    span and a real two-word name would go unredacted. So take the uppercase-initial prefix —
-    "John Smith" — redact exactly that, and hand back the remainder untouched.
+    span and a real two-word name would go unredacted. So take the name-shaped prefix — "John
+    Smith" — redact exactly that, and hand back the remainder untouched.
+
+    `require_upper_on_first` IS THE CUE-STRENGTH SPLIT, and it is the only difference between
+    the two callbacks below. After the STRONGEST cues ("my name is X", "i'm called X") no
+    competing reading exists in English, so the first token is a name whatever its case and the
+    uppercase test buys nothing while costing the entire lowercase population — 72 of 96 probe
+    cells leaking in plaintext, and 72 of those 72 reporting `types == []`, so the transcript
+    carried the name and the telemetry carried an all-clear. After the MEDIUM cues ("call me X")
+    the test is load-bearing: "call me Bob" and "call me later" are both ordinary sentences and
+    capitalisation is how English marks the difference.
+
+    THE REQUIREMENT IS DROPPED ON THE FIRST TOKEN ONLY. Continuation tokens still need it, or
+    the run has no boundary: "my name is emily and I want to cancel." would consume "emily and
+    I". Case is what bounds the run once the cue has established that a name starts here.
 
     Uppercase is decided by Python's Unicode-aware str.isupper(), not a regex class: `re` has
     no \\p{Lu}, and an ASCII [A-Z] is precisely the bug this replaced (100% redaction for ASCII
@@ -160,7 +210,22 @@ def _sub_name(m: "re.Match") -> str:
             kept.append(tok)
             continue
         head = tok.lstrip("'’-")
-        if not head or not head[0].isupper() or head.lower() in _NOT_A_NAME_AFTER_CUE:
+        if not head or head.lower() in _NOT_A_NAME_AFTER_CUE:
+            break
+        if (idx > 0 or require_upper_on_first) and not head[0].isupper():
+            break
+        # THE CASE-BLIND PATH ONLY. Dropping the uppercase test removes the only signal that a
+        # name follows the cue, so "my name is on the account" redacted "on". Measured: 7 of 8
+        # ordinary prose probes damaged, all 8 clean beforehand. The cue is genuinely
+        # unambiguous — it is the CAPTURE swallowing prose — so the bound belongs here, on what
+        # a name token can be, not on the cue taxonomy.
+        #
+        # GATED ON `not isupper()` DELIBERATELY. A capitalised token is never tested against
+        # this list, so "my name is An" / "my name is He" / "my name is So" still redact. Only a
+        # LOWERCASE token that is also a closed-class English function word is declined. Without
+        # that gate this would be the name-allowlist bug again: a word list deciding whose name
+        # gets protected, and An, He, So, No, Li and Ng are all real names.
+        if not head[0].isupper() and head.lower() in _NOT_A_NAME_IN_PROSE:
             break
         kept.append(tok)
     name = "".join(kept).rstrip()
@@ -168,6 +233,16 @@ def _sub_name(m: "re.Match") -> str:
         return m.group(0)
     tail = phrase[len(name):]
     return (f"{cue} [REDACTED_NAME]{tail}" if cue else f"[REDACTED_NAME]{tail}")
+
+
+def _sub_name(m: "re.Match") -> str:
+    """WEAK cues and the sign-off: the first token must be capitalised."""
+    return _redact_leading_name(m, require_upper_on_first=True)
+
+
+def _sub_name_case_blind(m: "re.Match") -> str:
+    """Self-identification cues: the first token is a name whatever its case."""
+    return _redact_leading_name(m, require_upper_on_first=False)
 
 _PII_PATTERNS = [
     # Separators include '.', which the original class ([ -]) omitted: "4111.1111.1111.1111"
@@ -191,14 +266,47 @@ _PII_PATTERNS = [
     (re.compile(r"\b(?:\+?1[ -.]?)?\(?\d{3}\)?[ -.]?\d{3}[ -.]?\d{4}\b"), "[REDACTED_PHONE]", "phone"),
     (re.compile(_STREET), "[REDACTED_ADDRESS]", "address"),
     # Self-identified name — PATTERN-BASED best-effort (not full NER): catches the common
-    # phrasings a customer uses to give a name. Titlecase is required, so lowercase or
-    # all-caps names can still slip through; honestly scoped as such (the deterministic
-    # action layer and the customer-facing fact allowlist are the real backstops).
-    #  (a1) STRONG, explicit name-declaration cue + 1-3 Titlecase words: "my name is Jane",
-    #  "call me Bob Lee". These cues are unambiguous, so a single Titlecase word is a name.
-    (re.compile(r"\b(?i:(my name is|name's|name is|i'm called|call me|they call me))"
+    # phrasings a customer uses to give a name.
+    #
+    # THE CUE-STRENGTH TAXONOMY. The tier is declared here, beside the cue, so the rule is
+    # inspectable in one place rather than inferred from which callback a pattern happens to
+    # reference. An earlier comment claimed these cues were "unambiguous" and offered "call me
+    # Bob Lee" as its example; that was measured false and the correction is the whole point of
+    # the split. ALL-CAPS was never broken — 'JAMAL' redacts and has done throughout, confirmed
+    # by four independent measurements — so nothing here widens for it.
+    #
+    #  (a1) DECLARATION — "my name is X". No competing reading exists in English, so the first
+    #  token is a name whatever its case.
+    (re.compile(r"\b(?i:(my name is|name's|name is|i'm called))"
                 r"\s+((?:%s)(?:\s+(?:%s)){0,2})" % (_NAME_TOK, _NAME_TOK)),
-     _sub_name, "name"),
+     _sub_name_case_blind, "name"),
+    #  (a1b) ADDRESS — "call me X". This cue IS ambiguous: "call me Bob" and "call me later"
+    #  are both ordinary sentences, and capitalisation was the only thing distinguishing them.
+    #
+    #  ############################################################################
+    #  #  ACCEPTED COST — AN OWNER DECISION, NOT A DEFECT. DO NOT "FIX" THIS.     #
+    #  #                                                                          #
+    #  #     "call me later"  ->  "call me [REDACTED_NAME]"                        #
+    #  #                                                                          #
+    #  #  This is INTENDED. The uppercase requirement was dropped here knowing it  #
+    #  #  scrubs lowercase non-names after this cue, and the trade was made with   #
+    #  #  the measurement in hand: keeping the guard left a lowercase name leaking #
+    #  #  in plaintext for every customer who does not capitalise, and a privacy   #
+    #  #  control whose coverage depends on a shift key protects some people and   #
+    #  #  not others.                                                              #
+    #  #                                                                          #
+    #  #  _NOT_A_NAME_AFTER_CUE cannot mitigate it: that list is emotional states  #
+    #  #  and nationalities built for "I'm X" / "this is X", and of `later`,       #
+    #  #  `tomorrow`, `anytime`, `soon`, `now`, `asap`, `tonight`, `whenever` it   #
+    #  #  contains none — `back` is in it for an unrelated reason and covers       #
+    #  #  "call me back" by coincidence.                                           #
+    #  #                                                                          #
+    #  #  RESTORING THE GUARD REOPENS A DELIBERATELY CLOSED LEAK. It needs the     #
+    #  #  owner, not a code review.                                                #
+    #  ############################################################################
+    (re.compile(r"\b(?i:(call me|they call me))"
+                r"\s+((?:%s)(?:\s+(?:%s)){0,2})" % (_NAME_TOK, _NAME_TOK)),
+     _sub_name_case_blind, "name"),
     #  (a2) WEAK cue ("i am"/"i'm"/"this is") + a TWO-word name. A single Titlecase word after
     #  a weak cue is ambiguous ("I'm Disappointed", "This is Comcast" (which IS now scrubbed — see the denylist note)), so the one-word case is
     #  handled separately below, gated on a non-name denylist (the first-name lexicon it replaced was deleted in R13) — catching "I'm John"
