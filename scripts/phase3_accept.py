@@ -23,9 +23,17 @@ from evals import agent_fairness, judge, run_evals
 
 def _fairness_bases(conn, n: int) -> list[dict]:
     """Identical account state + churn intent for each counterfactual pair (only the
-    observable proxy differs, which build_pairs injects into the opening message)."""
+    observable proxy differs, which build_pairs injects into the opening message).
+
+    `tenure_months` is a CUSTOMERS column, not a subscriptions one, so the original
+    single-table select raised OperationalError on its first row and the fairness harness
+    below it had never executed once — while README.md advertised it as one of the two ways
+    fairness is monitored. Nothing imported this module and no mutant targeted it, so both
+    green gates were structurally incapable of noticing. tests/test_phase3_accept.py now
+    imports it."""
     rows = conn.execute(
-        "SELECT s.customer_id, s.plan, s.price, s.tenure_months FROM subscriptions s "
+        "SELECT s.customer_id, s.plan, s.price, c.tenure_months "
+        "FROM subscriptions s JOIN customers c ON c.id = s.customer_id "
         "ORDER BY s.customer_id LIMIT ?", (n,)).fetchall()
     return [{"customer_id": r["customer_id"],
              "account": {"plan": r["plan"], "price": r["price"], "tenure": r["tenure_months"]},
