@@ -35,7 +35,7 @@ hooks). Without it, `.claude/project.md` has nothing to drive. Deliberately not 
 
 ```bash
 .venv/bin/python -m pytest tests/ -q      # expect exit 1, 1 FAILED — see below
-.venv/bin/python scripts/mutate.py        # expect exit 2, CATALOGUE INCOMPLETE — see below
+.venv/bin/python scripts/mutate.py        # expect exit 1, RECOMPUTE — see below
 ```
 
 **BOTH GATES ARE EXPECTED TO BE RED RIGHT NOW. BOTH REDS ARE THE DELIVERABLE, NOT A REGRESSION.**
@@ -70,13 +70,19 @@ this and both were right; state which tree you ran in.
 relaxing its assertions.** The counterpart code fix is the continuation-token walk in
 `agent/guardrails.py`.
 
-**`mutate.py` is EXPECTED to exit 2 right now, and that redness is deliberate.** Phase 0.3
+**`mutate.py` is EXPECTED to exit 1 right now, and that redness is deliberate.** Phase 0.3
 repaired its completeness check: the expectation now comes from `docs/controls.json`, the
 register of controls this repo publicly claims, instead of from a literal inside `mutate.py`
-whose keys were the mutant names. The repaired check immediately names 12 publicly-claimed
-controls that have no mutant — which is the finding R17 M22 predicted and the old check could
-not see. Adding those mutants is Phase 5 and is blocked on this repair (adding mutants while
-the check was circular would extend the mechanism 0.3 exists to break).
+whose keys were the mutant names. The repaired check named 12 publicly-claimed controls with
+no mutant — the finding R17 M22 predicted and the old check could not see. **All 12 mutants now
+exist, and 7 of them SURVIVE**: those controls can be deleted with the suite unchanged, because
+nothing tests them. Among them are all three kill-switch floors, the money demo's independent
+variable, and all three judge-calibration gates. Writing those tests is the next item.
+
+Two further rows are NOT part of the 12 and are pre-existing catalogue entries degraded by
+Phase 0's own fixes: `proxy_probe_single_cue` now SURVIVES, and `proxy_boolean_oracle` is an
+ANCHOR MISS — its anchor text no longer exists, so that control is tested in neither direction.
+Both surfaced only when the harness could run again.
 
 **Do not "fix" this by reverting the gate, deleting register entries, or relaxing the check.**
 

@@ -52,14 +52,31 @@ def test_the_shipped_register_parses_and_every_claim_is_still_published():
         f"{unpublished}")
 
 
-def test_the_register_is_not_derived_from_the_mutant_table():
-    """The anti-circularity property itself. If every claim id were simply a mutant name, the
-    register would be a restatement of MUTANTS and the check would be a tautology again."""
+def test_no_claim_takes_its_provenance_from_the_harness_it_checks():
+    """The anti-circularity property, stated correctly at the second attempt.
+
+    THE FIRST VERSION WAS WRONG AND THE COMPLETED CATALOGUE IS WHAT SHOWED IT. It asserted
+    `set(claims) - {mutant names}` is non-empty, reasoning that a register collapsed onto the
+    catalogue would have no claim the catalogue lacked. But check (a) matches claims to mutants
+    BY ID, so a register whose every claim has a mutant necessarily has nothing outside the
+    mutant table. That assertion therefore demanded the catalogue stay permanently INCOMPLETE —
+    **it forbade the goal state**, and it fired the moment the last of the 12 mutants landed.
+
+    Id-overlap never carried independence; review said so before this fired ("17 of your 29 ids
+    already ARE mutant names — the ANCHOR is the mechanism"). What makes the register
+    non-circular is that every claim is pinned to a literal string in a PUBLISHED document, so
+    the expectation is checkable against the docs rather than against `mutate.py`. That holds
+    whether the catalogue is complete or not.
+
+    So this checks the circularity directly: no claim may cite the harness as its own source.
+    """
     claims = mutate.load_claims()
-    named = {m[0] for m in mutate.MUTANTS}
-    assert set(claims) - named, (
-        "every claimed control is also a mutant name — the register has collapsed back onto "
-        "the catalogue it is supposed to be independent of")
+    assert claims
+    for cid, entry in claims.items():
+        for src in entry["published_in"]:
+            assert "mutate.py" not in src["file"], (
+                f"control {cid!r} cites {src['file']} as its published claim — that is the "
+                f"R17 M22 circularity: an expectation derived from the artifact it checks")
 
 
 # --- direction 1: claimed, but no mutant (the check M22 showed was a tautology) ----------
