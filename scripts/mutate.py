@@ -37,9 +37,16 @@ wrong in three ways, each of which makes the harness certify a control it never 
   * A collection or import error also exits non-zero, so a mutant that runs ZERO tests
     certifies its control.
   * A mutant can be killed by a test that has nothing to do with the control it names.
-So: a baseline run must be GREEN before any mutant runs; a kill requires exit code 1
-specifically (test failures, not collection errors); and the failing tests are reported so a
-reader can see the kill is attributable rather than incidental.
+So: the baseline is run FIRST and its failing set recorded; a kill requires exit code 1
+specifically (test failures, not collection errors) AND at least one failure the baseline did
+not already have; and those NEW failing tests are reported so a reader can see the kill is
+attributable rather than incidental.
+
+That last part used to be "the baseline must be GREEN", which was a proxy: it delivered
+attribution by making "already broken" impossible rather than by checking it. Phase 0 left the
+suite deliberately RED on two fairness tests, and the proxy inverted — a mutant that edits a
+COMMENT measured as KILLED, citing those two as its evidence. Set comparison states the
+property directly; on a green tree the set is empty and nothing changes.
 
 THE COMPLETENESS GATE runs BEFORE the baseline and exits 2 on any gap. Its expectation is
 `docs/controls.json` — the register of controls this repo publicly claims — NOT anything in
@@ -169,16 +176,53 @@ def _failing_tests(out: str) -> list[str]:
     return ids
 
 
-def _baseline_is_green() -> tuple[bool, str]:
-    """The unmutated tree MUST be green, or every 'kill' below is meaningless."""
+def _baseline() -> tuple[bool, set[str], str]:
+    """Record the unmutated tree's FAILING SET, and whether it is usable as a reference.
+
+    THIS USED TO REQUIRE A GREEN BASELINE, and that was a proxy standing in for the property.
+    The property the harness actually needs is ATTRIBUTION — "a mutant cannot be shown to break
+    something that is already broken" (docstring above). `returncode == 0` expressed that only
+    by making "already broken" impossible, which is a different and weaker thing, and it fails
+    the moment a suite is deliberately red.
+
+    It failed here. Phase 0 repaired three verifiers and left `pytest` RED on two fairness tests
+    ON PURPOSE — a repaired gate has to be seen failing before the defect under it is fixed. At
+    that point the old oracle, `returncode == 1 and bool(failing)`, is satisfied by the
+    PRE-EXISTING failures for every mutant unconditionally. MEASURED: a mutant that edits a
+    COMMENT — zero behavioural change — reported KILLED, citing those two fairness tests as its
+    evidence. The green-baseline abort was the only thing standing between this tree and every
+    catalogued control certifying falsely, which is the pass-15 failure recorded in the
+    docstring above, re-created by two decisions that were each individually correct.
+
+    So the baseline now records WHICH tests fail, and a kill requires a failure that is NOT in
+    that set. On a green tree the set is empty and the behaviour is identical to before; on a
+    red tree the harness still works; and in both cases every kill is attributable BY
+    CONSTRUCTION rather than by assuming a clean baseline made it so.
+
+    Returns (usable, failing_set, detail). Not usable if pytest could not run the suite at all
+    (a collection error tells us nothing about any control), or if the failing set is UNSTABLE
+    across two runs — a flaky test would otherwise masquerade as a kill for whichever mutant it
+    happened to fire under.
+    """
     tmp = tempfile.mkdtemp(prefix="keel-mut-baseline-")
     tree = os.path.join(tmp, "tree")
     shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns(
         ".git", ".venv", "__pycache__", "*.pyc", "keel.db*", ".pytest_cache"))
-    proc = _pytest(tree)
+    runs = [_pytest(tree) for _ in range(2)]
     shutil.rmtree(tmp, ignore_errors=True)
-    tail = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()][-1:] or [""]
-    return proc.returncode == 0, tail[0].strip()
+    sets = [set(_failing_tests(p.stdout)) for p in runs]
+    tail = [ln for ln in runs[0].stdout.strip().splitlines() if ln.strip()][-1:] or [""]
+    detail = tail[0].strip()
+
+    for proc in runs:
+        if proc.returncode not in (0, 1):
+            return False, set(), (f"{detail}  [pytest exit {proc.returncode} — collection/usage "
+                                  f"error, the suite did not run]")
+    if sets[0] != sets[1]:
+        drift = sorted(sets[0] ^ sets[1])
+        return False, set(), (f"{detail}  [UNSTABLE across two runs — {len(drift)} test(s) differ: "
+                              f"{', '.join(t.split('::')[-1] for t in drift[:3])}]")
+    return True, sets[0], detail
 
 
 # THE COMPLETENESS GATE, and why its expectation lives OUTSIDE this file (R17 M22).
@@ -301,7 +345,7 @@ def catalogue_report(claims: dict[str, dict], mutant_names,
     return 0, out
 
 
-def _run(mut, keep: bool) -> tuple[str, bool, str]:
+def _run(mut, keep: bool, baseline_failing: set[str] = frozenset()) -> tuple[str, bool, str]:
     name, rel, find, repl, control = mut
     tmp = tempfile.mkdtemp(prefix=f"keel-mut-{name}-")
     tree = os.path.join(tmp, "tree")
@@ -320,19 +364,33 @@ def _run(mut, keep: bool) -> tuple[str, bool, str]:
     if hashlib.sha256(open(path, "rb").read()).hexdigest() != digest:
         shutil.rmtree(tmp, ignore_errors=True)
         return name, False, "TREE MUTATED UNDER THE RUN — result discarded"
-    failing = _failing_tests(proc.stdout)
+    failing = set(_failing_tests(proc.stdout))
+    # ATTRIBUTION: only failures the BASELINE did not already have can be credited to this
+    # mutation. On a green tree baseline_failing is empty and this reduces exactly to the old
+    # `bool(failing)`; on a red tree it is what stops the pre-existing failures certifying
+    # every mutant. See _baseline() for the measurement that forced this.
+    new_failures = failing - baseline_failing
     # Exit code 1 means TEST FAILURES. 2 is a collection/usage error, 3 internal, 4 usage,
     # 5 no tests collected — a mutant that breaks the import runs zero tests and must not be
     # credited with a kill.
-    killed = proc.returncode == 1 and bool(failing)
+    killed = proc.returncode == 1 and bool(new_failures)
+    repaired = baseline_failing - failing
     if proc.returncode not in (0, 1):
         detail = f"NOT A KILL — pytest exit {proc.returncode} (collection/import error, zero tests ran)"
     elif killed:
-        shown = ", ".join(t.split("::")[-1] for t in failing[:3])
-        detail = f"{len(failing)} test(s) failed: {shown}{' …' if len(failing) > 3 else ''}"
+        shown = ", ".join(t.split("::")[-1] for t in sorted(new_failures)[:3])
+        detail = (f"{len(new_failures)} NEW test failure(s): {shown}"
+                  f"{' …' if len(new_failures) > 3 else ''}")
     else:
         tail = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()][-1:] or [""]
         detail = tail[0].strip()
+        if failing:
+            detail += f"  [all {len(failing)} failure(s) were already failing at baseline]"
+    if repaired:
+        # A mutation that makes a baseline failure PASS is not a kill and is worth surfacing:
+        # it means the mutated line is implicated in that failure.
+        detail += (f"  [NB: this mutation REPAIRED {len(repaired)} baseline failure(s): "
+                   f"{', '.join(t.split('::')[-1] for t in sorted(repaired)[:2])}]")
     if not keep:
         shutil.rmtree(tmp, ignore_errors=True)
     return name, killed, detail
@@ -364,17 +422,23 @@ def main() -> int:
     if code:
         return code
 
-    ok, base_detail = _baseline_is_green()
+    usable, base_failing, base_detail = _baseline()
     print(f"baseline (unmutated): {base_detail}")
-    if not ok:
-        print("\nABORTING — the baseline suite is NOT green, so every 'kill' below would be "
-              "meaningless: a mutant cannot be shown to break something that is already broken. "
-              "Fix the suite first.")
+    if not usable:
+        print("\nABORTING — the baseline is not usable as a reference, so nothing below could be "
+              "attributed to a mutation. This is NOT the same as the suite being red: a red "
+              "baseline is fine and is handled by set comparison. Fix the collection error or "
+              "the flake first.")
         return 2
-    print(f"running {len(chosen)} mutant(s) — each must be KILLED (suite goes red)\n")
+    if base_failing:
+        print(f"baseline has {len(base_failing)} PRE-EXISTING failure(s); a kill requires a "
+              f"failure NOT in this set:")
+        for t in sorted(base_failing):
+            print(f"    {t}")
+    print(f"running {len(chosen)} mutant(s) — each must be KILLED (a NEW test goes red)\n")
     survived, stale = [], []
     for mut in chosen:
-        name, killed, detail = _run(mut, args.keep)
+        name, killed, detail = _run(mut, args.keep, base_failing)
         tag = "KILLED  " if killed else ("ANCHOR  " if detail.startswith("ANCHOR") else "SURVIVED")
         print(f"  {tag}  {name:32} {detail}")
         if detail.startswith("ANCHOR"):
@@ -395,7 +459,12 @@ def main() -> int:
             print(f"    {name}: {control}")
     if survived or stale:
         return 1
-    print("all mutants killed — every catalogued control is genuinely verified")
+    if base_failing:
+        print(f"all mutants killed — every catalogued control is genuinely verified "
+              f"(each by a NEW failure, against a baseline that already had "
+              f"{len(base_failing)})")
+    else:
+        print("all mutants killed — every catalogued control is genuinely verified")
     return 0
 
 
