@@ -178,7 +178,8 @@ def test_a_partial_redaction_fails_the_gate_that_a_boolean_oracle_passed(monkeyp
 
 def _probe_record(name, **over):
     base = {"name": name, "stem": name, "case": "initial_upper", "script": "ascii",
-            "joiner": "none", "length": "normal", "tokens": "single", "internal_caps": "no"}
+            "joiner": "none", "length": "normal", "tokens": "single", "internal_caps": "no",
+            "particle": "none"}
     base.update(over)
     return base
 
@@ -192,16 +193,21 @@ def test_no_declared_axis_is_constant_in_the_EMITTED_grid():
         assert len(values) >= 2, f"axis {axis!r} is PINNED in the emitted grid: {values}"
 
 
-def test_the_grid_is_a_true_cross_product_of_stems_and_case():
-    """Every stem appears in every case rendering distinct for it. This is what makes an
-    uncovered composed cell unconstructible rather than merely unlikely: the cells exist
-    because the generator emitted them, not because someone remembered them."""
-    by_stem = {}
+def test_the_grid_is_a_true_cross_product_of_stems_particles_and_case():
+    """Every (stem, particle form) appears in every case rendering distinct for it. This is
+    what makes an uncovered composed cell unconstructible rather than merely unlikely: the
+    cells exist because the generator emitted them, not because someone remembered them."""
+    script_of = {stem: script for stem, script, *_ in af._NAME_STEMS}
+    by = {}
     for p in af._ORTHOGRAPHY_GRID:
-        by_stem.setdefault(p["stem"], set()).add(p["case"])
-    for stem, cases in by_stem.items():
-        assert cases == set(af._case_forms(stem)), f"{stem!r} is missing case renderings"
-    assert len(af._ORTHOGRAPHY_GRID) == sum(len(af._case_forms(s)) for s, *_ in af._NAME_STEMS)
+        by.setdefault((p["stem"], p["particle"]), set()).add(p["case"])
+    for (stem, p_label), cases in by.items():
+        rendered = af._particle_forms(stem, script_of[stem])[p_label]
+        assert cases == set(af._case_forms(rendered)), f"{stem!r}/{p_label} missing renderings"
+    expected = sum(len(af._case_forms(r))
+                   for stem, script, *_ in af._NAME_STEMS
+                   for r in af._particle_forms(stem, script).values())
+    assert len(af._ORTHOGRAPHY_GRID) == expected
 
 
 def test_case_composes_with_every_spelling_axis_not_merely_alongside_it():
@@ -253,6 +259,7 @@ def test_a_grid_that_varies_every_axis_but_skips_a_COMPOSED_cell_is_rejected():
         _probe_record("Ng", length="short"),
         _probe_record("Emily Watson", tokens="multi"),
         _probe_record("Emily watson", tokens="multi", case="mixed"),
+        _probe_record("Sofia van Dijk", tokens="multi", particle="lowercase"),
     ]
     for axis in af._ORTHOGRAPHY_AXES:      # the premise: NOTHING is pinned
         assert len({p[axis] for p in grid_d}) >= 2, f"{axis} pinned — wrong test case"
@@ -263,6 +270,65 @@ def test_a_grid_that_varies_every_axis_but_skips_a_COMPOSED_cell_is_rejected():
     else:
         raise AssertionError("a grid missing lower x diacritic was accepted — the cell where "
                              "'my name is josé' leaks in plaintext")
+
+
+def test_the_lowercase_particle_cell_is_GENERATED_not_curated():
+    """Titlecase x multi-token x lowercase particle is a THREE-way composition, and it leaks
+    live: 'Sofia van Dijk' -> '[REDACTED_NAME] van Dijk' with types=['name'].
+
+    Carrying one hand-written particle stem would put the cell in the grid while leaving
+    `particle` undeclared — no axis to be constant, so nothing could notice if it were dropped
+    or if later multi-token stems never had one. That is the original defect one column over.
+    So the assertion is that the axis EXISTS and that every multi-token stem emits both forms,
+    not merely that some particle name happens to be present."""
+    assert "particle" in af._ORTHOGRAPHY_AXES
+    for stem, script, _joiner, _length, tokens, _icaps in af._NAME_STEMS:
+        forms = af._particle_forms(stem, script)
+        if tokens == "multi":
+            assert set(forms) == {"none", "lowercase"}, f"{stem!r} emits no particle form"
+            assert forms["lowercase"] != stem
+        else:
+            assert set(forms) == {"none"}, "a single-token stem cannot carry an interior particle"
+    emitted = {p["name"] for p in af._ORTHOGRAPHY_GRID if p["particle"] == "lowercase"}
+    assert "Sofia van Dijk" in emitted, sorted(emitted)
+
+
+def test_a_grid_that_drops_the_particle_axis_is_rejected():
+    """Mirror image of the pinned-axis test: the axis is not constant, it is ABSENT. Every
+    probe says particle='none', which is what a grid rebuilt without particle stems looks
+    like — and it must not pass."""
+    no_particle = [_probe_record("Emily"),
+                   _probe_record("emily", case="lower"),
+                   _probe_record("EMILY", case="all_upper"),
+                   _probe_record("josé", script="diacritic", case="lower"),
+                   _probe_record("владимир", script="non_latin", case="lower"),
+                   _probe_record("o'brien", joiner="apostrophe", case="lower",
+                                 internal_caps="yes"),
+                   _probe_record("jean-pierre", joiner="hyphen", case="lower"),
+                   _probe_record("ng", length="short", case="lower"),
+                   _probe_record("emily watson", tokens="multi", case="lower"),
+                   _probe_record("Emily watson", tokens="multi", case="mixed")]
+    assert {p["particle"] for p in no_particle} == {"none"}
+    try:
+        af._assert_grid_is_not_pinned(no_particle, af._GROUP_NAMES)
+    except ValueError as e:
+        assert "particle" in str(e), e
+    else:
+        raise AssertionError("a grid with no lowercase-particle cell was accepted — the cell "
+                             "where 'Sofia van Dijk' leaks under a types=['name'] all-clear")
+
+
+def test_a_leak_that_still_reports_a_redaction_gets_its_own_row(monkeypatch):
+    """Two failure shapes must stay distinguishable. A leak reporting types=[] is a false
+    all-clear; a leak reporting types=['name'] is R15/R16's signature — the value survives
+    AND the control affirms it fired — and reads clean in the log on inspection. Counting the
+    second as a remainder of the first is how it stops getting prioritised."""
+    monkeypatch.setattr(af.guardrails, "redact_pii",
+                        lambda t: (t.replace("Emily", "[REDACTED_NAME]"), ["name"]))
+    probe = af._probe(["Emily Watson"])
+    assert probe["leaked_cells"] == len(af._PROBE_CUES)
+    assert probe["leaked_while_reporting_redacted"] == probe["leaks"]
+    assert probe["leaked_and_unreported"] == []
 
 
 def test_the_real_grid_passes_its_own_guard():

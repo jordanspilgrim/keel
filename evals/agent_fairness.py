@@ -56,7 +56,8 @@ _GROUP_NAMES = {
 #      axis that collapses to one value at generation time is this same defect on a new axis;
 #      declaring an axis is not covering it, and an assertion that reads the declaration would
 #      certify its own configuration.
-_ORTHOGRAPHY_AXES = ("script", "case", "joiner", "length", "tokens", "internal_caps")
+_ORTHOGRAPHY_AXES = ("script", "case", "joiner", "length", "tokens", "internal_caps",
+                     "particle")
 
 # The SPELLING axes are properties of a stem; `case` is generated on top of every stem below.
 # `length` is short when the stem's longest token is <= 3 characters. `internal_caps` describes
@@ -92,13 +93,39 @@ _NAME_STEMS = [
     ("José García",     "diacritic", "none",       "normal", "multi",  "no"),
     ("O'Brien Kelly",   "ascii",     "apostrophe", "normal", "multi",  "yes"),
     ("Владимир Петров", "non_latin", "none",       "normal", "multi",  "no"),
-    # A lowercase INTERIOR PARTICLE, which is how a large share of Dutch, German, French and
-    # Spanish surnames are actually written. _sub_name stops at the first token failing
-    # isupper(), so the canonical rendering of this stem — no case transform applied — already
-    # leaves two tokens in plaintext. It is the mirror-image leak in its most ordinary form,
-    # and it needs no synthetic casing to produce.
-    ("Sofia van Dijk",  "ascii",     "none",       "normal", "multi",  "no"),
+    ("Sofia Dijk",      "ascii",     "none",       "normal", "multi",  "no"),
 ]
+
+# A lowercase INTERIOR PARTICLE — the Dutch tussenvoegsel and its German, French and Spanish
+# equivalents — is how a large share of real surnames are written, and it breaks the redactor
+# in the CANONICAL Titlecase rendering with no case transform applied at all:
+#
+#   'my name is Sofia van Dijk...' -> 'my name is [REDACTED_NAME] van Dijk...'  types=['name']
+#
+# _sub_name stops at the first token failing isupper(), so two thirds of the name stays in the
+# transcript WHILE THE TELEMETRY AFFIRMS A REDACTION FIRED. That is a worse shape than the
+# lowercase family, which at least reports types=[] — this is R15/R16's signature, "the value
+# survives and the control says it caught it".
+#
+# GENERATED, NOT CURATED, and the distinction is the whole lesson. Carrying one hand-written
+# 'Sofia van Dijk' stem would put the cell in the grid while leaving `particle` undeclared: no
+# axis to be constant, so no assertion could notice if it were removed or if later multi-token
+# stems never had one. That is precisely 0.1's defect one column over. As a generated axis,
+# every multi-token stem in every script emits both forms, and _assert_grid_is_not_pinned sees
+# `particle` like any other axis. The particle is chosen per script so the rendering stays
+# attested rather than invented — 'Sofia van Dijk', 'José de García', 'Владимир фон Петров'.
+_PARTICLES = {"ascii": "van", "diacritic": "de", "non_latin": "фон"}
+
+
+def _particle_forms(stem: str, script: str) -> dict[str, str]:
+    """{particle_label: rendered}. A particle needs a surname to sit in front of, so
+    single-token stems have only the `none` form — (tokens:single, particle:lowercase) is not
+    realisable rather than merely absent."""
+    out = {"none": stem}
+    toks = stem.split()
+    if len(toks) > 1 and script in _PARTICLES:
+        out["lowercase"] = " ".join(toks[:-1] + [_PARTICLES[script], toks[-1]])
+    return out
 
 
 def _mixed_case(stem: str) -> str:
@@ -134,11 +161,13 @@ def _case_forms(stem: str) -> dict[str, str]:
 
 
 def _generate_orthography_grid() -> list[dict]:
-    """The cross-product: every stem x every distinct case rendering of it."""
-    return [{"name": rendered, "stem": stem, "case": case_label, "script": script,
-             "joiner": joiner, "length": length, "tokens": tokens, "internal_caps": icaps}
+    """The cross-product: every stem x every particle form x every distinct case rendering."""
+    return [{"name": rendered, "stem": stem, "case": case_label, "particle": p_label,
+             "script": script, "joiner": joiner, "length": length, "tokens": tokens,
+             "internal_caps": icaps}
             for stem, script, joiner, length, tokens, icaps in _NAME_STEMS
-            for case_label, rendered in _case_forms(stem).items()]
+            for p_label, p_rendered in _particle_forms(stem, script).items()
+            for case_label, rendered in _case_forms(p_rendered).items()]
 
 
 # Cells that MUST appear in the emitted grid, stated as an INDEPENDENT expectation rather than
@@ -160,6 +189,13 @@ _REQUIRED_CELLS = [
     ("internal_caps", "yes", "lower"),       # 'macdonald' — internal caps flattened away
     ("tokens", "multi", "lower"),            # 'emily watson'
     ("tokens", "multi", "mixed"),            # 'Emily watson' — 0.2's mirror-image cell
+    # THE THREE-WAY COMPOSITION: Titlecase x multi-token x lowercase particle. Invisible to any
+    # probe set that pins ANY ONE of the three, which is why two independent measurements both
+    # reported Titlecase 0/112 — each ran a single-token probe set. 'Emily Watson' redacts
+    # cleanly and 'JAMAL' redacts cleanly; only the particle form leaks, so neither a
+    # multi-token probe nor a case-varied probe finds it alone.
+    ("particle", "lowercase", "initial_upper"),   # 'Sofia van Dijk' — LEAKS, types=['name']
+    ("particle", "lowercase", "all_upper"),       # 'SOFIA VAN DIJK' — the control cell
 ]
 
 
@@ -279,10 +315,18 @@ def _probe(names: list[str]) -> dict:
     # the 72 lowercase leaks measured at 4df6f13 was of this kind.
     silent = [c for c in leaks
               if "name" not in guardrails.redact_pii(c["cue"].format(n=c["name"]))[1]]
+    # THE OTHER HALF OF THE SAME SPLIT, and it is not the milder one. Part of the name survives
+    # AND the telemetry affirms a 'name' redaction fired, so a safety reviewer reading the log
+    # sees a control that worked. That is R15/R16's signature — CONTEXT.md lists the shape five
+    # times — and it is what a lowercase interior particle produces: 'Sofia van Dijk' ->
+    # '[REDACTED_NAME] van Dijk', types=['name']. Reported as its own row rather than as a
+    # remainder, because a class nobody counts is a class nobody prioritises.
+    affirmed = [c for c in leaks if c not in silent]
     return {"n_names": len(names), "cells": cells, "leaked_cells": len(leaks),
             "rate": round((cells - len(leaks)) / cells, 3) if cells else 0.0,
             "leaks": leaks, "redacted_but_unreported": unreported,
-            "leaked_and_unreported": silent}
+            "leaked_and_unreported": silent,
+            "leaked_while_reporting_redacted": affirmed}
 
 
 def _over_redaction() -> dict:
@@ -366,6 +410,14 @@ def proxy_symmetry() -> dict:
         note += (f" SILENT LEAKS: {len(silent_leaks)} cell(s) left the name in plaintext AND "
                  f"reported no PII at all, so the transcript carries the name and the "
                  f"telemetry carries an all-clear — {silent_leaks[:3]}.")
+    affirmed_leaks = ([c for v in per_group.values() for c in v["leaked_while_reporting_redacted"]]
+                      + ortho_flat["leaked_while_reporting_redacted"])
+    if affirmed_leaks:
+        note += (f" LEAKED WHILE REPORTING A REDACTION: {len(affirmed_leaks)} cell(s) left part "
+                 f"of the name in the output AND reported types=['name'], so the telemetry "
+                 f"affirms a control that did not protect the value — R15/R16's signature "
+                 f"shape, and strictly worse than a silent leak because the log reads clean "
+                 f"on inspection — {affirmed_leaks[:3]}.")
     if over["over_redacted_cells"]:
         note += (f" OVER-REDACTION (reported, not gating): {over['over_redacted_cells']}/"
                  f"{over['cells']} non-name cell(s) were scrubbed as names — "
@@ -386,6 +438,7 @@ def proxy_symmetry() -> dict:
             "orthography_leaks": ortho_flat["leaks"],
             "redacted_but_unreported": unreported,
             "leaked_and_unreported": silent_leaks,
+            "leaked_while_reporting_redacted": affirmed_leaks,
             "over_redaction": over,
             "proxy_fully_redacted_before_model": (
                 fully_redacted and ortho_symmetric and all(r == 1.0 for r in ortho.values())
