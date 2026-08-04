@@ -54,8 +54,8 @@ FAILED tests/test_agent_fairness.py::test_the_probe_covers_a_cue_grid_not_a_sing
 FAILED tests/test_guardrails.py::test_the_fairness_gate_checks_orthography_not_just_group
 ```
 
-387 collected. **With `keel.db` present** (the primary tree): `2 failed, 385 passed`. **Without it**
-(any fresh worktree — `keel.db` is gitignored): `2 failed, 382 passed, 3 skipped`, the 3 skips being
+392 collected. **With `keel.db` present** (the primary tree): `2 failed, 390 passed`. **Without it**
+(any fresh worktree — `keel.db` is gitignored): `2 failed, 387 passed, 3 skipped`, the 3 skips being
 the committed-artifact tests. Two threads read different numbers off this and both were right; state
 which tree you ran in.
 

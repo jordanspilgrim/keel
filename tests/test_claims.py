@@ -67,6 +67,154 @@ def test_docs_state_the_actual_test_count(request):
         assert claims == {actual}, f"{rel} claims {claims}, actual is {actual}"
 
 
+# --- The operating notes, which were outside every gate until now ----------------------
+#
+# `test_docs_state_the_actual_test_count` above reads README.md and docs/testing.html only.
+# `CLAUDE.md` and `.claude/project.md` were hand-maintained and ungated, and went two
+# revisions stale while the gated files stayed current: six of seven live gate assertions
+# across the repo were false, and the ONE that was correct was the only one anybody had
+# deliberately protected. Nothing was watching the rest.
+#
+# They cannot be folded into the rule above. Operating notes must be allowed to quote
+# verbatim terminal output — "2 failed, 385 passed" — because their reader is comparing
+# literal output, and that comparison is the one that failed. So the rule here is different:
+# a pass count is legal, but ONLY inside a full pytest summary that reconciles to collected.
+#
+# WHY THIS IS A TEST AND NOT A sessionfinish HOOK. A test executing inside the session
+# cannot see the run's final tally — `session.testsfailed` is failures SO FAR and depends on
+# collection order. Measured, not assumed. It does not need to: the docs' numbers are
+# DERIVABLE from collected plus the declared failure and skip counts, and collected IS
+# knowable. 387 - 2 - 0 = 385 and 387 - 2 - 3 = 382 both reconcile at collection time, which
+# is also why both `keel.db` configurations can be asserted at once.
+#
+# WHAT THIS STILL CANNOT SEE — stated rather than implied away:
+#
+#   1. That the declared-failing tests ACTUALLY FAIL. **This is not a hypothetical residual.
+#      It becomes false the moment Phase 1 lands.** Phase 1's job is fixing the redaction
+#      leak; when it does, these two tests go green BY DESIGN, and at that instant the docs
+#      assert two failures that do not occur while every assertion below still passes. It is
+#      a tripwire with a date, not a caveat — it must be closed in the same change that fixes
+#      the redactor, and it is queued in Phase 1's preconditions.
+#
+#      NOT closed here with `@pytest.mark.xfail(strict=True)`, which is the standard tool and
+#      would enforce it. An xfail reports as xfailed, so `pytest` would exit 0 while the leak
+#      is still live — destroying the visible RED that is Phase 0's entire deliverable, and
+#      trading a red anyone can see for an expectation only the runner enforces. That is the
+#      shape this repo exists to reject. It is the right tool for Phase 1 to reconsider AFTER
+#      the leak is fixed, when there is no red left to preserve.
+#
+#      The other way to close it is a sessionfinish hook, which does see the final tally. Its
+#      interaction with mutate.py's exit-code-1-specifically kill oracle has to be measured
+#      first: a hook that fails the run without emitting a `FAILED ` line would read as a
+#      SURVIVED mutant rather than a killed one.
+#
+#   2. A claim carrying no number and no node id. "both report green" — the sentence that
+#      started this — has neither. Catching it needs a curated list of phrasings, which is
+#      the curated-vs-generated defect this repo has blocked a branch for.
+#
+# So, plainly: the gate cannot assert that a prose gate-outcome claim is TRUE. It can assert
+# that the docs are internally consistent and anchored to a measured quantity, which is a
+# different and weaker thing. The difference is the residual.
+
+_OPERATING_NOTES = ("CLAUDE.md", ".claude/project.md")
+
+# "387 collected" / "387 tests" / "387 fast, deterministic tests"
+_COUNT = re.compile(r"(\d+)\s+(?:[A-Za-z]+(?:,\s+[A-Za-z]+)*\s+)?(?:tests|collected)\b")
+# pytest's own summary line, the only form in which a pass count may appear
+_TRIPLE = re.compile(r"(\d+)\s+failed,\s*(\d+)\s+passed(?:,\s*(\d+)\s+skipped)?")
+_PASSED = re.compile(r"(\d+)\s+passed")
+_NODE_ID = re.compile(r"tests/[A-Za-z0-9_]+\.py::[A-Za-z0-9_]+")
+
+
+def _full_run_or_skip(request) -> int:
+    """Collected count, or skip. A subset run collects fewer tests, so every assertion that
+    reconciles against the total is meaningless there — and `-k`, a path narrowing and
+    `--collect-only` all produce one."""
+    actual = len(request.session.items)
+    if actual < _declared_test_functions():
+        pytest.skip("subset run — the collected count is not the full suite")
+    return actual
+
+
+def _declared_failures(text: str) -> set[str]:
+    return set(_NODE_ID.findall(text))
+
+
+def test_operating_notes_state_the_actual_collected_count(request):
+    """A: every collected-count mention in the operating notes is the real one. This is the
+    assertion that would have caught `# expect 364 passed` sitting in front of a 387-test
+    suite, in the two files where it actually sat."""
+    actual = _full_run_or_skip(request)
+    for rel in _OPERATING_NOTES:
+        claims = {int(m) for m in _COUNT.findall(_read(rel))}
+        assert claims, f"{rel} states no collected count — it is a gate doc and must"
+        assert claims == {actual}, f"{rel} claims {sorted(claims)} collected, actual is {actual}"
+
+
+def test_operating_notes_never_state_a_bare_pass_count(request):
+    """B: a pass count may appear ONLY inside a full pytest summary. `expect 364 passed` was
+    a bare one, and a bare pass count is unreconcilable by construction — there is nothing to
+    check it against, which is how it stayed wrong through two revisions."""
+    _full_run_or_skip(request)
+    for rel in _OPERATING_NOTES:
+        text = _read(rel)
+        triples = [m.span() for m in _TRIPLE.finditer(text)]
+        for m in _PASSED.finditer(text):
+            inside = any(s <= m.start() and m.end() <= e for s, e in triples)
+            assert inside, (
+                f"{rel} states a bare pass count {m.group(0)!r} outside a pytest summary. "
+                f"Write the full summary ('N failed, M passed[, K skipped]') so it can be "
+                f"reconciled against the collected total, or state no pass count at all.")
+
+
+def test_every_declared_pytest_summary_reconciles_to_collected(request):
+    """C: failed + passed + skipped == collected, for every summary in the operating notes.
+    Both `keel.db` configurations are asserted at once — each is its own summary against the
+    same collected total, so neither has to be privileged as the real one."""
+    actual = _full_run_or_skip(request)
+    for rel in _OPERATING_NOTES:
+        summaries = _TRIPLE.findall(_read(rel))
+        assert summaries, f"{rel} declares no pytest summary — it is a gate doc and must"
+        for failed, passed, skipped in summaries:
+            total = int(failed) + int(passed) + int(skipped or 0)
+            assert total == actual, (
+                f"{rel} declares '{failed} failed, {passed} passed"
+                f"{', ' + skipped + ' skipped' if skipped else ''}' = {total}, "
+                f"but {actual} tests are collected")
+
+
+def test_every_test_named_in_the_operating_notes_is_real(request):
+    """D: a node id the docs name must exist. Catches a doc left pointing at a renamed or
+    deleted test — a stale reference that reads authoritative and resolves to nothing."""
+    actual_ids = {item.nodeid for item in request.session.items}
+    _full_run_or_skip(request)
+    for rel in _OPERATING_NOTES:
+        for node_id in sorted(_declared_failures(_read(rel))):
+            assert node_id in actual_ids, f"{rel} names {node_id}, which is not a collected test"
+
+
+def test_the_operating_notes_agree_on_which_tests_fail(request):
+    """E: the declared-failing set is identical across the operating notes, and every summary's
+    failed-count equals its size.
+
+    This is the only assertion here that catches a claim with no number in it, and it does so
+    without knowing ground truth: staleness arrives by one surface being updated and the others
+    not, so DIVERGENCE is detectable even when truth is not. It does not catch every surface
+    going wrong together — see the residual at the top of this section."""
+    _full_run_or_skip(request)
+    declared = {rel: _declared_failures(_read(rel)) for rel in _OPERATING_NOTES}
+    first, *rest = _OPERATING_NOTES
+    for rel in rest:
+        assert declared[rel] == declared[first], (
+            f"{rel} and {first} disagree about which tests fail: "
+            f"{sorted(declared[rel] ^ declared[first])} is named in one but not the other")
+    for rel in _OPERATING_NOTES:
+        for failed, _passed, _skipped in _TRIPLE.findall(_read(rel)):
+            assert int(failed) == len(declared[rel]), (
+                f"{rel} declares {failed} failing test(s) in its pytest summary but names "
+                f"{len(declared[rel])} by node id: {sorted(declared[rel])}")
+
+
 def test_compliance_metric_not_described_as_audit_coverage():
     """M2: the canonical compliance_coverage checks TRANSCRIPT disclosure only — no
     public surface may describe it as covering audit records (which it never queries)."""
