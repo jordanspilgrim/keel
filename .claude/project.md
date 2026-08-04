@@ -6,7 +6,7 @@ stack: "Python 3.14 + OpenAI SDK; pytest 8; SQLite (keel.db, untracked); FastAPI
 base_ref: origin/main
 worktree_isolation: true
 check_cmd: none # no ruff/mypy/flake8/black/pyright installed or declared — do NOT invent one
-test_cmd: ".venv/bin/python -m pytest tests/ -q" # expect 345 passed
+test_cmd: ".venv/bin/python -m pytest tests/ -q" # expect 364 passed
 definition_of_done: "pytest green AND scripts/mutate.py reports all mutants killed — BUT see 'The gates lie' below. A fix is not done until the gate verifying it has itself been attacked with the MIRROR IMAGE of the defect it exists to catch. Exit bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM / <=2 LOW / 0 unverified."
 deploy_targets: none
 acceptance: none # local POC; there is no deploy and no acceptance environment
@@ -18,7 +18,7 @@ top_tier_model: claude-opus-5
 
 ## The gates lie — read this before trusting any green result
 
-`pytest` (345 passed) and `scripts/mutate.py` ("every catalogued control is genuinely verified")
+`pytest` (364 passed) and `scripts/mutate.py` ("every catalogued control is genuinely verified")
 both currently report green. Pass 17 confirmed **all three** verification mechanisms are themselves
 defective:
 

@@ -19,7 +19,7 @@ hooks). Without it, `.claude/project.md` has nothing to drive. Deliberately not 
    generic "Keel-like POC" example in the harness schema, which names `run_demo.py` as the
    definition of done. It is wrong for this repo.
 
-2. **The gates currently lie.** `pytest` (345 passed) and `scripts/mutate.py` ("every catalogued
+2. **The gates currently lie.** `pytest` (364 passed) and `scripts/mutate.py` ("every catalogued
    control is genuinely verified") both report green, and pass 17 confirmed all three verification
    mechanisms are themselves defective — the orthography grid pins capitalisation, the redaction
    oracle reads only the leading token, and `mutate.py`'s completeness check is circular. Repair the
@@ -32,9 +32,19 @@ hooks). Without it, `.claude/project.md` has nothing to drive. Deliberately not 
 ## Gates
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # expect 345 passed
-.venv/bin/python scripts/mutate.py        # expect all mutants killed
+.venv/bin/python -m pytest tests/ -q      # expect 364 passed
+.venv/bin/python scripts/mutate.py        # expect exit 2, CATALOGUE INCOMPLETE — see below
 ```
+
+**`mutate.py` is EXPECTED to exit 2 right now, and that redness is deliberate.** Phase 0.3
+repaired its completeness check: the expectation now comes from `docs/controls.json`, the
+register of controls this repo publicly claims, instead of from a literal inside `mutate.py`
+whose keys were the mutant names. The repaired check immediately names 12 publicly-claimed
+controls that have no mutant — which is the finding R17 M22 predicted and the old check could
+not see. Adding those mutants is Phase 5 and is blocked on this repair (adding mutants while
+the check was circular would extend the mechanism 0.3 exists to break).
+
+**Do not "fix" this by reverting the gate, deleting register entries, or relaxing the check.**
 
 There is no lint or type gate: ruff, mypy, flake8, black and pyright are neither installed nor
 declared. Do not invent one.

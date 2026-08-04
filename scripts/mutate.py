@@ -40,12 +40,18 @@ wrong in three ways, each of which makes the harness certify a control it never 
 So: a baseline run must be GREEN before any mutant runs; a kill requires exit code 1
 specifically (test failures, not collection errors); and the failing tests are reported so a
 reader can see the kill is attributable rather than incidental.
+
+THE COMPLETENESS GATE runs BEFORE the baseline and exits 2 on any gap. Its expectation is
+`docs/controls.json` — the register of controls this repo publicly claims — NOT anything in
+this file. R17 M22 found the previous in-file expectation was circular and certified a tree
+with four safety controls physically deleted; see the comment above `CLAIMS_PATH`.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -175,36 +181,124 @@ def _baseline_is_green() -> tuple[bool, str]:
     return proc.returncode == 0, tail[0].strip()
 
 
-# Controls this repo PUBLICLY claims to enforce. Every one must have a mutant, or the
-# catalogue is trailing the code — which is how it worked until R16: entries were curated from
-# the PREVIOUS pass's findings, so the newest fix was never covered and each pass found the
-# same "shipped, untested" shape in whatever landed last. Adding a claimed control here without
-# a mutant fails the harness, so the catalogue cannot silently fall behind again.
-CLAIMED_CONTROLS = {
-    "extended_drops_abandoned":          "every terminal offer state is visible to extended()",
-    "ceiling_fallback_upgrades":         "a failure path never pays more than the happy path",
-    "ssn_cue_drops_is":                  "SSN redaction covers the commonest phrasing",
-    "unknown_tool_wording":              "unknown tools are not counted as over-ceiling offers",
-    "fulfillment_insert_or_ignore":      "a durable promise is never a silent no-op",
-    "hash_drops_scope_classifier":       "the guardrail hash covers the scope classifier",
-    "hash_drops_pii_replacement":        "the guardrail hash covers replacements and flags",
-    "close_dangling_batch":              "batch and live persist identical ledger evidence",
-    "resolving_admission_guard":         "no turn is admitted mid-resolve",
-    "db_rebuild_skipped":                "legacy schemas can hold a turn-time pre-write",
-    "strong_cue_inlines_a_broken_token": "the strongest name cue redacts every orthography",
-    "credentials_keep_the_value":        "a credential's VALUE is destroyed, not its label",
-    "name_token_ascii_only":             "name redaction does not depend on orthography",
-    "proxy_probe_single_cue":            "the fairness probe is a cue x name grid, not one phrasing",
-    "proxy_boolean_oracle":              "the fairness oracle is 'name gone', not 'type reported'",
-    "load_signal_assumes_json":          "a non-structured signal row answers None, never raises",
-    "resolve_signal_ignores_run":        "a signal id cannot be dereferenced across runs",
-}
+# THE COMPLETENESS GATE, and why its expectation lives OUTSIDE this file (R17 M22).
+#
+# Until M22 the expectation was a `CLAIMED_CONTROLS` dict right here, whose keys WERE the mutant
+# names, hand-edited a dozen lines from `MUTANTS` in the same commit. Its docstring promised
+# "the catalogue cannot silently fall behind again". What it computed was `{keys} - {names}`
+# over two literals maintained together, so it could only catch one clerical slip — adding to
+# the dict and forgetting the table — and could NOT catch the failure it advertised: a control
+# that ships in code, is claimed in the README, and is absent from BOTH structures is invisible
+# to a check derived from those structures. An expectation derived from the artifact it checks
+# cannot fail for the reason it claims to.
+#
+# M22 REPRODUCED the consequence: a tree with the eval pass-rate floor, the eval coverage floor,
+# the guardrail-health freshness gate and the DISCOUNTS_ENABLED reject block all physically
+# deleted ran a green baseline, killed all 17 mutants, and printed "all mutants killed — every
+# catalogued control is genuinely verified".
+#
+# So the expectation now comes from `docs/controls.json`: a register of the controls this repo
+# PUBLICLY CLAIMS, each entry naming a document that makes the claim and a literal string from
+# it. Three checks, two of them new:
+#
+#   1. every claimed control has a mutant   — the check M22 showed was a tautology
+#   2. every mutant answers to a claim      — the reverse direction, never checked before
+#   3. every claim's anchor still resolves  — so the register cannot drift from the documents
+#      it summarises. The same exact-string discipline the mutant table already applies to
+#      source code, applied to claims: fail loudly when the text moves, rather than quietly
+#      checking nothing.
+#
+# HONEST LIMIT, stated rather than papered over. This makes the check NON-CIRCULAR. It does not
+# make it COMPLETE, and no version of it can: a control implemented in code and claimed NOWHERE
+# is undetectable by any claims-based check, because finding it would mean deriving intent from
+# implementation — the circularity being removed. "Every control we claim has a mutant" is
+# enforceable; "every control the code has, has a mutant" is not. The residual mitigation is
+# process, not code: a control lands with its claim and its mutant in the same change.
+CLAIMS_PATH = os.path.join(ROOT, "docs", "controls.json")
 
 
-def _catalogue_is_complete() -> list[str]:
-    named = {m[0] for m in MUTANTS}
-    return sorted(CLAIMED_CONTROLS - named if isinstance(CLAIMED_CONTROLS, set)
-                  else set(CLAIMED_CONTROLS) - named)
+def load_claims(path: str = "") -> dict[str, dict]:
+    """Read the published-controls register. Raises rather than degrading to an empty
+    expectation — a register that cannot be read must not silently certify everything."""
+    with open(path or CLAIMS_PATH, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    claims: dict[str, dict] = {}
+    for entry in doc["controls"]:
+        cid = entry["id"]
+        if cid in claims:
+            raise ValueError(f"duplicate control id in the register: {cid!r}")
+        if not entry.get("claim"):
+            raise ValueError(f"control {cid!r} states no claim")
+        if not entry.get("published_in"):
+            raise ValueError(f"control {cid!r} cites no published claim")
+        for src in entry["published_in"]:
+            file, anchor = src.get("file"), src.get("anchor")
+            if not isinstance(file, str) or not file.strip():
+                raise ValueError(f"control {cid!r} cites a published claim with no file")
+            # A BLANK ANCHOR IS THE VACUITY HOLE, and it must fail at load rather than at use.
+            # `"" in text` is unconditionally True, so a blank anchor makes check 3 pass for
+            # that row without reading anything — and check 3 is the ONLY check that touches a
+            # document. Checks 1 and 2 compare the register against MUTANTS, so with its anchor
+            # disabled a row is a free-floating hand-maintained literal that nothing verifies:
+            # the M22 shape again, scoped to one entry. It is also exactly what someone types
+            # when they cannot find a crisp string to pin to, and it stays green forever.
+            if not isinstance(anchor, str) or not anchor.strip():
+                raise ValueError(f"control {cid!r} cites {file} with no anchor — a blank "
+                                 f"anchor makes the provenance check vacuous for that claim")
+        claims[cid] = entry
+    return claims
+
+
+def catalogue_gaps(claims: dict[str, dict], mutant_names, root: str = "") -> tuple[
+        list[str], list[str], list[tuple[str, str, str]]]:
+    """(claimed-but-unmutated, mutated-but-unclaimed, claims whose published anchor is gone)."""
+    root = root or ROOT
+    names = set(mutant_names)
+    unmutated = sorted(set(claims) - names)
+    orphans = sorted(names - set(claims))
+    unpublished: list[tuple[str, str, str]] = []
+    for cid in sorted(claims):
+        for src in claims[cid]["published_in"]:
+            try:
+                with open(os.path.join(root, src["file"]), encoding="utf-8") as fh:
+                    text = fh.read()
+            except OSError as exc:
+                unpublished.append((cid, src["file"], f"unreadable ({exc.strerror})"))
+                continue
+            if src["anchor"] not in text:
+                unpublished.append((cid, src["file"], src["anchor"]))
+    return unmutated, orphans, unpublished
+
+
+def catalogue_report(claims: dict[str, dict], mutant_names,
+                     root: str = "") -> tuple[int, list[str]]:
+    """Exit code + lines to print. 0 iff the catalogue answers every published claim."""
+    unmutated, orphans, unpublished = catalogue_gaps(claims, mutant_names, root)
+    out: list[str] = []
+    if unmutated:
+        out.append("CATALOGUE INCOMPLETE — these controls are PUBLICLY CLAIMED but have no "
+                   "mutant, so nothing verifies them:")
+        for cid in unmutated:
+            where = ", ".join(s["file"] for s in claims[cid]["published_in"])
+            out.append(f"    {cid}: {claims[cid]['claim']}   [claimed in {where}]")
+    if orphans:
+        out.append("ORPHAN MUTANT(S) — these answer to no claim in "
+                   f"{os.path.relpath(CLAIMS_PATH, ROOT)}, so killing them certifies nothing "
+                   "this repo actually promised:")
+        for name in orphans:
+            out.append(f"    {name}")
+    if unpublished:
+        out.append("STALE CLAIM PROVENANCE — the register cites text that is no longer in the "
+                   "document, so it has drifted from what the repo publishes:")
+        for cid, path, anchor in unpublished:
+            out.append(f"    {cid}: {path} no longer contains {anchor!r}")
+    if out:
+        out.append("")
+        out.append("Do NOT close this by deleting register entries or by relaxing this check — "
+                   "the register is the independent statement of intent, so a gap here IS the "
+                   "finding. Add the missing mutant, or correct the published claim.")
+        return 2, out
+    return 0, out
 
 
 def _run(mut, keep: bool) -> tuple[str, bool, str]:
@@ -257,13 +351,18 @@ def main() -> int:
             print(f"  {name:32} {rel:22} {control}")
         return 0
 
-    missing = _catalogue_is_complete()
-    if missing:
-        print("CATALOGUE INCOMPLETE — these controls are claimed but have no mutant, so nothing "
-              "verifies them:")
-        for name in missing:
-            print(f"    {name}: {CLAIMED_CONTROLS[name]}")
+    try:
+        claims = load_claims()
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        print(f"CANNOT READ THE PUBLISHED-CONTROLS REGISTER ({CLAIMS_PATH}): {exc}")
+        print("The completeness gate has no independent expectation to check against, so a "
+              "green run below would mean nothing. Fix the register.")
         return 2
+    code, lines = catalogue_report(claims, [m[0] for m in MUTANTS])
+    for line in lines:
+        print(line)
+    if code:
+        return code
 
     ok, base_detail = _baseline_is_green()
     print(f"baseline (unmutated): {base_detail}")

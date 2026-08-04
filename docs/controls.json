@@ -1,0 +1,297 @@
+{
+  "_what_this_is": [
+    "The published-controls register: the controls this repo PUBLICLY CLAIMS to enforce.",
+    "It is a statement of INTENT, written from the published documents, and it is the",
+    "expectation `scripts/mutate.py` checks its mutation catalogue against.",
+    "",
+    "It exists because the expectation used to live inside mutate.py itself, as a dict whose",
+    "keys WERE the mutant names, hand-edited beside the mutant table in the same commit. That",
+    "check could not fail for the reason it advertised: it derived its expectation from the",
+    "artifact it was checking. R17 M22 reproduced the consequence — a tree with four safety",
+    "controls physically deleted ran green, killed all 17 mutants, and printed 'every",
+    "catalogued control is genuinely verified'."
+  ],
+  "_how_to_use_it": [
+    "A control lands with its claim and its mutant in the SAME change: add the entry here,",
+    "add the mutant to scripts/mutate.py, and cite the document that makes the claim public.",
+    "",
+    "`published_in` is a provenance pin, not decoration. Each `anchor` is a literal string",
+    "that must still appear in the named file, so the register cannot drift away from the",
+    "documents it claims to summarise — the same exact-string discipline the mutant table",
+    "already uses for source code, applied to claims.",
+    "",
+    "Do NOT delete an entry to make mutate.py green. An entry with no mutant means a control",
+    "this repo publicly claims has nothing verifying it, which is the finding, not the noise."
+  ],
+  "_honest_limit": [
+    "This makes the completeness check non-circular. It does NOT make it complete, and no",
+    "version of it can be: a control that is implemented in code and claimed NOWHERE is",
+    "undetectable by any claims-based check. 'Every control we claim has a mutant' is",
+    "enforceable. 'Every control the code actually has, has a mutant' is not — that would",
+    "mean deriving intent from implementation, which is the circularity being removed."
+  ],
+
+  "controls": [
+    {
+      "id": "extended_drops_abandoned",
+      "claim": "every terminal offer state is visible to extended()",
+      "published_in": [
+        {
+          "file": "README.md",
+          "anchor": "is the source of truth for outcome, cooldown, economics, and the eval envelope"
+        }
+      ]
+    },
+    {
+      "id": "ceiling_fallback_upgrades",
+      "claim": "a failure path never pays more than the happy path",
+      "published_in": [
+        {
+          "file": "BUILD.md",
+          "anchor": "the ceiling fallback targets the failed commitment"
+        }
+      ]
+    },
+    {
+      "id": "ssn_cue_drops_is",
+      "claim": "SSN redaction covers the commonest phrasing",
+      "published_in": [
+        { "file": "README.md", "anchor": "card/SSN/email/DOB/phone" }
+      ]
+    },
+    {
+      "id": "unknown_tool_wording",
+      "claim": "unknown tools are not counted as over-ceiling offers",
+      "published_in": [
+        { "file": "dashboard/index.html", "anchor": "Over-ceiling offers capped" }
+      ]
+    },
+    {
+      "id": "fulfillment_insert_or_ignore",
+      "claim": "a durable promise is never a silent no-op",
+      "published_in": [
+        {
+          "file": "BUILD.md",
+          "anchor": "A save queues a durable `offer_fulfillment_requests` item"
+        }
+      ]
+    },
+    {
+      "id": "hash_drops_scope_classifier",
+      "claim": "the guardrail hash covers the scope classifier",
+      "published_in": [
+        { "file": "README.md", "anchor": "R13's guardrail edits superseded that hash" }
+      ]
+    },
+    {
+      "id": "hash_drops_pii_replacement",
+      "claim": "the guardrail hash covers replacements and flags",
+      "published_in": [
+        { "file": "README.md", "anchor": "R13's guardrail edits superseded that hash" }
+      ]
+    },
+    {
+      "id": "close_dangling_batch",
+      "claim": "batch and live persist identical ledger evidence",
+      "published_in": [
+        { "file": "BUILD.md", "anchor": "batch and live grade from" }
+      ]
+    },
+    {
+      "id": "resolving_admission_guard",
+      "claim": "no turn is admitted mid-resolve",
+      "published_in": [
+        { "file": "BUILD.md", "anchor": "**Server duplicate-resolve is atomic**" }
+      ]
+    },
+    {
+      "id": "db_rebuild_skipped",
+      "claim": "legacy schemas can hold a turn-time pre-write",
+      "published_in": [
+        {
+          "file": "db.py",
+          "anchor": "Make `offer_fulfillment_requests.conversation_id` nullable on legacy databases."
+        }
+      ]
+    },
+    {
+      "id": "strong_cue_inlines_a_broken_token",
+      "claim": "the strongest name cue redacts every orthography",
+      "published_in": [
+        {
+          "file": "README.md",
+          "anchor": "heuristic self-identified names & street addresses"
+        }
+      ]
+    },
+    {
+      "id": "credentials_keep_the_value",
+      "claim": "a credential's VALUE is destroyed, not its label",
+      "published_in": [
+        {
+          "file": "agent/guardrails.py",
+          "anchor": "CREDENTIALS: scrub the VALUE, not the label"
+        }
+      ]
+    },
+    {
+      "id": "name_token_ascii_only",
+      "claim": "name redaction does not depend on orthography",
+      "published_in": [
+        {
+          "file": "agent/guardrails.py",
+          "anchor": "0% for diacritics, apostrophes, internal caps and non-Latin scripts"
+        }
+      ]
+    },
+    {
+      "id": "proxy_probe_single_cue",
+      "claim": "the fairness probe is a cue x name grid, not one phrasing",
+      "published_in": [
+        { "file": "README.md", "anchor": "an explicit proxy-symmetry check" }
+      ]
+    },
+    {
+      "id": "proxy_boolean_oracle",
+      "claim": "the fairness oracle is 'name gone', not 'type reported'",
+      "published_in": [
+        { "file": "README.md", "anchor": "an explicit proxy-symmetry check" }
+      ]
+    },
+    {
+      "id": "load_signal_assumes_json",
+      "claim": "a non-structured signal row answers None, never raises",
+      "published_in": [
+        { "file": "BUILD.md", "anchor": "persisted + loaded by id" }
+      ]
+    },
+    {
+      "id": "resolve_signal_ignores_run",
+      "claim": "a signal id cannot be dereferenced across runs",
+      "published_in": [
+        { "file": "BUILD.md", "anchor": "persisted + loaded by id" }
+      ]
+    },
+
+    {
+      "id": "eval_pass_rate_floor",
+      "claim": "an eval pass rate below the configured floor forces safe mode",
+      "published_in": [
+        {
+          "file": "BUILD.md",
+          "anchor": "enter safe mode (disclosure + human) if eval health breaches"
+        }
+      ]
+    },
+    {
+      "id": "eval_coverage_floor",
+      "claim": "eval coverage below the configured floor forces safe mode",
+      "published_in": [
+        {
+          "file": "BUILD.md",
+          "anchor": "enter safe mode (disclosure + human) if eval health breaches"
+        }
+      ]
+    },
+    {
+      "id": "guardrail_health_freshness",
+      "claim": "a stale guardrail-health result cannot keep authorizing normal mode",
+      "published_in": [
+        {
+          "file": "BUILD.md",
+          "anchor": "`program_state` gates on version-match + max-age + floor"
+        }
+      ]
+    },
+    {
+      "id": "discounts_enabled_lever",
+      "claim": "with the discount lever off, policy actually rejects offer_discount",
+      "published_in": [
+        {
+          "file": "README.md",
+          "anchor": "only the baseline arm's policy rejects `offer_discount`"
+        },
+        { "file": "BUILD.md", "anchor": "BASELINE (discounts disabled)" }
+      ]
+    },
+
+    {
+      "id": "golden_agreement_floor",
+      "claim": "the golden set gates on judge-vs-human agreement",
+      "published_in": [
+        { "file": "docs/testing.html", "anchor": "golden judge-vs-human agreement" }
+      ]
+    },
+    {
+      "id": "judge_calibration_mae_floor",
+      "claim": "judge calibration is gated at a per-dimension mean error <= 1 point",
+      "published_in": [
+        { "file": "README.md", "anchor": "judge calibration gated at mean error" },
+        { "file": "docs/testing.html", "anchor": "per-dimension MAE 0.5 (floor 1.0)" }
+      ]
+    },
+    {
+      "id": "judge_injection_fixture_held",
+      "claim": "the judge treats the graded conversation as data, not instructions",
+      "published_in": [
+        {
+          "file": "README.md",
+          "anchor": "The judge treats the graded conversation as data, not instructions"
+        },
+        { "file": "docs/testing.html", "anchor": "judge-injection fixture" }
+      ]
+    },
+    {
+      "id": "eval_metrics_current_spec_only",
+      "claim": "every eval metric counts only the current spec, so a superseded history cannot push a rate above 100%",
+      "published_in": [
+        { "file": "README.md", "anchor": "counts only the current spec" }
+      ]
+    },
+    {
+      "id": "canonical_eval_metrics_single_source",
+      "claim": "export.eval_metrics / compliance_coverage are the one definition the dashboard and /api/metrics both read",
+      "published_in": [
+        {
+          "file": "BUILD.md",
+          "anchor": "are the single source of truth for eval pass-rate/coverage"
+        }
+      ]
+    },
+    {
+      "id": "eval_coverage_counts_judge_failures",
+      "claim": "a judge failure is a recorded coverage miss, never a silent drop",
+      "published_in": [
+        { "file": "BUILD.md", "anchor": "coverage reported honestly" }
+      ]
+    },
+    {
+      "id": "margin_adjusted_metric_cannot_be_gamed",
+      "claim": "the north-star metric is margin-adjusted precisely so it cannot be gamed by raw save count",
+      "published_in": [
+        {
+          "file": "docs/keel-build-handoff.md",
+          "anchor": "optimize a metric it can't game (margin-adjusted save rate, not raw)"
+        },
+        {
+          "file": "docs/retention-flywheel-plan.md",
+          "anchor": "optimized on a metric it cannot game (margin-adjusted save rate, never vanity numbers)"
+        },
+        {
+          "file": "README.md",
+          "anchor": "the margin-adjusted north star charges a pause at `PAUSE_MARGIN_FRACTION` (0.07) of price"
+        }
+      ]
+    },
+    {
+      "id": "demo_requires_paired_cohort",
+      "claim": "the money demo requires a matched paired cohort from an identical starting-state hash",
+      "published_in": [
+        {
+          "file": "README.md",
+          "anchor": "The demo requires a matched paired cohort from an identical starting-state hash"
+        }
+      ]
+    }
+  ]
+}
