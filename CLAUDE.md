@@ -19,11 +19,13 @@ hooks). Without it, `.claude/project.md` has nothing to drive. Deliberately not 
    generic "Keel-like POC" example in the harness schema, which names `run_demo.py` as the
    definition of done. It is wrong for this repo.
 
-2. **The gates currently lie.** `pytest` (364 passed) and `scripts/mutate.py` ("every catalogued
-   control is genuinely verified") both report green, and pass 17 confirmed all three verification
-   mechanisms are themselves defective — the orthography grid pins capitalisation, the redaction
-   oracle reads only the leading token, and `mutate.py`'s completeness check is circular. Repair the
-   verifier before trusting anything it verified.
+2. **The gates were lying. They are now RED on purpose.** Pass 17 confirmed all three verification
+   mechanisms were themselves defective — the orthography grid pinned capitalisation, the redaction
+   oracle read only the leading token, and `mutate.py`'s completeness check was circular. All three
+   are repaired (Phase 0, merged). Repairing them is what turned both gates red: they now fail
+   against defects that were always there and that they previously could not see. **A green result
+   from either gate today means something was reverted, not that the work is done.** See *Gates*
+   below before acting on a failure.
 
 3. **Verify the artifact, not the report.** The repo's most persistent defect class is a control
    that reports success while not providing the property. Check *is the secret gone*, never *did
@@ -32,9 +34,33 @@ hooks). Without it, `.claude/project.md` has nothing to drive. Deliberately not 
 ## Gates
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # expect 364 passed
+.venv/bin/python -m pytest tests/ -q      # expect exit 1, 2 FAILED — see below
 .venv/bin/python scripts/mutate.py        # expect exit 2, CATALOGUE INCOMPLETE — see below
 ```
+
+**BOTH GATES ARE EXPECTED TO BE RED RIGHT NOW. BOTH REDS ARE THE DELIVERABLE, NOT A REGRESSION.**
+A repaired gate has to be shown FAILING against the defect it exists to catch, before that defect
+is fixed — otherwise you never learn whether it would have caught anything. So Phase 0 repaired the
+gates and deliberately stopped there; Phase 1 fixes the code underneath them and turns them green.
+
+**`pytest` is EXPECTED to fail on exactly two tests.** Phase 0.1 unpinned the fairness grid's case
+axis and 0.2 made the redaction oracle check every token instead of the leading one. Both repaired
+gates now fail against the live redactor, which still leaks a lowercase self-identified name
+(`"my name is emily"` is not redacted, and reports `types=[]`). **That failure is the proof the
+repair works.** The two, by name:
+
+```
+FAILED tests/test_agent_fairness.py::test_the_probe_covers_a_cue_grid_not_a_single_phrasing
+FAILED tests/test_guardrails.py::test_the_fairness_gate_checks_orthography_not_just_group
+```
+
+387 collected. **With `keel.db` present** (the primary tree): `2 failed, 385 passed`. **Without it**
+(any fresh worktree — `keel.db` is gitignored): `2 failed, 382 passed, 3 skipped`, the 3 skips being
+the committed-artifact tests. Two threads read different numbers off this and both were right; state
+which tree you ran in.
+
+**Do not "fix" this by reverting the fairness gate, weakening the grid, skipping the two tests, or
+relaxing their assertions.** The counterpart code fix is Phase 1 (`agent/guardrails.py`).
 
 **`mutate.py` is EXPECTED to exit 2 right now, and that redness is deliberate.** Phase 0.3
 repaired its completeness check: the expectation now comes from `docs/controls.json`, the
