@@ -66,16 +66,24 @@ remains, by name:
 FAILED tests/test_guardrails.py::test_the_fairness_gate_checks_orthography_not_just_group
 ```
 
-**Phase 1 closed the single-token half of the leak, so the group-axis gate
-(`test_the_probe_covers_a_cue_grid_not_a_single_phrasing`) is now GREEN and only the orthography
-gate remains red.** The residual is 120 of 408 cells and every one is MULTI-TOKEN: the
-continuation-token walk still requires uppercase on tokens 2+, so `Emily watson` and
-`Sofia van Dijk` leave part of the name in the transcript. Single-token leaks are 0 across every
-cue. That gate asserts every orthography rate == 1.0, so it stays red until the continuation walk
-is fixed — **a still-red gate here is the known residual, not evidence a fix failed.**
+**The group-axis gate (`test_the_probe_covers_a_cue_grid_not_a_single_phrasing`) is GREEN and
+only the orthography gate remains red.** Phase 1 closed the single-token leak; Phase 2 closed the
+continuation-token walk, taking the residual 120 -> **12 of 408 cells**.
 
-457 collected. **With `keel.db` present** (the primary tree): `1 failed, 456 passed`.
-**Without it** (any fresh worktree — `keel.db` is gitignored): `1 failed, 453 passed, 3 skipped`, the 3 skips being the committed-artifact tests. Two threads read different numbers off
+**All 12 are the same shape: an all-lowercase MULTI-token name after a WEAK cue** — "Hi, this is
+emily watson." The owner ruled that weak cues keep the uppercase requirement, and pattern (a2)
+applies it to token 1, so nothing redacts. Note the weak tier is split on this already:
+`_WEAK_CUE_SINGLE_NAME` scrubs a SINGLE lowercase token after "this is" with no case test, so
+"this is emily" is redacted while "this is emily watson" is not. The 12 cells are exactly that
+gap. **Measured cost of closing it** by making (a2) case-blind: leaked 12 -> 0, every rate 1.0,
+gate GREEN, and 2 of 9 weak-cue prose probes damaged. That is an owner decision, not an
+engineering one.
+
+That gate asserts every orthography rate == 1.0, so it stays red until the owner rules —
+**a still-red gate here is the known residual, not evidence a fix failed.**
+
+494 collected. **With `keel.db` present** (the primary tree): `1 failed, 493 passed`.
+**Without it** (any fresh worktree — `keel.db` is gitignored): `1 failed, 490 passed, 3 skipped`, the 3 skips being the committed-artifact tests. Two threads read different numbers off
 this and both were right; state which tree you ran in.
 
 **Do not "fix" this by reverting the fairness gate, weakening the grid, skipping the test, or

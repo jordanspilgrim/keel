@@ -6,7 +6,7 @@ stack: "Python 3.14 + OpenAI SDK; pytest 8; SQLite (keel.db, untracked); FastAPI
 base_ref: origin/main
 worktree_isolation: true
 check_cmd: none # no ruff/mypy/flake8/black/pyright installed or declared — do NOT invent one
-test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 457 collected, 1 named fairness failure (the multi-token residual) — see 'The gate state, and why' below. Do NOT revert the gate to make it green.
+test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 494 collected, 1 named fairness failure (the multi-token residual) — see 'The gate state, and why' below. Do NOT revert the gate to make it green.
 definition_of_done: "pytest green AND scripts/mutate.py reports all mutants killed. scripts/mutate.py IS now green and it was earned — 30 of 30 killed, each by a failure the baseline did not have. pytest is still DELIBERATELY RED on one test (see 'The gate state, and why' below), so a green pytest right now would mean a gate was reverted, not that the work is done. A fix is not done until the gate verifying it has itself been attacked with the MIRROR IMAGE of the defect it exists to catch. Exit bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM / <=2 LOW / 0 unverified."
 deploy_targets: none
 acceptance: none # local POC; there is no deploy and no acceptance environment
@@ -33,17 +33,20 @@ the defect it exists to catch, before that defect is fixed — otherwise you onl
 green afterwards, which is the position this whole exercise exists to escape. So Phase 0 stopped
 there deliberately, and Phase 1 fixes the code underneath.
 
-- **`pytest`** — 457 collected. `1 failed, 456 passed` with `keel.db` present;
-  `1 failed, 453 passed, 3 skipped` without it (any fresh worktree — `keel.db` is
+- **`pytest`** — 494 collected. `1 failed, 493 passed` with `keel.db` present;
+  `1 failed, 490 passed, 3 skipped` without it (any fresh worktree — `keel.db` is
   gitignored, and the 3 skips are the committed-artifact tests). The one failure is
   `tests/test_guardrails.py::test_the_fairness_gate_checks_orthography_not_just_group`.
   Phase 1 closed the single-token half of the leak — a lowercase self-identified name is now
   redacted after a declaration or address cue — and the group-axis gate went green on its own.
-  The 120 remaining cells are all MULTI-TOKEN: the continuation-token walk still requires
-  uppercase on tokens 2+, so `Emily watson` and `Sofia van Dijk` leave part of the name in the
-  transcript under a `types=['name']` all-clear. That gate demands every rate == 1.0, so it stays
-  red until the continuation walk is fixed. Two open-class over-redaction residuals are asserted
-  as current behaviour in `tests/test_redaction_control.py` so they are counted, not described.
+  Phase 2 then closed the continuation-token walk: `Emily watson` and `Sofia van Dijk` are now
+  fully redacted, and the residual is **12 of 408 cells**, down from 120. All 12 are an
+  all-lowercase MULTI-token name after a WEAK cue, where the owner ruled the uppercase
+  requirement stays. Measured cost of closing them: leaked 12 -> 0 and every rate 1.0, against
+  2 of 9 weak-cue prose probes damaged — an owner decision. That gate demands every rate == 1.0,
+  so it stays red until then. The weak-cue residual and two open-class over-redaction residuals
+  are asserted as current behaviour in `tests/test_redaction_control.py` so they are counted,
+  not described.
 - **`scripts/mutate.py`** — exits 0: **30 KILLED · 0 SURVIVED · 0 ANCHOR MISS** of 30
   mutants, measured on this tree. Its expectation comes from `docs/controls.json` rather than from
   a literal inside `mutate.py` whose keys were the mutant names, so the catalogue is complete

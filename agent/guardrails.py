@@ -79,6 +79,13 @@ def guardrail_version() -> str:
         repr(sorted(getattr(p, "pattern", p) for p in _JAILBREAK_PATTERNS)),
         repr(_JAILBREAK_RX.flags),
         repr(sorted(_NOT_A_NAME_AFTER_CUE)),
+        # _NOT_A_NAME_IN_PROSE and _NAME_INTRO_MARKERS decide whether a probe is caught just as
+        # directly as the list above, and neither was hashed when the first was added — emptying
+        # _NOT_A_NAME_IN_PROSE would have changed what redacts while leaving the version
+        # identical, so the kill switch would have gone on reporting a stale catch rate as
+        # current. That is a FOURTH instance of the exact class this function's docstring
+        # enumerates three of, introduced by the change that added the list. Hashed now.
+        repr(sorted(_NOT_A_NAME_IN_PROSE)), repr(sorted(_NAME_INTRO_MARKERS)),
         _STREET, _WEAK_CUE_SINGLE_NAME.pattern, _SENSITIVE_TERMS.pattern,
         config.MINI_MODEL,
         # The SCOPE classifier was missing, and it is not a minor input: 4 of the 14 seeded
@@ -173,6 +180,21 @@ not never nor none nothing every each all any some both few many much more most
 """.split())
 
 
+# Words this table itself uses as NAME-INTRODUCTION MARKERS — see pattern (c) below, which
+# recognises "Emily Watson here" and "Bob speaking" by looking for exactly these.
+#
+# A token the module treats as a CUE cannot also be part of the name that cue introduces, so the
+# walk has to stop on them. Relaxing the continuation rule made that live: "my name is Emily
+# here" consumed `here` and "this is Emily speaking" consumed `speaking`, both of which are
+# name-introduction phrasings whose marker was being eaten as a surname.
+#
+# The justification is NOT that these are function words — `speaking` is a participle and would
+# have no business in a closed grammatical class. It is that this file already assigns them a
+# role, so the single definition below is shared with pattern (c) rather than duplicated into
+# it: add a marker in one place and both the pattern and the walk follow.
+_NAME_INTRO_MARKERS = frozenset({"here", "speaking"})
+
+
 def _redact_leading_name(m: "re.Match", *, require_upper_on_first: bool) -> str:
     """Redact the LEADING name-shaped run of the captured phrase, keeping the rest.
 
@@ -183,17 +205,24 @@ def _redact_leading_name(m: "re.Match", *, require_upper_on_first: bool) -> str:
     Smith" — redact exactly that, and hand back the remainder untouched.
 
     `require_upper_on_first` IS THE CUE-STRENGTH SPLIT, and it is the only difference between
-    the two callbacks below. After the STRONGEST cues ("my name is X", "i'm called X") no
-    competing reading exists in English, so the first token is a name whatever its case and the
-    uppercase test buys nothing while costing the entire lowercase population — 72 of 96 probe
-    cells leaking in plaintext, and 72 of those 72 reporting `types == []`, so the transcript
-    carried the name and the telemetry carried an all-clear. After the MEDIUM cues ("call me X")
-    the test is load-bearing: "call me Bob" and "call me later" are both ordinary sentences and
-    capitalisation is how English marks the difference.
+    the two callbacks below. After a self-identification cue — DECLARATION ("my name is X") or
+    ADDRESS ("call me X") — the first token is a name whatever its case, and the uppercase test
+    bought nothing while costing the entire lowercase population: 72 of 96 probe cells leaking
+    in plaintext, 72 of those 72 reporting `types == []`, so the transcript carried the name and
+    the telemetry carried an all-clear. WEAK cues ("it's X", "X here") keep the requirement,
+    because "it's Friday" and "Monday here" are ordinary sentences.
 
-    THE REQUIREMENT IS DROPPED ON THE FIRST TOKEN ONLY. Continuation tokens still need it, or
-    the run has no boundary: "my name is emily and I want to cancel." would consume "emily and
-    I". Case is what bounds the run once the cue has established that a name starts here.
+    (An earlier version of this docstring said the requirement was kept for "call me X". That
+    stopped being true when the owner extended the drop to ADDRESS cues, and the sentence
+    survived the change — a stale claim about behaviour, in the file where those are treated as
+    defects. Corrected here.)
+
+    CASE IS NOT WHAT BOUNDS THE RUN — the word list is, at every position. Requiring uppercase on
+    tokens 2+ looked like the boundary and was actually a second leak: it stopped at the first
+    lowercase token, so "Emily watson" kept the surname, "Sofia van Dijk" kept two thirds of the
+    name, and both reported `types=['name']` while doing it. 120 of 408 grid cells, one mechanism,
+    appearing once per cue. The bound is `_NOT_A_NAME_IN_PROSE`, applied uniformly: "and" stops
+    the run wherever it appears, "watson" and "van" never do.
 
     Uppercase is decided by Python's Unicode-aware str.isupper(), not a regex class: `re` has
     no \\p{Lu}, and an ASCII [A-Z] is precisely the bug this replaced (100% redaction for ASCII
@@ -210,23 +239,49 @@ def _redact_leading_name(m: "re.Match", *, require_upper_on_first: bool) -> str:
             kept.append(tok)
             continue
         head = tok.lstrip("'’-")
-        if not head or head.lower() in _NOT_A_NAME_AFTER_CUE:
+        if not head:
             break
-        if (idx > 0 or require_upper_on_first) and not head[0].isupper():
-            break
-        # THE CASE-BLIND PATH ONLY. Dropping the uppercase test removes the only signal that a
-        # name follows the cue, so "my name is on the account" redacted "on". Measured: 7 of 8
-        # ordinary prose probes damaged, all 8 clean beforehand. The cue is genuinely
-        # unambiguous — it is the CAPTURE swallowing prose — so the bound belongs here, on what
-        # a name token can be, not on the cue taxonomy.
-        #
-        # GATED ON `not isupper()` DELIBERATELY. A capitalised token is never tested against
-        # this list, so "my name is An" / "my name is He" / "my name is So" still redact. Only a
-        # LOWERCASE token that is also a closed-class English function word is declined. Without
-        # that gate this would be the name-allowlist bug again: a word list deciding whose name
-        # gets protected, and An, He, So, No, Li and Ng are all real names.
-        if not head[0].isupper() and head.lower() in _NOT_A_NAME_IN_PROSE:
-            break
+        upper, low = head[0].isupper(), head.lower()
+        if idx == 0:
+            # FIRST TOKEN. The cue establishes that a name starts here; the tier decides whether
+            # case is still required.
+            #
+            # _NOT_A_NAME_AFTER_CUE IS CONSULTED CASE-INSENSITIVELY HERE, AND THAT IS A KNOWN
+            # DEFECT LEFT UNTOUCHED ON PURPOSE. The list contains `in` and `no`, so "my name is
+            # In" and "my name is No" go unredacted — a word list deciding whose name gets
+            # protected, which is the shape this module has removed twice. It is a first-token
+            # finding logged separately by review, and fixing it here would blur what this
+            # change certifies. It is not inherited into the continuation branch below.
+            if low in _NOT_A_NAME_AFTER_CUE:
+                break
+            if require_upper_on_first and not upper:
+                break
+            # GATED ON `not upper` DELIBERATELY. A capitalised token is never tested against the
+            # prose list, so "my name is An" / "He" / "So" still redact. Only a LOWERCASE token
+            # that is also a closed-class function word is declined — otherwise dropping the
+            # case test lets the capture swallow prose ("my name is on the account" redacted
+            # "on"; 7 of 8 realistic probes damaged before this bound existed).
+            if not upper and low in _NOT_A_NAME_IN_PROSE:
+                break
+        else:
+            # CONTINUATION TOKEN. No case requirement — demanding uppercase here WAS the second
+            # leak: the run stopped at the first lowercase token, so "Emily watson" kept the
+            # surname and "Sofia van Dijk" kept two thirds of the name, both while reporting
+            # `types=['name']`. 120 of 408 cells, one mechanism, once per cue.
+            #
+            # BOTH lists are gated on `not upper` at this position, including
+            # _NOT_A_NAME_AFTER_CUE. Reusing the first-token treatment would have carried the
+            # In/No defect into a surname position and truncated "Emily In" or "Sofia No" —
+            # the same defect, newly introduced rather than inherited. The asymmetry between
+            # the two branches is deliberate: DO NOT tidy it into consistency by dropping the
+            # `upper` guard here, that widens a known bug rather than closing one.
+            #
+            # A lowercase continuation token is far more often part of a name than prose —
+            # `van Dijk`, `de García`, `von Braun` — which is why the particles are absent from
+            # both lists and why absence, not care, is what protects them.
+            if not upper and (low in _NOT_A_NAME_AFTER_CUE or low in _NOT_A_NAME_IN_PROSE
+                              or low in _NAME_INTRO_MARKERS):
+                break
         kept.append(tok)
     name = "".join(kept).rstrip()
     if not name:
@@ -318,7 +373,11 @@ _PII_PATTERNS = [
     (re.compile(r"\b(?i:(it's|it is))\s+((?:%s)(?:\s+(?:%s)){1,2})" % (_NAME_TOK, _NAME_TOK)),
      _sub_name_min2, "name"),
     #  (c) "<First Last> here/speaking" (name-first introduction)
-    (re.compile(r"\b((?:%s)\s+(?:%s))(?=\s+(?:here|speaking)\b)" % (_NAME_TOK, _NAME_TOK)),
+    #  The markers come from _NAME_INTRO_MARKERS, shared with the token walk, so a marker added
+    #  here also stops the walk consuming it as a surname. sorted() keeps the pattern — and
+    #  therefore guardrail_version() — stable across runs.
+    (re.compile(r"\b((?:%s)\s+(?:%s))(?=\s+(?:%s)\b)"
+                % (_NAME_TOK, _NAME_TOK, "|".join(sorted(_NAME_INTRO_MARKERS)))),
      _sub_name_min2, "name"),
     #  (d) a sign-off "- First Last" at line end — but NOT a common closing ("- Best Regards",
     #  "- Many Thanks", "- Kind Regards", "- Take Care"), which are not names.

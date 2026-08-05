@@ -172,3 +172,83 @@ def test_weak_cues_and_ordinary_prose_are_not_scrubbed(text):
     out, types = guardrails.redact_pii(text)
     assert out == text, f"over-redacted: {out!r}"
     assert "name" not in types
+
+
+# --- the CONTINUATION-TOKEN walk -------------------------------------------------
+# Requiring uppercase on tokens 2+ was a second leak hiding behind the first. It stopped the
+# run at the first lowercase token, so a surname typed in lowercase, and every name carrying a
+# particle, stayed in the transcript — 120 of 408 grid cells, one mechanism appearing once per
+# cue. Worse than the token-1 family: 110 of those 120 reported `types=['name']` while doing it,
+# so the telemetry affirmed a control that had protected two thirds of a name at best.
+
+
+@pytest.mark.parametrize("name", [
+    "Emily Watson",        # both capitalised — the case that always worked
+    "Emily watson",        # MIXED: given name scrubbed, surname survived, types=['name']
+    "emily watson",        # all lowercase
+    "EMILY WATSON",
+    "Sofia van Dijk",      # lowercase interior particle, canonical Titlecase otherwise
+    "José de García",
+    "Владимир фон Петров",
+    "O'Brien Kelly",
+])
+@pytest.mark.parametrize("cue", ["my name is {n} and I want to cancel.",
+                                 "call me {n} please.",
+                                 "they call me {n}."])
+def test_no_token_of_a_multi_token_name_survives(name, cue):
+    out, types = guardrails.redact_pii(cue.format(n=name))
+    assert not [t for t in name.split() if t in out], f"survivors in {out!r}"
+    assert "name" in types
+
+
+@pytest.mark.parametrize("text,kept", [
+    ("my name is Emily and I want to cancel.", "and I want to cancel."),
+    ("my name is John Smith and I want to cancel.", "and I want to cancel."),
+    ("call me Bob back", "back"),
+    ("my name is Emily here", "here"),
+    ("this is Emily speaking", "speaking"),
+])
+def test_the_run_still_stops_at_prose(text, kept):
+    """Relaxing the continuation rule must not let the run eat the sentence. `here` and
+    `speaking` are in _NAME_INTRO_MARKERS because pattern (c) uses them as cues — a token this
+    table treats as a name-introduction marker cannot also be part of the name it introduces."""
+    out, _ = guardrails.redact_pii(text)
+    assert "[REDACTED_NAME]" in out, f"the name was not redacted at all: {out!r}"
+    assert out.endswith(kept), f"the run swallowed prose: {out!r}"
+
+
+@pytest.mark.parametrize("name", ["Emily In", "Sofia No", "Emily Van", "Emily De", "Emily An"])
+def test_a_CAPITALISED_continuation_token_is_never_tested_against_a_word_list(name):
+    """_NOT_A_NAME_AFTER_CUE is consulted case-INSENSITIVELY at token 1 and contains `in` and
+    `no`, so "my name is In" leaks today — a word list deciding whose name is protected. That is
+    a pre-existing first-token defect logged elsewhere. It must NOT be inherited into a surname
+    position: both lists are gated on `not isupper()` in the continuation branch, so a
+    capitalised surname is never tested against either."""
+    out, types = guardrails.redact_pii(f"my name is {name} and I want to cancel.")
+    assert not [t for t in name.split() if t in out], f"a word list truncated a name: {out!r}"
+    assert "name" in types
+
+
+@pytest.mark.parametrize("name", ["emily watson", "sofia van dijk", "владимир фон петров"])
+def test_the_WEAK_CUE_RESIDUAL_is_STILL_OPEN(name):
+    """A KNOWN, OWNER-RULED RESIDUAL — asserted so it is counted, not described.
+
+    12 of 408 grid cells still leak, all of them an all-lowercase MULTI-token name after a WEAK
+    cue. The owner ruled that weak cues keep the uppercase requirement, and pattern (a2) applies
+    it to token 1, so nothing redacts at all here.
+
+    Note the WEAK tier is internally split on this: _WEAK_CUE_SINGLE_NAME already redacts a
+    SINGLE lowercase token after "this is" with no case test, so "this is emily" is scrubbed
+    while "this is emily watson" is not. These 12 cells are exactly the gap between those two
+    halves. Measured cost of closing it by making (a2) case-blind: leaked 12 -> 0, every
+    orthography rate 1.0, and 2 of 9 weak-cue prose probes damaged
+    ("this is completely unacceptable" -> "this is [REDACTED_NAME]"). That is a product
+    decision, not an engineering one.
+
+    If this test starts failing the residual has been closed — update it and the note in
+    tests/test_guardrails.py's orthography gate, which is red because of these 12."""
+    text = f"Hi, this is {name}. I want to cancel."
+    out, _types = guardrails.redact_pii(text)
+    assert out == text, (
+        f"the weak-cue residual is CLOSED ({out!r}) — the orthography gate should now be green; "
+        f"update this test")
