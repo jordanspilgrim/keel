@@ -60,6 +60,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -260,7 +261,64 @@ def _failing_tests(out: str) -> list[str]:
     return ids
 
 
-def _baseline() -> tuple[bool, set[str], str]:
+def _failure_asserts(out: str) -> dict[str, str]:
+    """{test name: the SOURCE LINE of the assert that failed}, from pytest's FAILURES blocks.
+
+    WHY THE SOURCE LINE AND NOT THE MESSAGE OR THE LINE NUMBER. Both alternatives are
+    unstable, measured rather than assumed:
+      * line numbers move on any edit above them, so an unrelated change would read as a
+        changed failure reason;
+      * the `E` message can embed computed values — the orthography failure carries a dict of
+        redaction rates that shifts whenever the redactor does.
+    The `>` line is the assert as written. It changes when a DIFFERENT assert fails, which is
+    exactly the signal, and not otherwise.
+
+    Keyed by test name because the FAILURES header carries the name, not the node id. A name
+    appearing twice among the failures is dropped rather than guessed at: an unattributable
+    signature must never manufacture a kill.
+    """
+    sigs: dict[str, str] = {}
+    seen: set[str] = set()
+    current = None
+    for ln in out.splitlines():
+        header = re.match(r"^_{3,}\s+(\S.*?)\s+_{3,}$", ln)
+        if header:
+            current = header.group(1)
+            if current in seen:
+                sigs.pop(current, None)          # ambiguous name — refuse to attribute
+                current = None
+            seen.add(header.group(1))
+            continue
+        if current and current not in sigs and ln.startswith("> "):
+            sigs[current] = ln[1:].strip()
+    return sigs
+
+
+def _changed_reason(failing: set[str], base_failing: set[str],
+                    asserts: dict[str, str], base_asserts: dict[str, str]) -> set[str]:
+    """Tests failing in BOTH runs whose failing assert is not the same one.
+
+    THE HOLE THIS CLOSES. Comparing node ids alone, a mutant whose only guarding test is
+    already failing at baseline reports SURVIVED whether or not the control is guarded — the
+    id is unchanged and a completely different failure reason is invisible. Measured live:
+    `proxy_probe_single_cue` on the pre-Phase-1 tree failed at
+    `assert v["leaked_cells"] == 0` at baseline and at `assert len(af._PROBE_CUES) >= 4`
+    under mutation. Same node id, guard firing, reported SURVIVED.
+
+    A false SURVIVED is the safe direction — it understates coverage and can never certify a
+    control — but it is still a false report, and it reads as "no test kills this" when the
+    truth is "its test is busy failing at something else".
+    """
+    changed = set()
+    for node in failing & base_failing:
+        name = node.split("::")[-1]
+        before, after = base_asserts.get(name), asserts.get(name)
+        if before is not None and after is not None and before != after:
+            changed.add(node)
+    return changed
+
+
+def _baseline() -> tuple[bool, set[str], dict[str, str], str]:
     """Record the unmutated tree's FAILING SET, and whether it is usable as a reference.
 
     THIS USED TO REQUIRE A GREEN BASELINE, and that was a proxy standing in for the property.
@@ -283,7 +341,7 @@ def _baseline() -> tuple[bool, set[str], str]:
     red tree the harness still works; and in both cases every kill is attributable BY
     CONSTRUCTION rather than by assuming a clean baseline made it so.
 
-    Returns (usable, failing_set, detail). Not usable if pytest could not run the suite at all
+    Returns (usable, failing_set, failing_asserts, detail). Not usable if pytest could not run
     (a collection error tells us nothing about any control), or if the failing set is UNSTABLE
     across two runs — a flaky test would otherwise masquerade as a kill for whichever mutant it
     happened to fire under.
@@ -300,13 +358,17 @@ def _baseline() -> tuple[bool, set[str], str]:
 
     for proc in runs:
         if proc.returncode not in (0, 1):
-            return False, set(), (f"{detail}  [pytest exit {proc.returncode} — collection/usage "
-                                  f"error, the suite did not run]")
+            return False, set(), {}, (f"{detail}  [pytest exit {proc.returncode} — collection/usage "
+                                      f"error, the suite did not run]")
     if sets[0] != sets[1]:
         drift = sorted(sets[0] ^ sets[1])
-        return False, set(), (f"{detail}  [UNSTABLE across two runs — {len(drift)} test(s) differ: "
-                              f"{', '.join(t.split('::')[-1] for t in drift[:3])}]")
-    return True, sets[0], detail
+        return False, set(), {}, (f"{detail}  [UNSTABLE across two runs — {len(drift)} test(s) "
+                                  f"differ: {', '.join(t.split('::')[-1] for t in drift[:3])}]")
+    a0, a1 = (_failure_asserts(p.stdout) for p in runs)
+    if a0 != a1:
+        return False, set(), {}, (f"{detail}  [UNSTABLE failing asserts across two runs — the "
+                                  f"changed-reason check would be non-deterministic]")
+    return True, sets[0], a0, detail
 
 
 # THE COMPLETENESS GATE, and why its expectation lives OUTSIDE this file (R17 M22).
@@ -429,7 +491,8 @@ def catalogue_report(claims: dict[str, dict], mutant_names,
     return 0, out
 
 
-def _run(mut, keep: bool, baseline_failing: set[str] = frozenset()) -> tuple[str, bool, str]:
+def _run(mut, keep: bool, baseline_failing: set[str] = frozenset(),
+         baseline_asserts: dict[str, str] | None = None) -> tuple[str, bool, str]:
     name, rel, find, repl, control = mut
     tmp = tempfile.mkdtemp(prefix=f"keel-mut-{name}-")
     tree = os.path.join(tmp, "tree")
@@ -454,22 +517,33 @@ def _run(mut, keep: bool, baseline_failing: set[str] = frozenset()) -> tuple[str
     # `bool(failing)`; on a red tree it is what stops the pre-existing failures certifying
     # every mutant. See _baseline() for the measurement that forced this.
     new_failures = failing - baseline_failing
+    # ...and tests that were ALREADY failing but are now failing at a DIFFERENT assert. Without
+    # this, a control whose only guard is already red reports SURVIVED however well it is guarded.
+    changed = _changed_reason(failing, baseline_failing, _failure_asserts(proc.stdout),
+                              baseline_asserts or {})
     # Exit code 1 means TEST FAILURES. 2 is a collection/usage error, 3 internal, 4 usage,
     # 5 no tests collected — a mutant that breaks the import runs zero tests and must not be
     # credited with a kill.
-    killed = proc.returncode == 1 and bool(new_failures)
+    killed = proc.returncode == 1 and bool(new_failures or changed)
     repaired = baseline_failing - failing
     if proc.returncode not in (0, 1):
         detail = f"NOT A KILL — pytest exit {proc.returncode} (collection/import error, zero tests ran)"
-    elif killed:
+    elif killed and new_failures:
         shown = ", ".join(t.split("::")[-1] for t in sorted(new_failures)[:3])
         detail = (f"{len(new_failures)} NEW test failure(s): {shown}"
                   f"{' …' if len(new_failures) > 3 else ''}")
+        if changed:
+            detail += f"  (+{len(changed)} already-failing test(s) now failing at a new assert)"
+    elif killed:
+        shown = ", ".join(t.split("::")[-1] for t in sorted(changed)[:2])
+        detail = (f"{len(changed)} already-failing test(s) now fail at a DIFFERENT assert: {shown}"
+                  f" — the guard fired inside a test the baseline had already reddened")
     else:
         tail = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()][-1:] or [""]
         detail = tail[0].strip()
         if failing:
-            detail += f"  [all {len(failing)} failure(s) were already failing at baseline]"
+            detail += (f"  [all {len(failing)} failure(s) were already failing at baseline, at the "
+                       f"same assert]")
     if repaired:
         # A mutation that makes a baseline failure PASS is not a kill and is worth surfacing:
         # it means the mutated line is implicated in that failure.
@@ -506,7 +580,7 @@ def main() -> int:
     if code:
         return code
 
-    usable, base_failing, base_detail = _baseline()
+    usable, base_failing, base_asserts, base_detail = _baseline()
     print(f"baseline (unmutated): {base_detail}")
     if not usable:
         print("\nABORTING — the baseline is not usable as a reference, so nothing below could be "
@@ -522,7 +596,7 @@ def main() -> int:
     print(f"running {len(chosen)} mutant(s) — each must be KILLED (a NEW test goes red)\n")
     survived, stale = [], []
     for mut in chosen:
-        name, killed, detail = _run(mut, args.keep, base_failing)
+        name, killed, detail = _run(mut, args.keep, base_failing, base_asserts)
         tag = "KILLED  " if killed else ("ANCHOR  " if detail.startswith("ANCHOR") else "SURVIVED")
         print(f"  {tag}  {name:32} {detail}")
         if detail.startswith("ANCHOR"):
@@ -545,8 +619,9 @@ def main() -> int:
         return 1
     if base_failing:
         print(f"all mutants killed — every catalogued control is genuinely verified "
-              f"(each by a NEW failure, against a baseline that already had "
-              f"{len(base_failing)})")
+              f"(each attributed against a baseline that already had {len(base_failing)} "
+              f"failure(s): a NEW test failing, or an already-failing one failing at a "
+              f"DIFFERENT assert)")
     else:
         print("all mutants killed — every catalogued control is genuinely verified")
     return 0
