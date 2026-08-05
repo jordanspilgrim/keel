@@ -119,10 +119,25 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      '_NAME_TOK = r"[A-Z][a-z]+"',
      "R15: name redaction becomes 100% ASCII / 0% diacritics, apostrophes, non-Latin"),
 
-    ("strong_cue_inlines_a_broken_token", "agent/guardrails.py",
+    # ANCHOR REPAIR, and it is a SPLIT rather than a re-point. Before Phase 1 ONE pattern
+    # carried both strong-cue families — `(my name is|name's|name is|i'm called|call me|they
+    # call me)` — so one mutant covered both. Phase 1's 4b0f3f5 split it into (a1) DECLARATION
+    # and (a1b) ADDRESS, which duplicated the anchored line and left the anchor ambiguous
+    # (2 matches -> ANCHOR MISS). Re-pointing at EITHER half alone would silently drop the
+    # other from coverage while reporting a clean KILL, so the mutant follows the split.
+    ("strong_cue_declaration_inlines_a_broken_token", "agent/guardrails.py",
+     '    (re.compile(r"\\b(?i:(my name is|name\'s|name is|i\'m called))"\n'
      '                r"\\s+((?:%s)(?:\\s+(?:%s)){0,2})" % (_NAME_TOK, _NAME_TOK)),',
+     '    (re.compile(r"\\b(?i:(my name is|name\'s|name is|i\'m called))"\n'
      '                r"\\s+((?:[^\\\\W\\\\d_]+)(?:\\\\s+(?:[^\\\\W\\\\d_]+)){0,2})"),',
      "R16 CRITICAL: 'my name is William' leaks entirely AND reports types=[]"),
+
+    ("strong_cue_address_inlines_a_broken_token", "agent/guardrails.py",
+     '    (re.compile(r"\\b(?i:(call me|they call me))"\n'
+     '                r"\\s+((?:%s)(?:\\s+(?:%s)){0,2})" % (_NAME_TOK, _NAME_TOK)),',
+     '    (re.compile(r"\\b(?i:(call me|they call me))"\n'
+     '                r"\\s+((?:[^\\\\W\\\\d_]+)(?:\\\\s+(?:[^\\\\W\\\\d_]+)){0,2})"),',
+     "R16 CRITICAL, address half: 'call me William' leaks entirely AND reports types=[]"),
 
     ("credentials_keep_the_value", "agent/guardrails.py",
      '        out = _CREDENTIALS.sub(r"\\1[REDACTED_SECRET]", out)',

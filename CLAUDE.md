@@ -19,13 +19,17 @@ hooks). Without it, `.claude/project.md` has nothing to drive. Deliberately not 
    generic "Keel-like POC" example in the harness schema, which names `run_demo.py` as the
    definition of done. It is wrong for this repo.
 
-2. **The gates were lying. They are now RED on purpose.** Pass 17 confirmed all three verification
-   mechanisms were themselves defective — the orthography grid pinned capitalisation, the redaction
-   oracle read only the leading token, and `mutate.py`'s completeness check was circular. All three
-   are repaired (Phase 0, merged). Repairing them is what turned both gates red: they now fail
-   against defects that were always there and that they previously could not see. **A green result
-   from either gate today means something was reverted, not that the work is done.** See *Gates*
-   below before acting on a failure.
+2. **The gates were lying. `pytest` is still RED on purpose; `mutate.py` is green and earned it.**
+   Pass 17 confirmed all three verification mechanisms were themselves defective — the orthography
+   grid pinned capitalisation, the redaction oracle read only the leading token, and `mutate.py`'s
+   completeness check was circular. All three are repaired (Phase 0, merged). Repairing them is
+   what turned both gates red at the time: they began failing against defects that were always
+   there and that they previously could not see. **`mutate.py` has since gone green by being
+   satisfied — 30 of 30 mutants killed, each by a failure the baseline did not have — so a green
+   `mutate.py` is the expected result and not a sign anything was undone.** **A green `pytest`,
+   however, still means a gate was reverted**: its one remaining failure is the multi-token
+   continuation-walk residual, which no test edit should ever clear. See *Gates* below before
+   acting on either.
 
 3. **Verify the artifact, not the report.** The repo's most persistent defect class is a control
    that reports success while not providing the property. Check *is the secret gone*, never *did
@@ -35,13 +39,21 @@ hooks). Without it, `.claude/project.md` has nothing to drive. Deliberately not 
 
 ```bash
 .venv/bin/python -m pytest tests/ -q      # expect exit 1, 1 FAILED — see below
-.venv/bin/python scripts/mutate.py        # expect exit 1, 28 KILLED / 1 ANCHOR MISS — see below
+.venv/bin/python scripts/mutate.py        # expect exit 0, 30/30 KILLED — see below
 ```
 
-**BOTH GATES ARE EXPECTED TO BE RED RIGHT NOW. BOTH REDS ARE THE DELIVERABLE, NOT A REGRESSION.**
+**`pytest` IS EXPECTED TO BE RED. `mutate.py` IS NOW GREEN, AND THAT IS NEW.**
 A repaired gate has to be shown FAILING against the defect it exists to catch, before that defect
 is fixed — otherwise you never learn whether it would have caught anything. So Phase 0 repaired the
 gates and deliberately stopped there; Phase 1 fixes the code underneath them and turns them green.
+
+**`mutate.py` has now reached that point and prints _"every catalogued control is genuinely
+verified"_.** Treat that sentence with the history it carries: R17 M22 measured it printing on a
+tree with four safety controls physically deleted, by a completeness check that could not detect
+its own falsity. What makes it mean something now is that the check reads an independent register
+(`docs/controls.json`), the catalogue is complete at 30 = 30, and every kill is attributed to a
+failure the baseline did not already have. **If it ever prints on a red or incomplete run again,
+that is a defect, not a pass.**
 
 **`pytest` is EXPECTED to fail on exactly one test.** Phase 0.1 unpinned the fairness grid's case
 axis and 0.2 made the redaction oracle check every token instead of the leading one. Phase 1 then

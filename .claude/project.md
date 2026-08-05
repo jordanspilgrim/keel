@@ -6,8 +6,8 @@ stack: "Python 3.14 + OpenAI SDK; pytest 8; SQLite (keel.db, untracked); FastAPI
 base_ref: origin/main
 worktree_isolation: true
 check_cmd: none # no ruff/mypy/flake8/black/pyright installed or declared — do NOT invent one
-test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 457 collected, 1 named fairness failure (the multi-token residual) — see 'Both gates are RED on purpose' below. Do NOT revert the gate to make it green.
-definition_of_done: "pytest green AND scripts/mutate.py reports all mutants killed — BUT NOT YET, and do not chase either one today: both gates are DELIBERATELY RED mid-remediation (see 'Both gates are RED on purpose' below), so a green result right now means a gate was reverted, not that the work is done. Green is the Phase 1 target, not the current state. A fix is not done until the gate verifying it has itself been attacked with the MIRROR IMAGE of the defect it exists to catch. Exit bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM / <=2 LOW / 0 unverified."
+test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 457 collected, 1 named fairness failure (the multi-token residual) — see 'The gate state, and why' below. Do NOT revert the gate to make it green.
+definition_of_done: "pytest green AND scripts/mutate.py reports all mutants killed. scripts/mutate.py IS now green and it was earned — 30 of 30 killed, each by a failure the baseline did not have. pytest is still DELIBERATELY RED on one test (see 'The gate state, and why' below), so a green pytest right now would mean a gate was reverted, not that the work is done. A fix is not done until the gate verifying it has itself been attacked with the MIRROR IMAGE of the defect it exists to catch. Exit bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM / <=2 LOW / 0 unverified."
 deploy_targets: none
 acceptance: none # local POC; there is no deploy and no acceptance environment
 product_context: "Portfolio POC of an AI customer-retention flywheel (Act / Measure / Learn) on synthetic data. Its entire value is that its published claims are true, so a false claim is as severe as a crash."
@@ -16,10 +16,11 @@ roster_profile: small
 top_tier_model: claude-opus-5
 ```
 
-## Both gates are RED on purpose — read this before "fixing" either one
+## The gate state, and why — read this before "fixing" either one
 
-**`pytest` fails on one test and `scripts/mutate.py` exits 1. Both reds are the deliverable.**
-A green result from either one today means a gate was reverted, not that the work is done.
+**`pytest` fails on one test — deliberately. `scripts/mutate.py` now exits 0, and that is EARNED
+rather than reverted:** 30 of 30 mutants killed, each by a failure the baseline did not have.
+A green `pytest` today would still mean a gate was reverted; a green `mutate.py` no longer does.
 
 Pass 17 confirmed all three verification mechanisms were themselves defective — the cue x
 orthography grid pinned initial capitalisation while certifying `orthography_symmetric`;
@@ -43,7 +44,7 @@ there deliberately, and Phase 1 fixes the code underneath.
   transcript under a `types=['name']` all-clear. That gate demands every rate == 1.0, so it stays
   red until the continuation walk is fixed. Two open-class over-redaction residuals are asserted
   as current behaviour in `tests/test_redaction_control.py` so they are counted, not described.
-- **`scripts/mutate.py`** — exits 1 with **28 KILLED · 0 SURVIVED · 1 ANCHOR MISS** of 29
+- **`scripts/mutate.py`** — exits 0: **30 KILLED · 0 SURVIVED · 0 ANCHOR MISS** of 30
   mutants, measured on this tree. Its expectation comes from `docs/controls.json` rather than from
   a literal inside `mutate.py` whose keys were the mutant names, so the catalogue is complete
   (29 claims = 29 mutants). A SURVIVOR means the control can be deleted with the suite unchanged —
