@@ -7,7 +7,7 @@ base_ref: origin/main
 worktree_isolation: true
 check_cmd: none # no ruff/mypy/flake8/black/pyright installed or declared — do NOT invent one
 test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 494 collected, 1 named fairness failure (the multi-token residual) — see 'The gate state, and why' below. Do NOT revert the gate to make it green.
-definition_of_done: "pytest green AND scripts/mutate.py reports all mutants killed. scripts/mutate.py IS now green and it was earned — 30 of 30 killed, each by a failure the baseline did not have. pytest is still DELIBERATELY RED on one test (see 'The gate state, and why' below), so a green pytest right now would mean a gate was reverted, not that the work is done. A fix is not done until the gate verifying it has itself been attacked with the MIRROR IMAGE of the defect it exists to catch. Exit bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM / <=2 LOW / 0 unverified."
+definition_of_done: "pytest green AND scripts/mutate.py reports all mutants killed. scripts/mutate.py IS now green and it was earned — 30 of 30 killed, each attributed against a baseline that already had a failure: a NEW test failing, or an already-failing one failing at a DIFFERENT assert. pytest is still DELIBERATELY RED on one test (see 'The gate state, and why' below), so a green pytest right now would mean a gate was reverted, not that the work is done. A fix is not done until the gate verifying it has itself been attacked with the MIRROR IMAGE of the defect it exists to catch. Exit bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM / <=2 LOW / 0 unverified."
 deploy_targets: none
 acceptance: none # local POC; there is no deploy and no acceptance environment
 product_context: "Portfolio POC of an AI customer-retention flywheel (Act / Measure / Learn) on synthetic data. Its entire value is that its published claims are true, so a false claim is as severe as a crash."
@@ -19,7 +19,8 @@ top_tier_model: claude-opus-5
 ## The gate state, and why — read this before "fixing" either one
 
 **`pytest` fails on one test — deliberately. `scripts/mutate.py` now exits 0, and that is EARNED
-rather than reverted:** 30 of 30 mutants killed, each by a failure the baseline did not have.
+rather than reverted:** 30 of 30 mutants killed, each attributed against a baseline that already
+had a failure — a NEW test failing, or an already-failing one failing at a DIFFERENT assert.
 A green `pytest` today would still mean a gate was reverted; a green `mutate.py` no longer does.
 
 Pass 17 confirmed all three verification mechanisms were themselves defective — the cue x

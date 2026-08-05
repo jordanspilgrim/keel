@@ -25,8 +25,13 @@ hooks). Without it, `.claude/project.md` has nothing to drive. Deliberately not 
    completeness check was circular. All three are repaired (Phase 0, merged). Repairing them is
    what turned both gates red at the time: they began failing against defects that were always
    there and that they previously could not see. **`mutate.py` has since gone green by being
-   satisfied — 30 of 30 mutants killed, each by a failure the baseline did not have — so a green
-   `mutate.py` is the expected result and not a sign anything was undone.** **A green `pytest`,
+   satisfied — 30 of 30 mutants killed, each attributed against a baseline that already had a
+   failure: **a NEW test failing, OR an already-failing one failing at a DIFFERENT assert.**
+   (That second route is the harness's own wording and it is load-bearing — the one-route
+   version of this sentence was true when written and went stale the moment `18fff07` widened
+   the rule. `mutate.py` corrected the identical claim inside itself in that commit and left
+   this copy standing.) **So a green `mutate.py` is the expected result and not a sign anything
+   was undone.** **A green `pytest`,
    however, still means a gate was reverted**: its one remaining failure is the multi-token
    continuation-walk residual, which no test edit should ever clear. See *Gates* below before
    acting on either.
@@ -99,12 +104,14 @@ exist, and 7 of them SURVIVE**: those controls can be deleted with the suite unc
 nothing tests them. Among them are all three kill-switch floors, the money demo's independent
 variable, and all three judge-calibration gates. Writing those tests is the next item.
 
-One further row is NOT part of the 12: `proxy_probe_single_cue` SURVIVES, but it is **masked
-rather than unguarded**. Measured — its guard is `test_the_probe_covers_a_cue_grid_not_a_single
-_phrasing`, which asserts `len(_PROBE_CUES) >= 4` and does catch the mutation; that test is
-simply already failing at baseline on a different assert, so no NEW failure appears. It should
-kill again once Phase 1 turns the redactor green. `proxy_boolean_oracle` was an ANCHOR MISS for
-the same window (0.2 rewrote `_name_survives`) and its anchor is now re-pointed and killing.
+One further row was NOT part of the 12: `proxy_probe_single_cue` SURVIVED for a window, MASKED
+rather than unguarded — its guard `test_the_probe_covers_a_cue_grid_not_a_single_phrasing` did
+catch the mutation, but that test was already failing at baseline on a different assert, so no
+NEW failure appeared. **It KILLS now** (verified on this tree: `KILLED proxy_probe_single_cue`,
+1 NEW test failure), because Phase 1 turned that test green. The prediction recorded here was
+correct and this line is the record of it resolving, not an open item.
+`proxy_boolean_oracle` was an ANCHOR MISS for the same window (0.2 rewrote `_name_survives`);
+its anchor is re-pointed and it kills too.
 
 **Do not "fix" this by reverting the gate, deleting register entries, or relaxing the check.**
 
