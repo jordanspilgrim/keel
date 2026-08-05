@@ -35,7 +35,7 @@ hooks). Without it, `.claude/project.md` has nothing to drive. Deliberately not 
 
 ```bash
 .venv/bin/python -m pytest tests/ -q      # expect exit 1, 1 FAILED — see below
-.venv/bin/python scripts/mutate.py        # expect exit 1, 21K / 7 SURVIVED / 1 ANCHOR — see below
+.venv/bin/python scripts/mutate.py        # expect exit 1, 28 KILLED / 1 ANCHOR MISS — see below
 ```
 
 **BOTH GATES ARE EXPECTED TO BE RED RIGHT NOW. BOTH REDS ARE THE DELIVERABLE, NOT A REGRESSION.**
@@ -62,8 +62,8 @@ continuation-token walk still requires uppercase on tokens 2+, so `Emily watson`
 cue. That gate asserts every orthography rate == 1.0, so it stays red until the continuation walk
 is fixed — **a still-red gate here is the known residual, not evidence a fix failed.**
 
-450 collected. **With `keel.db` present** (the primary tree): `1 failed, 449 passed`.
-**Without it** (any fresh worktree — `keel.db` is gitignored): `1 failed, 446 passed, 3 skipped`, the 3 skips being the committed-artifact tests. Two threads read different numbers off
+457 collected. **With `keel.db` present** (the primary tree): `1 failed, 456 passed`.
+**Without it** (any fresh worktree — `keel.db` is gitignored): `1 failed, 453 passed, 3 skipped`, the 3 skips being the committed-artifact tests. Two threads read different numbers off
 this and both were right; state which tree you ran in.
 
 **Do not "fix" this by reverting the fairness gate, weakening the grid, skipping the test, or
