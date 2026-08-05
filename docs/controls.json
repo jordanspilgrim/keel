@@ -115,8 +115,18 @@
       ]
     },
     {
-      "id": "strong_cue_inlines_a_broken_token",
-      "claim": "the strongest name cue redacts every orthography",
+      "id": "strong_cue_declaration_inlines_a_broken_token",
+      "claim": "the DECLARATION name cue ('my name is X') redacts every orthography",
+      "published_in": [
+        {
+          "file": "README.md",
+          "anchor": "heuristic self-identified names & street addresses"
+        }
+      ]
+    },
+    {
+      "id": "strong_cue_address_inlines_a_broken_token",
+      "claim": "the ADDRESS name cue ('call me X') redacts every orthography",
       "published_in": [
         {
           "file": "README.md",
