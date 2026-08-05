@@ -6,7 +6,7 @@ stack: "Python 3.14 + OpenAI SDK; pytest 8; SQLite (keel.db, untracked); FastAPI
 base_ref: origin/main
 worktree_isolation: true
 check_cmd: none # no ruff/mypy/flake8/black/pyright installed or declared — do NOT invent one
-test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 449 collected, 1 named fairness failure (the multi-token residual) — see 'Both gates are RED on purpose' below. Do NOT revert the gate to make it green.
+test_cmd: ".venv/bin/python -m pytest tests/ -q" # DELIBERATELY RED: expect exit 1, 450 collected, 1 named fairness failure (the multi-token residual) — see 'Both gates are RED on purpose' below. Do NOT revert the gate to make it green.
 definition_of_done: "pytest green AND scripts/mutate.py reports all mutants killed — BUT NOT YET, and do not chase either one today: both gates are DELIBERATELY RED mid-remediation (see 'Both gates are RED on purpose' below), so a green result right now means a gate was reverted, not that the work is done. Green is the Phase 1 target, not the current state. A fix is not done until the gate verifying it has itself been attacked with the MIRROR IMAGE of the defect it exists to catch. Exit bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM / <=2 LOW / 0 unverified."
 deploy_targets: none
 acceptance: none # local POC; there is no deploy and no acceptance environment
@@ -18,7 +18,7 @@ top_tier_model: claude-opus-5
 
 ## Both gates are RED on purpose — read this before "fixing" either one
 
-**`pytest` fails on one test and `scripts/mutate.py` exits 2. Both reds are the deliverable.**
+**`pytest` fails on one test and `scripts/mutate.py` exits 1. Both reds are the deliverable.**
 A green result from either one today means a gate was reverted, not that the work is done.
 
 Pass 17 confirmed all three verification mechanisms were themselves defective — the cue x
@@ -32,8 +32,8 @@ the defect it exists to catch, before that defect is fixed — otherwise you onl
 green afterwards, which is the position this whole exercise exists to escape. So Phase 0 stopped
 there deliberately, and Phase 1 fixes the code underneath.
 
-- **`pytest`** — 449 collected. `1 failed, 448 passed` with `keel.db` present;
-  `1 failed, 445 passed, 3 skipped` without it (any fresh worktree — `keel.db` is
+- **`pytest`** — 450 collected. `1 failed, 449 passed` with `keel.db` present;
+  `1 failed, 446 passed, 3 skipped` without it (any fresh worktree — `keel.db` is
   gitignored, and the 3 skips are the committed-artifact tests). The one failure is
   `tests/test_guardrails.py::test_the_fairness_gate_checks_orthography_not_just_group`.
   Phase 1 closed the single-token half of the leak — a lowercase self-identified name is now
@@ -43,9 +43,16 @@ there deliberately, and Phase 1 fixes the code underneath.
   transcript under a `types=['name']` all-clear. That gate demands every rate == 1.0, so it stays
   red until the continuation walk is fixed. Two open-class over-redaction residuals are asserted
   as current behaviour in `tests/test_redaction_control.py` so they are counted, not described.
-- **`scripts/mutate.py`** — exits 2 with `CATALOGUE INCOMPLETE`, naming 12 publicly-claimed controls
-  that have no mutant. Its expectation now comes from `docs/controls.json` rather than from a
-  literal inside `mutate.py` whose keys were the mutant names. Counterpart fix: Phase 5.
+- **`scripts/mutate.py`** — exits 1 with **21 KILLED · 7 SURVIVED · 1 ANCHOR MISS** of 29
+  mutants, measured on this tree. Its expectation comes from `docs/controls.json` rather than from
+  a literal inside `mutate.py` whose keys were the mutant names, so the catalogue is complete
+  (29 claims = 29 mutants). A SURVIVOR means the control can be deleted with the suite unchanged —
+  nothing tests it. The 7 are the three kill-switch floors, the money demo's independent variable,
+  and all three judge-calibration gates; writing those tests is the next item.
+  The ANCHOR MISS is `strong_cue_inlines_a_broken_token`: Phase 1 (`4b0f3f5`) duplicated the
+  anchored line in `agent/guardrails.py`, so it now matches TWICE and the harness refuses to guess
+  which — 1 occurrence at `4df6f13`, 2 at `a3a57ff`. An anchor miss is not a coverage claim in
+  either direction; that control is currently tested by nothing.
 
 **Do not close either red by reverting a gate, weakening the grid, skipping the test, deleting
 register entries, or relaxing the completeness check.**

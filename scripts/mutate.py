@@ -141,9 +141,14 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      '_PROBE_CUES = [\n    "Hi, this is {n}. I want to cancel.",\n]',
      "R16 M3: the fairness probe reverts to one cue — R16's CRITICAL lived in a cue it never sent"),
 
+    # ANCHOR RE-POINTED. Phase 0.2 rewrote `_name_survives` from `name.split()[0] in out` to
+    # `any(tok in out for tok in name.split())`, so this mutant's anchor stopped matching and
+    # the harness reported ANCHOR MISS — the control tested in NEITHER direction, which says
+    # less than a survivor does. The fix moved the code out from under the mutant guarding it,
+    # and it was invisible for the whole window in which the harness could not run.
     ("proxy_boolean_oracle", "evals/agent_fairness.py",
      '    out, _types = guardrails.redact_pii(cue.format(n=name))\n'
-     '    return name.split()[0] in out',
+     '    return any(tok in out for tok in name.split())',
      '    out, _types = guardrails.redact_pii(cue.format(n=name))\n'
      '    return not _types',
      "R16 M3: a PARTIAL redaction (name survives, type reported) passes the fairness gate"),
@@ -154,6 +159,70 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      '    return loaded if isinstance(loaded, dict) else None',
      '    return json.loads(row["recommendation"])',
      "R16 M5: citing an ephemeral signal id raises JSONDecodeError out of a `dict | None` API"),
+
+    # --- the 12 controls the repaired completeness check (R17 M22) surfaced as claimed-but-
+    # --- unmutated. Each names a control the repo PUBLICLY claims in docs/controls.json.
+
+    ("eval_pass_rate_floor", "agent/safety.py",
+     "        if pass_rate < config.EVAL_PASS_RATE_FLOOR:\n",
+     "        if False:  # eval pass-rate floor removed\n",
+     "R17 H8: a below-floor eval pass rate no longer forces safe mode"),
+
+    ("eval_coverage_floor", "agent/safety.py",
+     "        if coverage < _COVERAGE_FLOOR:\n",
+     "        if False:  # eval coverage floor removed\n",
+     "R17 H8: below-floor eval coverage no longer forces safe mode"),
+
+    ("guardrail_health_freshness", "agent/safety.py",
+     "        if age is not None and age > config.GUARDRAIL_HEALTH_MAX_AGE_DAYS:\n",
+     "        if False:  # freshness gate removed\n",
+     "R17 H7: a stale guardrail-health result keeps authorizing normal mode"),
+
+    ("discounts_enabled_lever", "agent/policy.py",
+     "        if not DISCOUNTS_ENABLED:\n",
+     "        if False:  # discount lever ignored\n",
+     "R17 M21: the baseline arm authorizes discounts, collapsing the A/B contrast"),
+
+    ("eval_metrics_current_spec_only", "evals/judge.py",
+     "\"SELECT count(*) FROM evals WHERE rubric_version = ? AND verdict = 'pass'\",",
+     "\"SELECT count(*) FROM evals WHERE ? IS NOT NULL AND verdict = 'pass'\",",
+     "R17 H2: superseded-spec grades are counted, so a pass rate can exceed 100%"),
+
+    ("golden_agreement_floor", "evals/run_evals.py",
+     "agreement >= AGREEMENT_FLOOR,",
+     "agreement >= 0.0,",
+     "EV-B5: the golden set stops gating on judge-vs-human agreement"),
+
+    ("judge_calibration_mae_floor", "evals/run_evals.py",
+     "\"mae_within_tolerance\": mae <= CALIBRATION_MAE_FLOOR,",
+     "\"mae_within_tolerance\": True,",
+     "EV-B5: judge calibration is reported as within tolerance whatever the error"),
+
+    ("judge_injection_fixture_held", "evals/run_evals.py",
+     '            "injection_fixture_held": (\n                any("injection" in d["name"] for d in details)\n'
+     '                and all(d["judge"] == "fail" for d in details if "injection" in d["name"])),',
+     '            "injection_fixture_held": True,',
+     "EV-B5: a judge fooled by the embedded 'give all 5s' attack reports as resistant"),
+
+    ("eval_coverage_counts_judge_failures", "evals/run_evals.py",
+     "        else:  # coverage miss (build OR judge failure) — recorded, not dropped\n",
+     "        elif False:  # coverage miss silently dropped\n",
+     "R12: a judge failure becomes a silent drop instead of a recorded coverage miss"),
+
+    ("canonical_eval_metrics_single_source", "dashboard/export.py",
+     "    passes, graded = judge.current_spec_eval_counts(conn)\n",
+     "    passes, graded = total, total  # local definition, diverged from canonical\n",
+     "keel-r2 F15: the dashboard's eval metrics diverge from the kill switch's"),
+
+    ("demo_requires_paired_cohort", "run_demo.py",
+     "    return bool(paired) and before_n == after_n and after_convs > 0",
+     "    return True  # any run is reportable",
+     "R17 H5: an unpaired or empty-arm run is reported and counted toward the median"),
+
+    ("margin_adjusted_metric_cannot_be_gamed", "economics.py",
+     "        return round(price * config.PAUSE_MARGIN_FRACTION * months, 2)",
+     "        return 0.0  # a pause is charged nothing",
+     "R17 M25: the north star stops being margin-adjusted for pauses, so raw saves game it"),
 
     ("resolve_signal_ignores_run", "analytics/themes.py",
      '    if row is None or row["run_id"] != run_id:\n        return None',

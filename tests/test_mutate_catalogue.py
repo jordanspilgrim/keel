@@ -17,6 +17,7 @@ baseline, so exercising it costs nothing.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -52,14 +53,50 @@ def test_the_shipped_register_parses_and_every_claim_is_still_published():
         f"{unpublished}")
 
 
-def test_the_register_is_not_derived_from_the_mutant_table():
-    """The anti-circularity property itself. If every claim id were simply a mutant name, the
-    register would be a restatement of MUTANTS and the check would be a tautology again."""
+def test_no_claim_takes_its_provenance_from_the_harness_it_checks():
+    """The anti-circularity property, stated correctly at the second attempt.
+
+    THE FIRST VERSION WAS WRONG AND THE COMPLETED CATALOGUE IS WHAT SHOWED IT. It asserted
+    `set(claims) - {mutant names}` is non-empty, reasoning that a register collapsed onto the
+    catalogue would have no claim the catalogue lacked. But check (a) matches claims to mutants
+    BY ID, so a register whose every claim has a mutant necessarily has nothing outside the
+    mutant table. That assertion therefore demanded the catalogue stay permanently INCOMPLETE —
+    **it forbade the goal state**, and it fired the moment the last of the 12 mutants landed.
+
+    Id-overlap never carried independence; review said so before this fired ("17 of your 29 ids
+    already ARE mutant names — the ANCHOR is the mechanism"). What makes the register
+    non-circular is that every claim is pinned to a literal string in a PUBLISHED document, so
+    the expectation is checkable against the docs rather than against `mutate.py`. That holds
+    whether the catalogue is complete or not.
+
+    So this checks the circularity directly: no claim may cite the harness as its own source.
+    """
     claims = mutate.load_claims()
-    named = {m[0] for m in mutate.MUTANTS}
-    assert set(claims) - named, (
-        "every claimed control is also a mutant name — the register has collapsed back onto "
-        "the catalogue it is supposed to be independent of")
+    assert claims
+    for cid, entry in claims.items():
+        for src in entry["published_in"]:
+            assert src["file"] not in _non_independent_sources(), (
+                f"control {cid!r} cites {src['file']} as its published claim — that is the "
+                f"R17 M22 circularity: an expectation derived from the artifact it checks")
+
+
+def _non_independent_sources() -> set[str]:
+    """The artifacts a claim may NOT cite as its own published source, DERIVED rather than
+    listed: the harness that reads the register, and the register itself.
+
+    A hand-written exclusion list would be the curated-vs-generated defect — the same trade
+    rejected when an allowlist was the only way to save the `test_*`-identifier design. A
+    curated list here would have named `mutate.py` and stopped, which is exactly what the first
+    version did: it excluded the harness and left the REGISTER citable as its own source. A
+    claim whose `published_in` points at `docs/controls.json` resolves trivially, because the
+    register contains its own claim text by construction — M22 with the circle drawn one file
+    tighter.
+
+    Deriving from the constants that already exist means a future third non-independent source
+    is covered the moment it becomes a constant, instead of when someone remembers to add it.
+    """
+    return {os.path.relpath(p, mutate.ROOT)
+            for p in (mutate.CLAIMS_PATH, os.path.abspath(mutate.__file__))}
 
 
 # --- direction 1: claimed, but no mutant (the check M22 showed was a tautology) ----------
@@ -197,3 +234,22 @@ def test_a_complete_catalogue_reports_nothing(tmp_path):
     path = _write(tmp_path, _register(_entry("covered")))
     claims = mutate.load_claims(path)
     assert mutate.catalogue_report(claims, ["covered"]) == (0, [])
+
+
+def test_a_claim_citing_the_register_itself_is_caught():
+    """The case the first version of the anti-circularity test missed: it excluded the harness
+    and left the REGISTER citable as its own source. `docs/controls.json` contains every claim's
+    text by construction, so such an anchor resolves trivially and the provenance check reports
+    nothing — M22 with the circle drawn one file tighter. Shown here rather than asserted."""
+    register_rel = os.path.relpath(mutate.CLAIMS_PATH, mutate.ROOT)
+    # Any real claim's own text is, by construction, present in the register — which is the
+    # whole point: a self-citing anchor cannot fail to resolve.
+    own_text = next(iter(mutate.load_claims().values()))["claim"]
+    self_citing = {"c": {"claim": own_text,
+                         "published_in": [{"file": register_rel, "anchor": own_text}]}}
+
+    _u, _o, unpublished = mutate.catalogue_gaps(self_citing, ["c"])
+    assert unpublished == [], (
+        "precondition: a claim citing the register resolves trivially, so the provenance "
+        "check cannot see it — that is why the derived rule below is the only thing that can")
+    assert register_rel in _non_independent_sources()
